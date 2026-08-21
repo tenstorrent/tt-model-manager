@@ -37,6 +37,54 @@ and both serve the same way. There are exactly two schemas:
 
 Older bundles (pre-v5 schemas) are refused: *re-publish the bundle with a current tt-model.*
 
+## How models are packaged (v5 self-contained — recommended)
+
+> **New here?** The copy-paste, end-to-end recipe is
+> **[docs/E2E_RECIPE.md](docs/E2E_RECIPE.md)**: model → package → push → pull → serve.
+
+The recommended format is a **self-contained (v5) bundle** — *"package what's on your box."* One
+Hugging Face **model** repo carries everything needed to run, so a consumer needs **only a TT card
++ firmware** — no tt-cli, no pre-provisioned tt-metal, no host vLLM:
+
+```
+wheels/            the author's built ttnn wheel (custom C++/LLK kernels compiled in),
+                   base vLLM + plugin wheels, and the vendored dependency closure   (git-LFS)
+metal/             the author's modified tt-metal-community tree (Python blocks + model code)
+vllm_models/<name>/vllm_metadata.json     the plugin's EXTRA_MODELS_DIR contract
+install.sh  run.sh  requirements.txt      generated launcher + installer
+tt_kernel_manifest.json                   the v5 manifest
+# weights: NOT embedded — a pointer (HF repo id) in the manifest, fetched on pull/serve
+```
+
+**Why this shape:**
+
+- **Self-contained, not "kernels-less."** The engine that runs is the author's actual build (their
+  kernels ride along inside the `ttnn` wheel), not a stock pin — so custom C++/LLK kernels just work.
+- **The folder is a hard wall.** After `pull`, everything needed to serve lives *under the install
+  directory* — the pinned interpreter (provisioned by `uv` into the folder), the venv, the engine,
+  the model code, and, on first serve, the weights and all caches. Serving depends on nothing
+  outside the folder except the TT device and system libc. Only `pull` touches the network.
+- **Portable across machines.** The `ttnn` wheel is made portable with `auditwheel` (vendored libs +
+  `$ORIGIN` RPATH); deps are vendored so install is offline + reproducible; `pull` verifies the
+  wheel's interpreter/arch/**glibc** floor and fails clearly on a mismatch instead of at runtime.
+  Build the engine wheel on **Ubuntu 22.04 (glibc 2.35)** and one bundle runs on both 22.04 and 24.04.
+- **Weights stay a pointer** — they're large and shared, so the manifest references the HF repo id.
+
+```bash
+# Producer — capture what's on your box and publish
+tt-model package <org>/<model> --from-metal . --wheels-dir ./wheels \
+  --arch blackhole --arch-name LlamaForCausalLM \
+  --main-class models.tt_transformers.tt.generator_vllm:LlamaForCausalLM \
+  --weights unsloth/Llama-3.2-3B-Instruct --mesh P150 --vendor-deps --repair
+
+# Consumer — only a card + firmware needed
+tt-model pull  <org>/<model>
+tt-model serve <org>/<model>
+```
+
+Full details: **[docs/self_contained_packages.md](docs/self_contained_packages.md)**.
+The older v4 "kernels-less" and legacy dispatch paths are documented below.
+
 ## Install
 
 `tt-model` itself is a normal Python package:

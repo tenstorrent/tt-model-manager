@@ -1,5 +1,8 @@
 # Self-contained (v5) model packages
 
+> For the copy-paste, step-by-step walkthrough, see **[E2E_RECIPE.md](E2E_RECIPE.md)**
+> (model → package → push → pull → serve). This document is the design + testing reference.
+
 A **self-contained bundle** ships the platform *inside* the package: the author's built `ttnn`
 wheel (custom C++/LLK kernels compiled in), optionally the base vLLM + plugin wheels, and their
 modified `tt-metal-community` tree — plus a generated `install.sh`/`run.sh` and a v5 manifest.
@@ -48,7 +51,7 @@ The producer/consumer logic is fully unit-tested with mocked pip + HF:
 pytest tests/test_v5.py                    # manifest v5 schema, self-contained compare() rules
 pytest tests/test_packaging.py             # stage_package layout, wheel-tag parsing, CLI stage-only
 pytest tests/test_self_contained_install.py # pull installs into a venv; serve runs run.sh
-pytest                                     # full offline suite (expected: 119 passed)
+pytest                                     # full offline suite (no hardware, no network)
 ```
 
 ### Hardware smoke (a TT card)
@@ -65,7 +68,9 @@ bash /tmp/bundle/install.sh /tmp/bundle/venv
 
 # 3. sanity: the bundle venv opens the device (find_spec avoids the import-before-preload trap)
 TTNN=$(/tmp/bundle/venv/bin/python -c 'import importlib.util,os;print(os.path.dirname(importlib.util.find_spec("ttnn").origin))')
-LD_PRELOAD=$TTNN/build/lib/_ttnncpp.so TT_METAL_HOME=$TTNN TT_METAL_VISIBLE_DEVICES=0 \
+# a repaired wheel keeps _ttnncpp.so in ttnn.libs/ (RPATH target); a raw one in build/lib/ — prefer the former
+PRELOAD=$(ls "$TTNN"/../*.libs/_ttnncpp*.so 2>/dev/null | head -1); [ -n "$PRELOAD" ] || PRELOAD=$(ls "$TTNN"/build/lib/_ttnncpp*.so | head -1)
+LD_PRELOAD=$PRELOAD TT_METAL_HOME=$TTNN TT_METAL_VISIBLE_DEVICES=0 \
   /tmp/bundle/venv/bin/python -c "import ttnn; d=ttnn.open_mesh_device(ttnn.MeshShape(1,1)); print(d.arch()); ttnn.close_mesh_device(d)"
 ```
 **Expected:** `Arch.BLACKHOLE`, clean close. A full generation (the tt_transformers demo run from
@@ -81,9 +86,11 @@ the bundle venv) produces coherent text at ~75 tok/s/user on a single p150.
   not the bundle root — the plugin scans children, so a root-level file registers 0 architectures.
 - **`HF_MODEL` must be exported** for serving: the tt_transformers adapter reads it from the env, not
   from vLLM's `--model` (both are set by `run.sh`).
-- pip may warn that vLLM wants `pydantic>=2.12` while `tt_transformers` pins `2.9.2`; validated
-  end-to-end on a p150 that vLLM serves correctly under 2.9.2 (the warning is a metadata mismatch,
-  not a runtime break). Reconcile the pin if a future vLLM feature needs 2.12.
+- Dependency pins must satisfy **both** vLLM and `tt_transformers` under uv's *strict* resolver
+  (pip is lenient and hid this). E.g. `tt_transformers` pinning `pydantic==2.9.2` conflicts with
+  vLLM's floor — relax such exact pins to a floor (`pydantic>=2.9.2`) in the metal tree's
+  `requirements.txt`. `--vendor-deps` resolves the whole closure (platform wheels + requirements)
+  together at package time, so a conflict surfaces on the producer, not at the consumer's install.
 
 ## Validated end-to-end
 The full loop — `package` → push to HF → `pull` (install-the-platform into the bundle venv) →
@@ -117,6 +124,21 @@ author's box. These are now closed by construction:
   (the host Python no longer has to match) and installs **offline from the vendored dependency
   wheels** (`--vendor-deps`, default) — no PyPI/resolver drift, no network at install. The pinned
   version and vendored flag are recorded in the manifest.
+- **Hermetic — the folder is the wall.** The interpreter is provisioned *into the bundle*
+  (`UV_PYTHON_INSTALL_DIR=$HERE/.python`), the venv is built `--relocatable` with `--link-mode=copy`
+  (package contents copied in, not hardlinked to uv's global cache), and `run.sh` redirects every
+  cache/home under `$HERE` — `HF_HOME`, `TT_CACHE_PATH`/`TT_CACHE_HOME` (the ttnn tensor cache
+  *defaults to a hard-coded `/mnt/...` upstream* — a classic other-machine leak we override),
+  `XDG_CACHE_HOME`, triton/inductor. After install, serving depends on nothing outside the folder
+  except the TT device + system libc. Each redirect is overridable (`${VAR:-$HERE/...}`).
+- **glibc floor is checked.** The repaired wheel is tagged for the glibc of the box it was repaired
+  on (`manylinux_2_39` on Ubuntu 24.04). `pull` compares that floor to the host glibc and fails with
+  a clear message on a too-old host, instead of a cryptic `GLIBC_2.39 not found` at dlopen. **Build
+  the engine wheel on Ubuntu 22.04 (glibc 2.35)** — then it repairs to `manylinux_2_35` and one
+  bundle runs on both 22.04 and 24.04. `package --manylinux <policy>` asserts a floor at build time.
+- **serve checks for updates.** When an installed bundle is served, `serve` compares the installed
+  revision to the Hub's current tip and prints a non-blocking advisory if a newer one exists
+  (skipped for a pinned `@revision` install and under `--local-only`).
 - **No `VLLM_PLUGINS` in run.sh.** That variable is an allow-list; setting it silently suppressed
   the model's tool/reasoning-parser plugins. The TT platform + registry load via entry points.
 - **`_ttnncpp` preload is located wherever it lives** (`ttnn.libs/` for a repaired wheel, else
