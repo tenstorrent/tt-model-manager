@@ -157,11 +157,29 @@ Because each bundle builds its own venv, there is no host `ttnn`/vLLM version to
 
 ## Development
 
+The development environment is intentionally smaller than the serving environment: the
+offline test suite does not require a TT card, `ttnn`, vLLM, or a Hugging Face token. With
+[`uv`](https://docs.astral.sh/uv/), use the checked-in lockfile:
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[test]"
-pytest            # full offline suite: no hardware, no network
+uv sync --locked --extra test
+uv run --locked --extra test pytest
 ```
+
+For the standard-library `venv` + pip path and more detail, see
+[Development setup](CONTRIBUTING.md#development-setup).
+
+<details>
+<summary>Setup without uv</summary>
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[test]"
+python -m pytest
+```
+
+</details>
 
 The producer/consumer logic is fully unit-tested with mocked pip + HF, so you can exercise the
 full package → pull → serve round-trip without a card. See the Testing sections of
