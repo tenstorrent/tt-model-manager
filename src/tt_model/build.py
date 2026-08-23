@@ -93,11 +93,15 @@ METAL_CONTEXT_EXCLUDES = (
 
 def _copy_metal_tree(metal: Path, dest: Path) -> None:
     def _ignore(dirpath, names):
-        drop = set()
+        top = Path(dirpath) == metal   # build trees are pruned at the ROOT only:
+        drop = set()                   # "build" must not eat tt_metal/.../build_*.cpp etc.
         for n in names:
-            if n in METAL_CONTEXT_EXCLUDES or n.startswith((".venv", "build_", "build")):
+            if n in METAL_CONTEXT_EXCLUDES or n.startswith(".venv"):
                 drop.add(n)
-            elif n == "venv" or n.endswith(".log"):
+            elif top and (n in ("build", "venv") or (n.startswith("build_") and
+                                                     not n.endswith(".sh"))):
+                drop.add(n)
+            elif n.endswith(".log"):
                 drop.add(n)
         return drop
 

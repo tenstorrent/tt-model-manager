@@ -48,7 +48,7 @@ Watch this file: `cat /home/ttuser/dev/tt-model-manager/PROGRESS.md`
 - [x] tests: docker run composition via --print, profile selection, stop semantics (16)
 - [x] tests: interrupt guard (8); oci fake-docker round-trip (5); hub error map (16)
 - [x] tests: kept test_cli_output.py retargeted (38) — 129 passing total
-- [ ] docs/model_types.md, docs/packaging.md, rewritten README.md
+- [~] docs/model_types.md ✓, docs/packaging.md ✓, README.md next
 - [ ] Final commit(s)
 
 ## 8. On-hardware acceptance (long; requires the box + HF auth)
