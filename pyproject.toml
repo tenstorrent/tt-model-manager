@@ -29,7 +29,7 @@ tt-model = "tt_model.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-tt_model = ["py.typed"]
+tt_model = ["py.typed", "docker/Dockerfile", "docker/entrypoint.sh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
