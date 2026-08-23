@@ -14,6 +14,8 @@ source:
   code:                                # the ONLY model code that ships — an allowlist
     - models/common
     - models/autoports/poolside_laguna_xs_2_1/tt
+    - models/autoports/poolside_laguna_xs_2_1/tests    # NOT just tests: model.py's
+                                       # from_pretrained imports tests/laguna_weights
     - models/autoports/poolside_laguna_xs_2_1/vllm_ext
     - models/autoports/poolside_laguna_xs_2_1/doc/datatype_sweep   # load-bearing numerics:
                                        # tt/model.py falls back SILENTLY without it
@@ -33,6 +35,9 @@ verify:                                # model-authored build-time assertions
   # the fork-only SDPA change this model needs (nanobind: signature lives in __doc__)
   - "import ttnn; missing = [n for n in ('scaled_dot_product_attention','chunked_scaled_dot_product_attention','paged_scaled_dot_product_attention_decode') if 'sliding_window_size' not in (getattr(ttnn.transformer, n).__doc__ or '')]; assert not missing, f'this ttnn build lacks sliding_window_size on {missing}'"
   - "import models.autoports.poolside_laguna_xs_2_1.tt.generator_vllm"
+  # from_pretrained's LAZY import — a build-time check because it only fires at weight
+  # load, ten minutes into a boot, on a consumer's machine
+  - "import models.autoports.poolside_laguna_xs_2_1.tests.laguna_weights"
 
 serve:                                 # defaults every profile inherits
   port: 8000
