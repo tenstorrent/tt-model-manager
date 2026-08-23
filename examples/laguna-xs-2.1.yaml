@@ -24,7 +24,13 @@ source:
 
 runtime:
   vllm: {version: "0.24.0"}            # the plugin monkeypatches internals; pin is load-bearing
-  plugin: {repo: https://github.com/tenstorrent/vllm-tt-plugin, ref: main}
+  plugin:
+    repo: https://github.com/tenstorrent/vllm-tt-plugin
+    # NOT main: the sha the model was VALIDATED with (the working host venv's
+    # direct_url.json). Today's main (e3fc849) schedules the first decode through a
+    # chunk-start-55 SDPA call this model's decoder rejects. Pinning what was
+    # validated is the whole point of the manifest.
+    ref: f3e4637a4528800be370edc73d6fb83711e97935
   extension: models/autoports/poolside_laguna_xs_2_1/vllm_ext
   # lock: requirements.lock            # written back by the first `tt-model package`
 
