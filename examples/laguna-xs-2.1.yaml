@@ -1,0 +1,67 @@
+# Laguna-XS-2.1 on Blackhole — type: vllm (stock vLLM + the standalone TT plugin).
+# Transcribed from the validated recipe in
+# tt-metal/models/autoports/poolside_laguna_xs_2_1/{setup_vllm.sh,serve_vllm.sh}.
+schema: 1
+repo: hous/laguna-xs-2.1
+name: laguna-xs-2.1
+weights: poolside/Laguna-XS-2.1        # gated, ~63 GB — lands in the HOST HF cache
+type: vllm
+arch: blackhole
+
+source:
+  tt_metal: /home/ttuser/dev/tt-metal  # this checkout carries the SDPA sliding_window_size
+                                       # change no released wheel has; ttnn must build from it
+  code:                                # the ONLY model code that ships — an allowlist
+    - models/common
+    - models/autoports/poolside_laguna_xs_2_1/tt
+    - models/autoports/poolside_laguna_xs_2_1/vllm_ext
+    - models/autoports/poolside_laguna_xs_2_1/doc/datatype_sweep   # load-bearing numerics:
+                                       # tt/model.py falls back SILENTLY without it
+  ubuntu: "22.04"
+  python: "3.12"                       # the validated interpreter; uv provides it on 22.04
+
+runtime:
+  vllm: {version: "0.24.0"}            # the plugin monkeypatches internals; pin is load-bearing
+  plugin: {repo: https://github.com/tenstorrent/vllm-tt-plugin, ref: main}
+  extension: models/autoports/poolside_laguna_xs_2_1/vllm_ext
+  # lock: requirements.lock            # written back by the first `tt-model package`
+
+serve:                                 # defaults every profile inherits
+  port: 8000
+  block_size: 64                       # the TT backend rejects vLLM's own default
+  args:
+    - --trust-remote-code
+    - --enable-prefix-caching
+    - --enable-auto-tool-choice
+    - [--tool-call-parser, poolside_v1]
+    - [--reasoning-parser, poolside_v1]
+  env:
+    TT_LAGUNA_PIPE_CHUNK: "2048"
+    TT_LAGUNA_PREFIX_CACHE: "1"
+    TT_LAGUNA_PREFILL_FAST: "1"
+    TT_LAGUNA_HYBRID_KV: "0"
+
+serve_profiles:
+  - name: p150x4
+    description: Four chips, ring fabric, full 131k context. The validated deployment.
+    hardware: p150x4
+    mesh_device: P150x4
+    max_num_seqs: 8
+    max_model_len: 131072
+    additional_config:
+      tt:
+        sample_on_device_mode: all
+        trace_region_size: 1500000000
+        fabric_config: FABRIC_1D_RING
+  - name: p150x2
+    description: Two chips. Reduced context; a ring needs four chips, so 1D line here.
+    hardware: p150x2
+    mesh_device: P150x2
+    max_num_seqs: 8
+    max_model_len: 65536
+    additional_config:
+      tt:
+        sample_on_device_mode: all
+        trace_region_size: 900000000
+        fabric_config: FABRIC_1D
+default_profile: p150x4

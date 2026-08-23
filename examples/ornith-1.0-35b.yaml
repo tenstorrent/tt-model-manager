@@ -1,0 +1,56 @@
+# Ornith-1.0-35B on Blackhole p150x4 — type: vllm-legacy (the tenstorrent/vllm fork with
+# its in-tree plugin, launched via tt-metal's readiness runner).
+# Transcribed from the Ornith-1.0-35B p150x4 quickstart.
+schema: 1
+repo: hous/ornith-1.0-35b
+name: ornith-1.0-35b
+weights: ornith-ai/Ornith-1.0-35B      # ~77 GB in the HOST HF cache
+type: vllm-legacy
+arch: blackhole
+
+source:
+  tt_metal:
+    repo: https://github.com/tenstorrent/tt-metal
+    ref: agentic-research/hous/ornith-1.0-35B    # resolved to a sha at package time
+  code:
+    - models/common
+    - models/autoports/ornith_ai_ornith_1_0_35b
+  ubuntu: "22.04"
+  python: "3.12"
+
+runtime:
+  vllm:                                # the fork; the plugin is in-tree (plugins/vllm-tt-plugin)
+    repo: https://github.com/tenstorrent/vllm
+    ref: bf98d556
+  model_dir: models/autoports/ornith_ai_ornith_1_0_35b
+  # lock: requirements.lock
+
+serve:
+  port: 8100
+  block_size: 64
+  max_model_len: 262144                # advertised and served, no reduction
+  server_timeout: 2400                 # cold kernel cache adds ~8-9 min of precompilation
+  hardware: p150x4
+  mesh_device: "(1, 4)"
+  additional_config:
+    tt:
+      trace_region_size: 200000000
+      l1_small_size: 24576
+      fabric_config: FABRIC_1D_RING
+      fabric_router_max_packet_bytes: 8192
+  args:
+    - [--reasoning-parser, qwen3]      # without it the <think> trace lands in content
+    - --enable-auto-tool-choice
+    - [--tool-call-parser, qwen3_xml]  # tool calling is what makes it an agent
+
+serve_profiles:
+  # --max-num-seqs is a DEPLOYMENT decision on this device, not a tuning knob:
+  # it picks which of two servers you are building. The runner's default is 32,
+  # so an interactive user who omits it silently gets ~7 tok/s/u.
+  - name: p150x4-latency
+    description: Coding agents and chat. One interactive user at a time, full speed.
+    max_num_seqs: 1
+  - name: p150x4-capacity
+    description: Batch jobs and evals. Up to 32 users on one endpoint.
+    max_num_seqs: 32
+default_profile: p150x4-latency
