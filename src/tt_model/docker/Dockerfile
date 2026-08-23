@@ -144,8 +144,12 @@ ARG MODEL_PROFILES
 # The apt set is the built artifacts' actual link closure (readelf -d), nothing more.
 # libmpi comes from the ULFM OpenMPI COPY below — Ubuntu's libopenmpi3 ships
 # libopen-pal.so.40, not the .so.80 these binaries need; apt cannot satisfy it.
+# libmpc3/libmpfr6/libgmp10/libzstd1: the JIT's RISC-V cross-compiler (sfpi cc1plus,
+# lto1) is a HOST binary that links them — without them the first kernel compile dies
+# with "cc1plus: error while loading shared libraries: libmpc.so.3".
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libhwloc15 libnuma1 libatomic1 libudev1 libcap2 zlib1g \
+    libmpc3 libmpfr6 libgmp10 libzstd1 \
     libevent-core-2.1-7 libevent-pthreads-2.1-7 \
     libgl1 libsndfile1 ca-certificates \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
