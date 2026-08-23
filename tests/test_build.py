@@ -23,6 +23,8 @@ def _fake_metal(root: Path) -> Path:
     mdl = metal / "models" / "autoports" / "poolside_laguna_xs_2_1"
     (mdl / "tt").mkdir(parents=True)
     (mdl / "tt" / "generator_vllm.py").write_text("class L: pass\n")
+    (mdl / "tests").mkdir(parents=True)
+    (mdl / "tests" / "laguna_weights.py").write_text("W = 1\n")
     (mdl / "vllm_ext" / "extra_models" / "laguna").mkdir(parents=True)
     (mdl / "vllm_ext" / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n")
     (mdl / "doc" / "datatype_sweep").mkdir(parents=True)
