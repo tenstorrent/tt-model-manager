@@ -154,7 +154,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # a --user with no passwd entry gets HOME=/ (unwritable → the JIT build dies). Host
 # uid 1000 also matches bind-mount ownership. (The dev image's own user is 1001.)
 RUN useradd --uid 1000 --create-home --home-dir /home/tt --shell /bin/bash tt \
-    && mkdir -p /home/tt/work/logs /cache && chown -R tt:tt /home/tt /cache
+    && mkdir -p /home/tt/work/logs /cache /opt/tt-metal \
+    && chown -R tt:tt /home/tt /cache /opt/tt-metal
 
 # Stable -> volatile, so a model edit re-uploads a 5 MB layer, not a 3 GB one.
 COPY --from=builder ${OMPI_DIR} ${OMPI_DIR}
@@ -162,14 +163,18 @@ COPY --from=builder /opt/tenstorrent /opt/tenstorrent
 COPY --from=builder /usr/local/share/uv /usr/local/share/uv
 COPY --from=builder /opt/tt-venv /opt/tt-venv
 COPY --from=builder /opt/vllm /opt/vllm
-COPY --from=builder /opt/tt-metal/runtime /opt/tt-metal/runtime
-COPY --from=builder /opt/tt-metal/build_Release /opt/tt-metal/build_Release
-COPY --from=builder /opt/tt-metal/build /opt/tt-metal/build
-COPY --from=builder /opt/tt-metal/tt_metal /opt/tt-metal/tt_metal
-COPY --from=builder /opt/tt-metal/ttnn /opt/tt-metal/ttnn
-COPY --from=builder /opt/tt-metal/tools /opt/tt-metal/tools
-COPY --from=builder /opt/tt-metal/setup.py /opt/tt-metal/pyproject.toml /opt/tt-metal/
-COPY code/ /opt/tt-metal/
+# --chown=tt: python code in the tree writes into TT_METAL_HOME at import/serve time
+# (tools/tracy/common.py mkdirs build/profiler/build_wasm/traces on IMPORT; profiler
+# artifacts default under generated/). Root-owned trees turn those into EACCES ten
+# minutes into a boot, so the model tree belongs to the runtime user.
+COPY --from=builder --chown=tt:tt /opt/tt-metal/runtime /opt/tt-metal/runtime
+COPY --from=builder --chown=tt:tt /opt/tt-metal/build_Release /opt/tt-metal/build_Release
+COPY --from=builder --chown=tt:tt /opt/tt-metal/build /opt/tt-metal/build
+COPY --from=builder --chown=tt:tt /opt/tt-metal/tt_metal /opt/tt-metal/tt_metal
+COPY --from=builder --chown=tt:tt /opt/tt-metal/ttnn /opt/tt-metal/ttnn
+COPY --from=builder --chown=tt:tt /opt/tt-metal/tools /opt/tt-metal/tools
+COPY --from=builder --chown=tt:tt /opt/tt-metal/setup.py /opt/tt-metal/pyproject.toml /opt/tt-metal/
+COPY --chown=tt:tt code/ /opt/tt-metal/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENV VENV=/opt/tt-venv
