@@ -364,6 +364,13 @@ class _ActivityTqdm:
     def __iter__(self):
         return iter(())
 
+    # newer huggingface_hub versions read these back off the bar
+    disable = False
+
+    @property
+    def format_dict(self):
+        return {"n": self.n, "total": self.total, "elapsed": 0, "rate": None}
+
     @classmethod
     def _render(cls):
         done = sum(n for n, _ in cls._live.values())
