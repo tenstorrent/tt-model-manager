@@ -49,9 +49,22 @@ Watch this file: `cat /home/ttuser/dev/tt-model-manager/PROGRESS.md`
 - [x] tests: interrupt guard (8); oci fake-docker round-trip (5); hub error map (16)
 - [x] tests: kept test_cli_output.py retargeted (38) — 129 passing total
 - [x] docs/model_types.md, docs/packaging.md, rewritten README.md
-- [~] 7 commits so far; final pass after acceptance
+- [x] 16 commits; suite green (130)
 
 ## 8. On-hardware acceptance (long; requires the box + HF auth)
 - [x] package laguna → image builds, verify RUN passes (imports, CPU torch, plugin registration, precision-config, SDPA)
-- [~] serve local: container up, model registered, booting (~10 min)
-- [ ] HF round-trip; self-containment checks
+- [x] serve local: READY in ~16 min, coherent completion (55 in / 32 out, finish=stop),
+      ~29 tok/s incl. TTFT; `stop` = clean SIGTERM shutdown in 1.3 s, no mesh reset needed
+- [x] two more field-found bugs fixed: sfpi cc1plus host libs (libmpc/mpfr/gmp/zstd),
+      tt-owned metal tree (tracy mkdir on import), tests/ on laguna's serve path,
+      and the PLUGIN DRIFT: main moved f3e4637a→e3fc849 and broke first-decode —
+      the manifest now pins the validated sha (the whole point, proven on hardware)
+- [x] self-containment: no host paths in image env/labels; USER tt; host pip has no
+      vllm/ttnn; weights only via the mounted host HF cache
+- [!] HF round-trip: BLOCKED — the stored HF token is role=read ('llama'); push needs a
+      WRITE token. Run `hf auth login` with a write token, then:
+      tt-model push build/laguna-xs-2.1 && docker image rm tt-model/laguna-xs-2.1:9b415f820
+      && tt-model pull tt-hous/laguna-xs-2.1 && tt-model serve tt-hous/laguna-xs-2.1
+- [!] Ornith on-hardware: BLOCKED — 77 GB gated weights not in cache, and the branch
+      agentic-research/hous/ornith-1.0-35B is not visible on the public tt-metal remote.
+      (Its manifest, type impl, and golden launch-command tests are done and green.)

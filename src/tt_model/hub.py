@@ -251,10 +251,13 @@ def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
     if status == 403:
         return {
             "cause": "not authorised",
-            "detail": f"The Hub rejected this token for {repo_id}. It may lack read "
-                      "scope, or the repo's terms may not be accepted for your account.",
+            "detail": f"The Hub rejected this token for {repo_id}. A READ-role token "
+                      "cannot push — creating or writing a repo needs a token with "
+                      "write access — and a repo's terms may also be unaccepted.",
             "evidence": _evidence(text),
-            "actions": ["hf auth login", f"open https://huggingface.co/{repo_id}"],
+            "actions": ["hf auth whoami   # shows the token's role",
+                        "hf auth login    # paste a WRITE token to push",
+                        f"open https://huggingface.co/{repo_id}"],
         }
 
     if status == 404 or name == "RepositoryNotFoundError" or "not found" in low:
