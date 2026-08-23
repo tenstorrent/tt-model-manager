@@ -61,10 +61,10 @@ Watch this file: `cat /home/ttuser/dev/tt-model-manager/PROGRESS.md`
       the manifest now pins the validated sha (the whole point, proven on hardware)
 - [x] self-containment: no host paths in image env/labels; USER tt; host pip has no
       vllm/ttnn; weights only via the mounted host HF cache
-- [!] HF round-trip: BLOCKED — the stored HF token is role=read ('llama'); push needs a
-      WRITE token. Run `hf auth login` with a write token, then:
-      tt-model push build/laguna-xs-2.1 && docker image rm tt-model/laguna-xs-2.1:9b415f820
-      && tt-model pull tt-hous/laguna-xs-2.1 && tt-model serve tt-hous/laguna-xs-2.1
+- [x] HF round-trip COMPLETE: push (1.68 GB deduped, 67 MB/s) → repo has README card,
+      code/ (148 files), image/ (29 OCI blobs), pinned manifest, tags → docker image rm →
+      pull (blobs via HF cache, docker load 18.5 s) → serve from the pulled repo id →
+      BYTE-IDENTICAL greedy completion → clean stop
 - [!] Ornith on-hardware: BLOCKED — 77 GB gated weights not in cache, and the branch
       agentic-research/hous/ornith-1.0-35B is not visible on the public tt-metal remote.
       (Its manifest, type impl, and golden launch-command tests are done and green.)
