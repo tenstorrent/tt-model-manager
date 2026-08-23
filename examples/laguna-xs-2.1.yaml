@@ -26,6 +26,14 @@ runtime:
   extension: models/autoports/poolside_laguna_xs_2_1/vllm_ext
   # lock: requirements.lock            # written back by the first `tt-model package`
 
+verify:                                # model-authored build-time assertions
+  # the doc/ trap: tt/model.py silently falls back to in-code PrecisionPolicy defaults
+  # when this file is missing — nothing else would catch an allowlist slip
+  - "import pathlib; p = pathlib.Path('/opt/tt-metal/models/autoports/poolside_laguna_xs_2_1/doc/datatype_sweep/selected_precision_config.json'); assert p.exists(), f'{p} missing: the model would silently serve with in-code precision defaults'"
+  # the fork-only SDPA change this model needs (nanobind: signature lives in __doc__)
+  - "import ttnn; missing = [n for n in ('scaled_dot_product_attention','chunked_scaled_dot_product_attention','paged_scaled_dot_product_attention_decode') if 'sliding_window_size' not in (getattr(ttnn.transformer, n).__doc__ or '')]; assert not missing, f'this ttnn build lacks sliding_window_size on {missing}'"
+  - "import models.autoports.poolside_laguna_xs_2_1.tt.generator_vllm"
+
 serve:                                 # defaults every profile inherits
   port: 8000
   block_size: 64                       # the TT backend rejects vLLM's own default

@@ -198,6 +198,14 @@ class Manifest(BaseModel):
     serve_profiles: List[ServeProfile] = Field(min_length=1)
     default_profile: Optional[str] = None
 
+    # Model-authored build-time assertions: each entry is a Python statement executed
+    # inside the finished image (on top of the type's own import checks). This is where
+    # a model catches its silent failure modes — e.g. laguna asserts its precision
+    # config file shipped, because tt/model.py falls back to in-code defaults WITHOUT
+    # ERROR when it is missing. An under-shipped image then fails on the author's
+    # machine, not on a consumer's first boot.
+    verify: List[str] = Field(default_factory=list)
+
     built: Optional[Dict[str, Any]] = None  # provenance; written by `package`
 
     # ---- profile resolution ------------------------------------------------------

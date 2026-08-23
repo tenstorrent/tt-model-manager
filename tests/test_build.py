@@ -144,3 +144,19 @@ def test_missing_lock_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(build, "resolve_git_ref", lambda repo, ref: "f" * 40)
     with pytest.raises(build.BuildError, match="nope.lock"):
         build.stage(mpath, out_root=tmp_path / "out")
+
+
+def test_manifest_verify_lines_reach_the_image_check(tmp_path, monkeypatch):
+    """Model-authored verify: entries become python -c lines in verify.sh — the doc/
+    trap catch travels with the manifest, not with tt-model's code."""
+    metal = _fake_metal(tmp_path)
+    mpath = _manifest_for(metal, tmp_path)
+    raw = yaml.safe_load(mpath.read_text())
+    raw["verify"] = ["import pathlib; assert pathlib.Path('/x').exists(), 'gone'"]
+    mpath.write_text(yaml.safe_dump(raw, sort_keys=False))
+    monkeypatch.setattr(build, "resolve_git_ref", lambda repo, ref: "f" * 40)
+
+    staged = build.stage(mpath, out_root=tmp_path / "out")
+    verify = (staged.ctx / "verify.sh").read_text()
+    assert "assert pathlib.Path" in verify
+    assert "EXTRA_MODELS_DIR" in verify        # the type's own checks still present

@@ -110,7 +110,10 @@ class VllmLegacyType:
             f"import vllm; assert vllm.__file__.startswith('{FORK_DIR}'), vllm.__file__",
             "import models.common.readiness_check.run_vllm_server",
         ]
-        return [f'"$VENV/bin/python" -c {shlex.quote("; ".join(checks))}']
+        lines = [f'"$VENV/bin/python" -c {shlex.quote("; ".join(checks))}']
+        # model-authored assertions from the manifest's verify: list
+        lines += [f'"$VENV/bin/python" -c {shlex.quote(v)}' for v in m.verify]
+        return lines
 
     def runtime_copy_lines(self, m: Manifest) -> List[str]:
         # The fork is installed editable: its checkout must exist in the final image or

@@ -123,7 +123,10 @@ class VllmType:
                 "if os.path.exists(os.path.join(md, e, 'vllm_metadata.json'))]; "
                 "assert entries, f'EXTRA_MODELS_DIR {md} registers no models'",
             ]
-        return [f'"$VENV/bin/python" -c {shlex.quote("; ".join(checks))}']
+        lines = [f'"$VENV/bin/python" -c {shlex.quote("; ".join(checks))}']
+        # model-authored assertions from the manifest's verify: list
+        lines += [f'"$VENV/bin/python" -c {shlex.quote(v)}' for v in m.verify]
+        return lines
 
     def runtime_copy_lines(self, m: Manifest) -> List[str]:
         return []
