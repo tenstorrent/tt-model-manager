@@ -1,80 +1,67 @@
-# AGENTS.md — guidelines for automated (agent) contributions to tt-model
+# AGENTS.md — agent guide for tt-model-manager
 
-This file tells an AI agent (e.g. Claude Code) how to make and submit improvement PRs to
-`tt-model-manager` so fixes stay consistent with the design. Read it before changing
-code. Human contributors: see [CONTRIBUTING.md](CONTRIBUTING.md); this is the agent-facing
-supplement, and the invariants below are binding for everyone.
+This file is for AI agents (Claude Code, Codex, etc.) working in this repo or asked to
+package models with it. Humans: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Golden rule
-**Every change lands via a PR. Never push to `main`, never merge your own PR.** Open PRs as
-**draft** for human review; a human clicks merge.
+## What this tool is
+
+A model is a **Docker image published on Hugging Face**. Three jobs, nothing else:
+`package` (one YAML manifest → self-contained image + staged HF repo dir), `push`,
+and `pull`/`serve`/`stop`/`logs`/`list`. Weights are the only thing that ever touches
+the host — in the host's own HF cache, bind-mounted in. No host tt-metal, no venv
+provisioning, no doctor.
+
+Read `README.md` first; `docs/packaging.md` for the authoring walkthrough;
+`docs/model_types.md` for the `vllm` / `vllm-legacy` type registry.
+
+## Skills
+
+**Creating a tt-model.yaml for a model in a tt-metal fork:** follow
+[`.claude/skills/tt-model-yaml/SKILL.md`](.claude/skills/tt-model-yaml/SKILL.md).
+Claude Code loads it as the `tt-model-yaml` skill; other agents (Codex included)
+should open that file and execute it as a checklist. It encodes the paid-for lessons —
+import-closure allowlists (lazy imports included), silent-fallback data files,
+pinning the plugin sha from the validated venv instead of `main`.
 
 ## Design invariants — do not break these
-tt-model exists to ship *self-contained* model packages over HuggingFace. A change that
-violates one of these is wrong even if tests pass:
 
-1. **tt-model is the standalone path.** The full flow — `package → push → pull → install →
-   serve` — MUST work with tt-model alone (only a TT card + firmware). Never add a dependency
-   on `tt-cli`; tt-cli is an *optional* wrapper that calls tt-model, not the reverse.
-   Host provisioning is `tt-model install` and lives in `provision.py`. It is the ONLY
-   module that installs the surrounding platform: `doctor`, `toolchain`, `instances`, and
-   the compatibility gates stay strictly declarative — they discover, probe, and report.
-   That separation is what makes a `doctor` verdict trustworthy, so keep it.
-2. **Distribution is HuggingFace, not GitHub Releases.** Bundles are HF `model` repos; large
-   binaries go to git-LFS via `hub.upload_folder`. Do not add Release-based or ad-hoc download flows.
-3. **Weights are a pointer, never embedded** (`WeightsRef` = HF repo id). Do not stage weights
-   into a bundle.
-4. **Self-contained ("fat") packages ship the author's built artifacts** — their `ttnn` wheel
-   (custom kernels compiled in), base vLLM, plugin — plus their modified metal tree. The engine
-   is what's on the box, not a stock pin.
-5. **Manifest back-compat.** `manifest.py` must keep reading every version in
-   `SUPPORTED_SCHEMAS` (v3/v4/v5). Add fields as optional; bump `SCHEMA_VERSION` only for a new
-   authored schema and keep the old readers + a round-trip test.
-6. **The serving contract is the plugin's `EXTRA_MODELS_DIR`**: per-model *subfolder* with
-   `vllm_metadata.json` (`arch` + `main_class`). Keep `run.sh`/`stage_package` aligned with it.
+1. **One YAML manifest is the whole authoring interface.** `tt-model package` takes
+   exactly one argument. Never add per-field CLI flags that duplicate manifest fields.
+2. **The manifest records what was VALIDATED.** `package` resolves every git ref to a
+   sha and writes the `built:` provenance block. Never loosen a pin to a branch name in
+   an example or a published manifest.
+3. **Weights are a pointer, never embedded.** They live in the host HF cache; the
+   container bind-mounts it read-write and never downloads at build time.
+4. **One image serves all of a manifest's `serve_profiles`.** Hardware-varying config
+   (`hardware`, `mesh_device`, `max_model_len`, `additional_config`) lives per-profile;
+   only `arch` is baked. Never silently substitute a profile on hardware mismatch —
+   warn, suggest, require `--force`.
+5. **Model types are the extension point** (`src/tt_model/types/`). Type-specific work
+   reaches the Dockerfile only through generated `install_engine.sh`/`verify.sh`; the
+   Dockerfile itself stays type-agnostic. New engine → new type module + a row in
+   `docs/model_types.md`, no schema or CLI changes.
+6. **`stop` is SIGTERM-first** (`docker stop --timeout`, never `rm -f`); the entrypoint
+   `exec`s so the server is PID 1. A hard kill dirties the mesh; reset only then.
+7. **tt-model owns no plugin schema.** `vllm_metadata.json` belongs to the vLLM plugin;
+   we ship the model's `vllm_ext` directory verbatim and point `EXTRA_MODELS_DIR` at it.
 
-## Serve-path facts the code encodes (regressions here are silent and expensive)
-- The shipped `ttnn` wheel must bundle `_ttnncpp.so`; locate ttnn via
-  `importlib.util.find_spec` (never `import ttnn`) when computing `LD_PRELOAD` — the import is
-  what the preload fixes (glibc static-TLS).
-- `run.sh` must `export HF_MODEL` (the tt_transformers adapter reads it from env, not vLLM
-  `--model`) and emit `--max_num_seqs` + `--block_size` (the TT backend rejects vLLM's 256/None
-  defaults).
-- Single-chip runs disable fabric + set `TT_METAL_VISIBLE_DEVICES=0`.
+## Serve-path facts (regressions here are silent and expensive)
 
-## Workflow for a fix
-1. Branch: `fix/<slug>` or `feat/<slug>` off `main`.
-2. Keep the PR **small and single-concern**. One bug or one feature per PR.
-3. Reproduce first, then fix. Add a **regression test** that fails before and passes after.
-4. Run the full offline suite — it must stay green:
-   ```
-   pytest            # expected: all pass (no hardware, no network)
-   ```
-5. If the change touches the serve/device path, validate on hardware (see
-   `docs/self_contained_packages.md` → Testing) — package → pull → serve → `curl`.
-6. Commit messages: imperative subject, a short body explaining *why*, and end with:
-   `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
-7. Open a **draft PR**; body = what/why + the test evidence (e.g. "full suite: N passed") +
-   a link to the tracking issue if one applies.
+- `EXTRA_MODELS_DIR` must point at the PARENT of per-model folders, or 0 architectures
+  register. `HF_MODEL` must be exported (adapters read env, not vLLM's `--model`).
+  `VLLM_PLUGINS` must stay UNSET (it is an allow-list; setting it kills the model's
+  tool/reasoning parsers).
+- The hugepages mount is verbatim (`src=/dev/hugepages-1G,dst=/dev/hugepages-1G`) — umd
+  regex-matches /proc/mounts.
+- The runtime image needs the sfpi cross-compiler's own host libs
+  (libmpc3/libmpfr6/libgmp10/libzstd1) and a tt-owned metal tree (python in it mkdirs
+  on import). Both were found on hardware; both have comments at their fix sites.
 
-## Reuse, don't reinvent
-`hub.py` (HF push/pull), `runtime.py` (`download_weights`, `pip_install_wheels`,
-`install_self_contained`), `bundles.py` (EXTRA_MODELS_DIR materialization + metadata render),
-`packaging.py` (staging), `provision.py` (host setup). Prefer extending these over new
-parallel code paths.
+## Workflow
 
-**All terminal output goes through `console.py`.** No new `typer.secho`, no scattered
-`print`. See [docs/cli_output.md](docs/cli_output.md) for the vocabulary and the rules that
-are easy to get wrong — chiefly: capture subprocess noise and surface it only on failure,
-never gate a failure on `show_detail()`, and keep `--print`/`--json` on `console.raw()` so
-Rich cannot wrap a pasteable command or a JSON document.
-
-**Scripts in `scripts/` are shims.** `install.sh` and `make_test_cache.sh` exist for the
-bootstrap case only and forward to the CLI. Logic added there cannot reuse tt-model's own
-detection and drifts from the CLI silently; `tests/test_install_script.py` enforces this.
-
-## Don't
-- Don't vendor `torch`/`vllm`/`transformers` — they are pip deps.
-- Don't commit wheels or other large binaries to git (LFS on push only).
-- Don't push to `main` or self-merge.
-- Don't silently truncate or skip integrity checks / version gates.
+- Every change lands via a PR to `main`; open PRs as draft. Never push to `main`.
+- `pytest` must stay green (130 offline tests — no hardware, no docker daemon needed).
+  The golden-string tests in `tests/test_serve_argv.py` pin validated launch recipes:
+  if one fails, a recipe drifted — find out which side is wrong before "fixing" it.
+- Long operations (`package`, `push`) stream live and survive Ctrl-C via the interrupt
+  guard in `build.py`; keep that behavior for anything new that runs > 1 minute.
