@@ -25,7 +25,7 @@ Watch this file: `cat /home/ttuser/dev/tt-model-manager/PROGRESS.md`
 - [x] `hardware.py`, `oci.py`, `hub.py`, `container.py` written
 - [x] `docker/Dockerfile` (builder + runtime stages, cache mounts, type hooks) — src/tt_model/docker/
 - [x] `docker/entrypoint.sh` (exec, PID-1 SIGTERM)
-- [ ] Hand-driven real laguna image build on this box (2.5-4 h)
+- [ ] Hand-driven real laguna image build on this box (2.5-4 h) — NEXT, long-running
 
 ## 4. build.py + package
 - [x] Provenance resolution (local path / git ref → sha, scm version)
@@ -44,10 +44,10 @@ Watch this file: `cat /home/ttuser/dev/tt-model-manager/PROGRESS.md`
 - [x] `tt-model logs`, `tt-model list`
 
 ## 7. Tests + docs
-- [ ] tests: manifest validation matrix, golden serve_argv strings ×2 types
-- [ ] tests: docker run composition via --print, profile selection, stop semantics
-- [ ] tests: interrupt guard against a fake child; oci round-trip; hub error map
-- [ ] tests: fix kept test_cli_output.py targets
+- [x] tests: manifest validation matrix (35), golden serve_argv strings ×2 types (5)
+- [x] tests: docker run composition via --print, profile selection, stop semantics (16)
+- [x] tests: interrupt guard (8); oci fake-docker round-trip (5); hub error map (16)
+- [x] tests: kept test_cli_output.py retargeted (38) — 129 passing total
 - [ ] docs/model_types.md, docs/packaging.md, rewritten README.md
 - [ ] Final commit(s)
 

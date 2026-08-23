@@ -38,18 +38,25 @@ def _err(msg: str) -> "typer.Exit":
     return typer.Exit(code=1)
 
 
+def _fail_card(name: str, diagnosis: dict) -> None:
+    console._body_print(console.failure_card(name, diagnosis))
+
+
 def _version_cb(value: bool):
     if value:
-        typer.echo(f"tt-model {__version__}")
+        typer.echo(__version__)
         raise typer.Exit()
 
 
 @app.callback()
 def _main(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show full detail."),
+    no_color: bool = typer.Option(False, "--no-color", help="Disable styled output."),
     version: bool = typer.Option(False, "--version", callback=_version_cb, is_eager=True),
 ):
     console.set_verbose(verbose)
+    if no_color:
+        console.set_no_color(True)
 
 
 # ------------------------------------------------------------------- local state
@@ -78,7 +85,7 @@ def _resolve_manifest(target: str) -> Manifest:
 
 
 # ----------------------------------------------------------------------- package
-@app.command()
+@app.command(rich_help_panel="Publish models")
 def package(
     manifest_path: Path = typer.Argument(..., help="The model's tt-model.yaml. The only input."),
     out: Optional[Path] = typer.Option(None, "--out", help="Staging root (default ./build)."),
@@ -124,7 +131,7 @@ def package(
 
 
 # -------------------------------------------------------------------------- push
-@app.command()
+@app.command(rich_help_panel="Publish models")
 def push(
     staged: Path = typer.Argument(..., help="A directory produced by `tt-model package`."),
     private: Optional[bool] = typer.Option(
@@ -149,7 +156,7 @@ def push(
                        (m.resolve_profile(n) for n in m.profile_names()) if p.hardware)})
         hub.tag_repo(m.repo, ["tt-model", *tags])
     except Exception as e:  # noqa: BLE001 — hub errors get one diagnosis card
-        console.failure_card("push", hub.classify_hub_error(e, m.repo))
+        _fail_card("push", hub.classify_hub_error(e, m.repo))
         raise typer.Exit(code=1)
 
     console.milestone(f"pushed {m.repo}")
@@ -157,7 +164,7 @@ def push(
 
 
 # -------------------------------------------------------------------------- pull
-@app.command()
+@app.command(rich_help_panel="Run models")
 def pull(
     repo_id: str = typer.Argument(..., help="HF repo id, e.g. org/name."),
     no_weights: bool = typer.Option(False, "--no-weights", help="Skip the weights download."),
@@ -172,7 +179,7 @@ def pull(
     try:
         snapshot = hub.download_package(repo_id)
     except Exception as e:  # noqa: BLE001
-        console.failure_card("pull", hub.classify_hub_error(e, repo_id))
+        _fail_card("pull", hub.classify_hub_error(e, repo_id))
         raise typer.Exit(code=1)
 
     m = load_manifest(snapshot / MANIFEST_NAME)
@@ -196,7 +203,7 @@ def pull(
         try:
             hub.download_weights(m.weights)
         except Exception as e:  # noqa: BLE001
-            console.failure_card("weights", hub.classify_hub_error(e, m.weights))
+            _fail_card("weights", hub.classify_hub_error(e, m.weights))
             console.note("the image is loaded; weights can also download at first boot "
                          "(slower, inside the container)", marker="⚠", style="warning")
 
@@ -205,7 +212,7 @@ def pull(
 
 
 # ------------------------------------------------------------------------- serve
-@app.command()
+@app.command(rich_help_panel="Run models")
 def serve(
     target: str = typer.Argument(..., help="org/name (pulled) or a manifest path."),
     profile: Optional[str] = typer.Option(None, "--profile", help="Serve profile (default: the manifest's default_profile)."),
@@ -276,7 +283,7 @@ def serve(
 
 
 # -------------------------------------------------------------------------- stop
-@app.command()
+@app.command(rich_help_panel="Run models")
 def stop(
     target: str = typer.Argument(..., help="org/name, a manifest path, or a container name."),
 ):
@@ -315,7 +322,7 @@ def stop(
 
 
 # -------------------------------------------------------------------------- logs
-@app.command()
+@app.command(rich_help_panel="Run models")
 def logs(
     target: str = typer.Argument(..., help="org/name, a manifest path, or a container name."),
     follow: bool = typer.Option(False, "--follow", "-f", help="Stream."),
@@ -340,7 +347,7 @@ def logs(
 
 
 # -------------------------------------------------------------------------- list
-@app.command("list")
+@app.command("list", rich_help_panel="Run models")
 def list_(
     target: Optional[str] = typer.Argument(None, help="Optional org/name or manifest path: show its serve profiles."),
 ):
@@ -368,15 +375,16 @@ def list_(
     images = container.images()
     rows = container.running()
     if not images and not rows:
-        typer.echo("no tt-model images or containers on this machine")
-        typer.echo("  tt-model pull <org/name>   # or: tt-model package <manifest.yaml>")
+        console.note("no tt-model images or containers on this machine", marker="○")
+        console.note("tt-model pull <org/name>   # or: tt-model package <manifest.yaml>",
+                     marker="→")
         return
     if images:
-        typer.echo("images:")
+        console.note("images:", marker="•", style="accent")
         for i in images:
             typer.echo(f"  {i['image']:48s} {i['size']:>10s}  {i['created']}")
     if rows:
-        typer.echo("containers:")
+        console.note("containers:", marker="•", style="accent")
         for r in rows:
             typer.echo(f"  {r['name']:48s} {r['status']}  {r['ports']}")
 

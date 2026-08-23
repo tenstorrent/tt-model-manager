@@ -30,7 +30,7 @@ from tt_model import console
 # The seam: point these at whatever commands exercise the output layer.
 CLI = [sys.executable, "-m", "tt_model.cli"]
 TARGETS = {
-    "plain": ["doctor"],                      # structured, no network
+    "plain": ["list"],                        # structured, no network
     "help": ["--help"],
     "version": ["--version"],
 }
@@ -122,7 +122,7 @@ class TestNarrowTerminal:
         assert res.returncode == 0, res.stderr
 
     @pytest.mark.parametrize("columns", [40, 200])
-    def test_doctor_renders_at_any_width(self, columns):
+    def test_plain_renders_at_any_width(self, columns):
         res = run(TARGETS["plain"], columns=columns)
         assert res.returncode in (0, 1), res.stderr   # 1 = inadequate toolchain, still valid
         assert "\x1b" not in res.stdout
@@ -166,8 +166,7 @@ class TestPty:
 
 
 # ── 5. --help is documentation ────────────────────────────────────────────────
-EXPECTED_PANELS = ["Get started", "Run a model", "Get models", "Publish models",
-                   "Environment", "Maintenance"]
+EXPECTED_PANELS = ["Run models", "Publish models"]
 
 
 class TestHelpGrouping:
@@ -179,12 +178,11 @@ class TestHelpGrouping:
         for panel in EXPECTED_PANELS:
             assert panel in out, f"missing help panel: {panel}"
 
-    def test_get_started_comes_first(self):
-        """Panel order follows source order of the first command in each. A new user should
-        meet `start`/`install` before `push`."""
+    def test_publishing_comes_first(self):
+        """The tool's job order is package -> push -> pull/serve; help reads the same way."""
         out = self._help()
         positions = {p: out.index(p) for p in EXPECTED_PANELS if p in out}
-        assert positions["Get started"] == min(positions.values())
+        assert positions["Publish models"] == min(positions.values())
 
     def test_every_command_lives_in_a_panel(self):
         """An ungrouped command falls into a generic "Commands" box, which is how a flat
@@ -198,10 +196,11 @@ class TestHelpGrouping:
         assert "make-test-cache" not in out
         assert "\ndev " not in out
 
-    def test_the_guided_entry_point_is_advertised(self):
-        assert "start" in self._help()
+    def test_the_consumer_entry_point_is_advertised(self):
+        out = self._help()
+        assert "pull" in out and "serve" in out
 
-    @pytest.mark.parametrize("cmd", ["start", "install", "serve", "pull", "doctor"])
+    @pytest.mark.parametrize("cmd", ["package", "push", "pull", "serve", "stop", "logs", "list"])
     def test_each_command_help_renders_and_is_escape_free_when_piped(self, cmd):
         res = run([cmd, "--help"], columns=100)
         assert res.returncode == 0, res.stderr

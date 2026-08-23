@@ -31,8 +31,9 @@ class HostDevices:
     chips: int
 
 
-def detect(by_id: Path = BY_ID) -> Optional[HostDevices]:
+def detect(by_id: Optional[Path] = None) -> Optional[HostDevices]:
     """What this host has, or None when no TT devices are visible."""
+    by_id = by_id or BY_ID   # module attr read at call time, so tests can repoint it
     try:
         entries = [e.name for e in by_id.iterdir() if not e.name.startswith(".")]
     except OSError:

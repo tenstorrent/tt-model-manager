@@ -305,7 +305,7 @@ def build_argv(staged: Staged) -> List[str]:
 
 
 # ------------------------------------------------------------- the interrupt guard
-_STAGE_RE = re.compile(r"^#\d+ \[[^]]+\]")
+_STAGE_RE = re.compile(r"^#\d+ \[(?P<stage>[^]]+)\]")
 
 
 class InterruptGuard:
@@ -352,8 +352,9 @@ class InterruptGuard:
 
     def note_line(self, line: str) -> None:
         """Feed output lines through so the warning card can name the current stage."""
-        if _STAGE_RE.match(line):
-            self.current_stage = line.split(" ", 2)[1].strip("[]")
+        m = _STAGE_RE.match(line)
+        if m:
+            self.current_stage = m.group("stage")
 
     # -- signals ---------------------------------------------------------------------
     def _handle(self, sig, frame):
