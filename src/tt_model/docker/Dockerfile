@@ -52,7 +52,7 @@ FROM prep AS metal-local
 COPY --from=metalsrc \
     --exclude=.git --exclude=.cpmcache --exclude=build_Release* --exclude=build \
     --exclude=built --exclude=python_env --exclude=.venv* --exclude=generated \
-    --exclude=models --exclude=docs --exclude=tech_reports --exclude=tests \
+    --exclude=models --exclude=docs --exclude=tech_reports \
     --exclude=tt-train --exclude=model_tracer --exclude=.github \
     . /opt/tt-metal
 
@@ -63,7 +63,7 @@ RUN git clone --filter=blob:none "${METAL_GIT_REPO}" /opt/tt-metal \
     && git -C /opt/tt-metal checkout "${METAL_GIT_REF}" \
     && git -C /opt/tt-metal submodule update --init --recursive --depth 1 \
     && rm -rf /opt/tt-metal/.git /opt/tt-metal/models /opt/tt-metal/docs \
-       /opt/tt-metal/tech_reports /opt/tt-metal/tests /opt/tt-metal/tt-train
+       /opt/tt-metal/tech_reports /opt/tt-metal/tt-train
 
 #############################################################
 # builder

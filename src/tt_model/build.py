@@ -84,9 +84,12 @@ def scm_version(metal: Path) -> str:
     return version
 
 
+# NOT excluded: tests/ — tools/scaleout/fabric_manager #includes headers out of
+# tests/tt_metal/test_utils, so the default build needs the tree present (it still
+# never reaches the runtime image: that stage COPYs named dirs only).
 METAL_CONTEXT_EXCLUDES = (
     ".git", ".cpmcache", "python_env", "generated", "built", "models", "docs",
-    "tech_reports", "tests", "tt-train", "model_tracer", ".github", "infra", "jobs",
+    "tech_reports", "tt-train", "model_tracer", ".github", "infra", "jobs",
     "releases", "dockerfile", "contributing", ".claude",
 )
 
