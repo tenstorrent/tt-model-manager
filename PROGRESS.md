@@ -25,7 +25,7 @@ Watch this file: `cat /home/ttuser/dev/tt-model-manager/PROGRESS.md`
 - [x] `hardware.py`, `oci.py`, `hub.py`, `container.py` written
 - [x] `docker/Dockerfile` (builder + runtime stages, cache mounts, type hooks) — src/tt_model/docker/
 - [x] `docker/entrypoint.sh` (exec, PID-1 SIGTERM)
-- [~] Real laguna image build IN PROGRESS (attempt 4; fixed: describe stub, tests/ headers)
+- [x] Real laguna image built + in-image verify PASSED (attempt 6; 10.4 GB, 2.2 GB as OCI blobs)
 
 ## 4. build.py + package
 - [x] Provenance resolution (local path / git ref → sha, scm version)
@@ -52,6 +52,6 @@ Watch this file: `cat /home/ttuser/dev/tt-model-manager/PROGRESS.md`
 - [~] 7 commits so far; final pass after acceptance
 
 ## 8. On-hardware acceptance (long; requires the box + HF auth)
-- [ ] package laguna → image builds, verify RUN passes
-- [ ] serve local, curl OK; stop is clean
+- [x] package laguna → image builds, verify RUN passes (imports, CPU torch, plugin registration, precision-config, SDPA)
+- [~] serve local: container up, model registered, booting (~10 min)
 - [ ] HF round-trip; self-containment checks
