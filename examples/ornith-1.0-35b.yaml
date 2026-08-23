@@ -2,7 +2,7 @@
 # its in-tree plugin, launched via tt-metal's readiness runner).
 # Transcribed from the Ornith-1.0-35B p150x4 quickstart.
 schema: 1
-repo: hous/ornith-1.0-35b
+repo: tt-hous/ornith-1.0-35b
 name: ornith-1.0-35b
 weights: ornith-ai/Ornith-1.0-35B      # ~77 GB in the HOST HF cache
 type: vllm-legacy

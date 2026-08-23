@@ -71,7 +71,18 @@ RUN git clone --filter=blob:none "${METAL_GIT_REPO}" /opt/tt-metal \
 FROM metal-${METAL_MODE} AS builder
 
 ARG SCM_VERSION
+ARG METAL_DESCRIBE=v0.0.0
 WORKDIR /opt/tt-metal
+
+# The tree ships without .git, but tt-metal's CMake derives PROJECT_VERSION from
+# `git describe` (cmake/version.cmake ParseGitDescribe) and configuration FAILS with an
+# empty version. A one-empty-commit repo tagged with the HOST checkout's describe string
+# reproduces the real version — and satisfies setup.py's srcdir .git assertion — without
+# any actual history entering the image (it is pruned before the runtime stage).
+RUN git init -q /opt/tt-metal \
+    && git -C /opt/tt-metal -c user.email=tt-model@tenstorrent.com -c user.name=tt-model \
+       commit -q --allow-empty -m "tt-model version stub" \
+    && git -C /opt/tt-metal tag "${METAL_DESCRIBE}"
 
 # The model's own code — needed in the builder too: the engine step may pip-install
 # the model's vllm extension out of it.
@@ -86,13 +97,10 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 
 # Editable install of ttnn from this tree (setup.py skips cmake for srcdir installs —
 # the build above produced _ttnn.so; this step wires the tree up and writes
-# ttnn-custom.pth). Two quirks, both from tt-metal's setup.py:
-#   - it asserts <root>/.git EXISTS for a srcdir editable install; an empty dir passes.
-#   - SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TTNN skips SCM entirely, so no git metadata
-#     (and no reference to the fork) is ever inside the image.
-RUN mkdir -p /opt/tt-metal/.git \
-    && SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TTNN="${SCM_VERSION}" \
-       uv pip install --python "$VENV/bin/python" --no-build-isolation -e /opt/tt-metal
+# ttnn-custom.pth). SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TTNN makes scm take the version
+# as-is: no SCM lookup, so no fork metadata is ever consulted or embedded.
+RUN SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TTNN="${SCM_VERSION}" \
+    uv pip install --python "$VENV/bin/python" --no-build-isolation -e /opt/tt-metal
 
 # The serving stack — generated per model type by build.py (see tt_model/types/).
 # tt-smi rides along so `tt-model stop` can reset the mesh from a throwaway container.

@@ -140,7 +140,10 @@ def resolve_metal_source(m: Manifest, scratch: Path) -> MetalSource:
         _copy_metal_tree(metal, filtered)
         return MetalSource(
             mode="local", context=filtered, origin=metal, sha=sha,
-            describe=_git(metal, "describe", "--tags", "--always", "--dirty"),
+            # tt-metal's OWN describe invocation (cmake/version.cmake), so the stub tag
+            # the Dockerfile creates reproduces the exact PROJECT_VERSION
+            describe=_git(metal, "describe", "--abbrev=10", "--first-parent",
+                          "--dirty=-dirty"),
             dirty=bool(status), scm_version=scm_version(metal),
         )
     # git mode: the Dockerfile clones; metalsrc becomes an empty placeholder context.
@@ -318,6 +321,7 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
         "MODEL_ARCH": m.arch,
         "MODEL_PROFILES": profiles,
     }
+    build_args["METAL_DESCRIBE"] = metal.describe or "v0.0.0"
     if metal.mode == "git":
         build_args["METAL_GIT_REPO"] = metal.git_repo or ""
         build_args["METAL_GIT_REF"] = metal.git_ref or ""

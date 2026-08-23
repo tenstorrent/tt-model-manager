@@ -2,7 +2,7 @@
 # Transcribed from the validated recipe in
 # tt-metal/models/autoports/poolside_laguna_xs_2_1/{setup_vllm.sh,serve_vllm.sh}.
 schema: 1
-repo: hous/laguna-xs-2.1
+repo: tt-hous/laguna-xs-2.1
 name: laguna-xs-2.1
 weights: poolside/Laguna-XS-2.1        # gated, ~63 GB — lands in the HOST HF cache
 type: vllm
