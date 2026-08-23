@@ -54,8 +54,16 @@ class VllmType:
                 "— for the tenstorrent/vllm fork use type: vllm-legacy"
             )
         plugin = rt.get("plugin") or {}
-        if not plugin.get("repo") or not plugin.get("ref"):
-            raise ManifestError("type vllm requires runtime.plugin.{repo, ref} (the standalone vllm-tt-plugin)")
+        has_git = plugin.get("repo") and plugin.get("ref")
+        has_pypi = plugin.get("version")
+        if not has_git and not has_pypi:
+            raise ManifestError(
+                "type vllm requires runtime.plugin as {repo, ref} (a git checkout — pin "
+                "the sha the model was VALIDATED with) or {version: \"X.Y.Z\"} (a PyPI "
+                "release that already contains the model's registration)"
+            )
+        if has_git and has_pypi:
+            raise ManifestError("runtime.plugin: give {repo, ref} or {version}, not both")
         for key in rt:
             if key not in ("vllm", "plugin", "extension", "lock", "overrides"):
                 raise ManifestError(f"type vllm does not understand runtime.{key}")
@@ -66,7 +74,7 @@ class VllmType:
         rt = m.runtime
         version = rt["vllm"]["version"]
         plugin = rt["plugin"]
-        plugin_ref = plugin.get("sha") or plugin["ref"]
+        plugin_ref = plugin.get("sha") or plugin.get("ref")
         lines: List[str] = []
 
         if rt.get("lock"):
@@ -94,13 +102,20 @@ class VllmType:
         # rides along with CPU torch is unloadable — the validated recipe removes it.
         lines += ['uv pip uninstall --python "$VENV/bin/python" torchaudio || true']
 
-        lines += [
-            # Standalone plugin, NON-editable: the clone does not survive into the image.
-            f"git clone {shlex.quote(plugin['repo'])} /tmp/vllm-tt-plugin"
-            f" && git -C /tmp/vllm-tt-plugin checkout {shlex.quote(plugin_ref)}"
-            f' && uv pip install --python "$VENV/bin/python" /tmp/vllm-tt-plugin'
-            f" && rm -rf /tmp/vllm-tt-plugin",
-        ]
+        if plugin.get("version"):
+            # A PyPI release — legal only when it already registers this model.
+            lines += [
+                f'uv pip install --python "$VENV/bin/python" '
+                f"vllm-tt-plugin=={plugin['version']}",
+            ]
+        else:
+            lines += [
+                # Standalone plugin, NON-editable: the clone does not survive into the image.
+                f"git clone {shlex.quote(plugin['repo'])} /tmp/vllm-tt-plugin"
+                f" && git -C /tmp/vllm-tt-plugin checkout {shlex.quote(plugin_ref)}"
+                f' && uv pip install --python "$VENV/bin/python" /tmp/vllm-tt-plugin'
+                f" && rm -rf /tmp/vllm-tt-plugin",
+            ]
         if rt.get("extension"):
             # The model's own vLLM extension (general-plugins entry point + extra_models).
             # It ships inside code/, so install it from the staged tree in the image.

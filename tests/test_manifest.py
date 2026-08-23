@@ -31,7 +31,7 @@ def _validate(raw):
 
 # ---------------------------------------------------------------- the examples
 def test_both_examples_load_and_roundtrip():
-    for name in ("laguna-xs-2.1.yaml", "ornith-1.0-35b.yaml"):
+    for name in ("laguna-xs-2.1.yaml", "ornith-1.0-35b.yaml", "muse-glimmer-30b.yaml"):
         m = load_manifest(EXAMPLES / name)
         again = Manifest.model_validate(yaml.safe_load(m.to_yaml()))
         again.validate_semantics()
@@ -116,6 +116,26 @@ def test_required_merged_fields(field):
         prof.pop(field, None)
     raw.get("serve", {}).pop(field, None)
     with pytest.raises(ManifestError, match=field):
+        _validate(raw)
+
+
+def test_vllm_plugin_accepts_pypi_release():
+    raw = _raw("laguna-xs-2.1.yaml")
+    raw["runtime"]["plugin"] = {"version": "0.2.0"}
+    _validate(raw)  # a release that already registers the model is legal
+
+
+def test_vllm_plugin_rejects_both_forms_at_once():
+    raw = _raw("laguna-xs-2.1.yaml")
+    raw["runtime"]["plugin"]["version"] = "0.2.0"
+    with pytest.raises(ManifestError, match="not both"):
+        _validate(raw)
+
+
+def test_vllm_plugin_requires_some_pin():
+    raw = _raw("laguna-xs-2.1.yaml")
+    raw["runtime"]["plugin"] = {}
+    with pytest.raises(ManifestError, match="repo, ref.*version"):
         _validate(raw)
 
 

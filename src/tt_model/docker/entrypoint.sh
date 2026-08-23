@@ -19,6 +19,10 @@ mkdir -p "$TT_METAL_LOGS_PATH"
 # vllm.general_plugins group and silently kills the model's tool/reasoning parsers.
 unset VLLM_PLUGINS
 
+# Empty means "the model uses the plugin's builtin registry" — hand the plugin its
+# own default rather than an empty string.
+[ -z "${TT_VLLM_BUILTIN_MODELS:-}" ] && unset TT_VLLM_BUILTIN_MODELS
+
 cd "$HOME/work"
 
 # exec so the server is PID 1 and receives docker stop's SIGTERM: a clean shutdown

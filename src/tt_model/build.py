@@ -211,6 +211,8 @@ def stage_code(manifest: Manifest, metal: Path, dest: Path) -> List[str]:
                     "__pycache__", "*.pyc", ".pytest_cache", "*.egg-info",
                     ".venv", "venv", "build", "generated", "logs", "*.log",
                     "*.safetensors", "*.pt", "*.pth", "*.ckpt", "*.bin",
+                    # readiness/bring-up artifacts that litter real autoport dirs
+                    "*.refpt", "readiness_*",
                 ),
             )
         else:
@@ -317,6 +319,8 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
         "METAL_MODE": metal.mode,
         "SCM_VERSION": metal.scm_version,
         "EXTRA_MODELS_DIR": f"/opt/tt-metal/{ext}/extra_models" if ext else "",
+        # suppress builtin registration only when the model ships its own extension
+        "TT_VLLM_BUILTIN_MODELS": "0" if ext else "",
         "TT_MODEL_TYPE": m.type,
         "MODEL_NAME": m.name,
         "MODEL_REPO": m.repo,

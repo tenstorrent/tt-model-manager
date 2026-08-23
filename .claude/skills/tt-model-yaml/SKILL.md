@@ -24,12 +24,22 @@ Read, in this order (skip what doesn't exist):
 
 1. `<model_dir>/serve_vllm.sh`, `setup_vllm.sh`, `run*.sh` — the launch recipe and env
    pins. This is the highest-value input; most fields transcribe from here.
+   **The recipe may live OUTSIDE the model dir**: also check the repo root, a
+   `quickstart/` or handoff directory near the checkout, and ask the user where the
+   model was last served from.
 2. `<model_dir>/README.md` — validated hardware, mesh, context length, quirks.
 3. `<model_dir>/vllm_ext/` — if present: an installable vLLM extension
-   (`runtime.extension`) with `extra_models/*/vllm_metadata.json`.
+   (`runtime.extension`) with `extra_models/*/vllm_metadata.json`. **If absent**, the
+   model is likely in the plugin's BUILTIN registry (grep the plugin checkout's
+   `platform.py` for the model name): omit `runtime.extension`, and the plugin pin
+   must be a commit/release that CONTAINS the registration — add a `verify:` entry
+   asserting it (e.g. the class name appears in `inspect.getsource` of
+   `vllm_tt_plugin.platform`).
 4. `<model_dir>/requirements.txt`, `overrides.txt` — version pins and their comments.
 5. **The working venv**, if one exists on this box (ask the user which venv last served
-   the model). It is the ground truth for pins:
+   the model). It is the ground truth for pins — **when it contradicts the README,
+   the venv wins** (a README saying `pip install vllm-tt-plugin` while the venv runs
+   an editable git checkout means the PyPI release does NOT yet work for this model):
    ```bash
    <venv>/bin/python -c "import importlib.metadata as md; d=md.distribution('vllm'); print(d.version)"
    <venv>/bin/python -c "import importlib.metadata as md; print(md.distribution('vllm-tt-plugin').read_text('direct_url.json'))"
@@ -58,7 +68,14 @@ grep -rhoE "(from|import) +models\.[a-zA-Z0-9_.]+" <model_dir> models/common 2>/
 ```
 
 Then iterate: for each new top-level package the grep surfaces (e.g. `models/common`),
-grep *it* too, until closed. Almost every autoport needs `models/common`.
+grep *it* too, until closed. Almost every autoport needs `models/common`; closures
+crossing into `models/tt_transformers` (via `model_config` imports) are common too.
+
+**List subpaths, never the model dir root.** Real autoport dirs carry bring-up debris —
+`readiness_*` results (tens of MB), `.refpt` reference tensors, `generated/`, and
+hundreds of MB under `doc/` — that must not ship. Name `tt/`, `vllm_ext/`, `tests/`
+(only if the closure proved it), and the specific data subdirs (e.g.
+`doc/datatype_sweep`), not the parent.
 
 **Also hunt for runtime DATA files** — code that reads files relative to the model dir:
 
@@ -90,11 +107,15 @@ actually validated; `default_profile` is required when there is more than one.
 
 ## Step 5 — Pin the runtime (never `main`)
 
-- `vllm` type: `runtime.vllm.version` = the exact version from the script/venv;
-  `runtime.plugin.ref` = **the commit sha from the working venv's `direct_url.json`**
-  (step 1.5). A branch name is a drift bomb: a real model packaged against
-  `plugin@main` hit a first-decode TT_FATAL because main had moved past the validated
-  sha. If no venv survives, use the sha and say in a comment where it came from.
+- `vllm` type: `runtime.vllm.version` = the exact version from the script/venv.
+  `runtime.plugin` is `{repo, ref}` with **the commit sha from the working venv's
+  `direct_url.json`** (step 1.5) — or `{version: "X.Y.Z"}` for a PyPI release that
+  already registers the model. A branch name is a drift bomb: a real model packaged
+  against `plugin@main` hit a first-decode TT_FATAL because main had moved past the
+  validated sha. If the venv runs an editable checkout, pin THAT checkout's HEAD sha
+  and confirm it is pushed somewhere reachable (`git branch -r --contains HEAD`); if
+  the checkout is dirty in files this model touches, STOP and tell the user to commit
+  and push first — an unreproducible pin is not a pin.
 - `vllm-legacy`: `runtime.vllm.ref` = the fork sha the README/venv names.
 - If a working venv exists, seed the lock:
   ```bash

@@ -194,7 +194,12 @@ ENV PYTHONPATH=/opt/tt-metal
 # known upstream bug pattern — do not "simplify" this line.
 ENV LD_LIBRARY_PATH=/opt/tt-metal/build/lib:${OMPI_DIR}/lib
 ENV EXTRA_MODELS_DIR=${EXTRA_MODELS_DIR}
-ENV TT_VLLM_BUILTIN_MODELS=0
+# "0" ONLY when the model ships its own vllm_ext (register solely from
+# EXTRA_MODELS_DIR); empty for a model that lives in the plugin's BUILTIN registry —
+# setting 0 there would register zero architectures. The entrypoint unsets an empty
+# value so the plugin sees its own default.
+ARG TT_VLLM_BUILTIN_MODELS=""
+ENV TT_VLLM_BUILTIN_MODELS=${TT_VLLM_BUILTIN_MODELS}
 ENV TT_MODEL_TYPE=${TT_MODEL_TYPE}
 ENV HF_HOME=/hf
 ENV TT_METAL_CACHE=/cache

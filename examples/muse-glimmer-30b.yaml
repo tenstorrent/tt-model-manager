@@ -1,0 +1,67 @@
+# Muse-Glimmer-30B on QB2 (2× P300 boards = 4 Blackhole chips) — type: vllm with the
+# model registered in the PLUGIN'S BUILTIN registry: no vllm_ext, no runtime.extension.
+# Transcribed from the validated bring-up at ~/dev/muse-glimmer (quickstart README +
+# the muse-glimmer_pyenv venv that actually served it).
+schema: 1
+repo: tt-hous/muse-glimmer-30b
+name: muse-glimmer-30b
+weights: meta-models/Muse-Glimmer-30B   # public, ungated, ~56 GB
+type: vllm
+arch: blackhole
+
+source:
+  tt_metal:
+    repo: https://github.com/tenstorrent/tt-metal
+    ref: agentic-research/hous/muse-glimmer-30b   # resolved to a sha at package time
+  code:
+    # the import closure crosses THREE packages — computed, not eyeballed:
+    # tt/ imports models.common.* AND models.tt_transformers.tt.model_config
+    - models/common
+    - models/tt_transformers
+    - models/autoports/meta_models_muse_glimmer_30b/tt
+    # the model dir root is NOT listed: it carries 81 MB of readiness_* artifacts,
+    # .refpt reference tensors, and 556 MB under doc/ — only the one load-bearing
+    # config subdir ships:
+    - models/autoports/meta_models_muse_glimmer_30b/doc/datatype_sweep
+  ubuntu: "22.04"
+  python: "3.12"
+
+runtime:
+  vllm: {version: "0.24.0"}
+  plugin:
+    # The registration for this model lives in the plugin itself (builtin registry),
+    # so the pin must be a commit that CONTAINS it. The validated venv ran this exact
+    # checkout (direct_url.json -> ~/dev/vllm-tt-plugin @ HEAD, pushed as
+    # housTT/register-muse-glimmer-30b). Move to {version: "..."} once a PyPI release
+    # includes the registration.
+    repo: https://github.com/housTT/vllm-tt-plugin
+    ref: 106744c01de96825ed8c81226f4fa043e8e929f4
+  # no extension: builtin registry — TT_VLLM_BUILTIN_MODELS stays unset in the image
+
+verify:
+  # the same silent-fallback precision-config pattern as laguna — assert it shipped
+  - "import pathlib; p = pathlib.Path('/opt/tt-metal/models/autoports/meta_models_muse_glimmer_30b/doc/datatype_sweep/selected_precision_config.json'); assert p.exists(), f'{p} missing: model would silently serve with default precision'"
+  - "import models.autoports.meta_models_muse_glimmer_30b.tt.generator_vllm"
+  # builtin registration: the plugin pin must actually contain this model
+  - "import vllm_tt_plugin.platform as p; import inspect; assert 'MuseGlimmerForConditionalGeneration' in inspect.getsource(p), 'plugin pin lacks the Muse-Glimmer registration'"
+
+serve:
+  port: 8000
+  block_size: 64                        # the TT backend rejects vLLM's default
+
+serve_profiles:
+  - name: p300x2
+    description: QB2, four chips, ring fabric, full 131k context. The validated deployment.
+    hardware: p300x2                    # 2 boards x 2 chips = 4 = the (1,4) mesh
+    mesh_device: P300x2
+    max_num_seqs: 32
+    max_model_len: 131072
+    additional_config:
+      tt:
+        sample_on_device_mode: all
+        trace_region_size: 400000000
+        fabric_config: FABRIC_1D_RING
+        fabric_packet_payload_bytes: 8192
+        l1_small_size: 6144
+        trace_mode: decode_only
+default_profile: p300x2

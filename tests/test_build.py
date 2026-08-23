@@ -96,6 +96,8 @@ def test_stage_writes_ctx_and_pins_manifest(tmp_path, monkeypatch):
     # build args wire the type + extension through
     assert staged.build_args["TT_MODEL_TYPE"] == "vllm"
     assert staged.build_args["EXTRA_MODELS_DIR"].endswith("vllm_ext/extra_models")
+    # extension present -> builtin registration suppressed; absent -> left to the plugin
+    assert staged.build_args["TT_VLLM_BUILTIN_MODELS"] == "0"
     assert staged.build_args["PYTHON_VERSION"] == "3.12"
     argv = build.build_argv(staged)
     assert "--progress=plain" in argv
