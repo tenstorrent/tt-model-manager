@@ -4,36 +4,32 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tt-model"
-version = "0.1.0"
-description = "Publish and pull precompiled tt-metal kernel caches over Hugging Face Hub"
+version = "0.2.0"
+description = "Package Tenstorrent models as Docker images and publish them on Hugging Face"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Tenstorrent" }]
-keywords = ["tenstorrent", "tt-metal", "ttnn", "kernel-cache", "huggingface"]
+keywords = ["tenstorrent", "tt-metal", "ttnn", "vllm", "docker", "huggingface"]
 dependencies = [
-    "huggingface_hub>=0.23",
+    "huggingface_hub>=0.34",
     "typer>=0.12",
     "rich>=13",
     "pydantic>=2",
-    "packaging>=21",
+    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
-# The legacy-runner OpenAI server (`python -m tt_kernel.legacy_serve`) — only needed to
-# serve a legacy (dispatch-contract) runner bundle. The vLLM path does not use this.
-serve = ["fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.scripts]
-tt-model = "tt_kernel.cli:main"
-tt-kernel = "tt_kernel.cli:main"  # legacy alias (deprecated)
+tt-model = "tt_model.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-tt_kernel = ["py.typed"]
+tt_model = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

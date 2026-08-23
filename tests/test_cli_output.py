@@ -25,10 +25,10 @@ import sys
 
 import pytest
 
-from tt_kernel import console
+from tt_model import console
 
 # The seam: point these at whatever commands exercise the output layer.
-CLI = [sys.executable, "-m", "tt_kernel.cli"]
+CLI = [sys.executable, "-m", "tt_model.cli"]
 TARGETS = {
     "plain": ["doctor"],                      # structured, no network
     "help": ["--help"],
@@ -133,7 +133,7 @@ class TestNarrowTerminal:
         line = "A=1 B=2 " + " ".join(f"--flag-{i} value-{i}" for i in range(40))
         prog = (
             "import sys; sys.path.insert(0, 'src')\n"
-            "from tt_kernel import console\n"
+            "from tt_model import console\n"
             f"console.raw({line!r})\n"
         )
         res = subprocess.run([sys.executable, "-c", prog], capture_output=True, text=True,
