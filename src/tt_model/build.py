@@ -84,10 +84,31 @@ def scm_version(metal: Path) -> str:
     return version
 
 
+METAL_CONTEXT_EXCLUDES = (
+    ".git", ".cpmcache", "python_env", "generated", "built", "models", "docs",
+    "tech_reports", "tests", "tt-train", "model_tracer", ".github", "infra", "jobs",
+    "releases", "dockerfile", "contributing", ".claude",
+)
+
+
+def _copy_metal_tree(metal: Path, dest: Path) -> None:
+    def _ignore(dirpath, names):
+        drop = set()
+        for n in names:
+            if n in METAL_CONTEXT_EXCLUDES or n.startswith((".venv", "build_", "build")):
+                drop.add(n)
+            elif n == "venv" or n.endswith(".log"):
+                drop.add(n)
+        return drop
+
+    shutil.copytree(metal, dest, symlinks=True, ignore=_ignore)
+
+
 @dataclass
 class MetalSource:
     mode: str                 # "local" | "git"
-    context: Path             # dir handed to --build-context metalsrc=
+    context: Path             # dir handed to --build-context metalsrc= (filtered copy)
+    origin: Optional[Path]    # the author's actual checkout (local mode) — code/ stages from here
     sha: Optional[str]        # commit, when known
     describe: Optional[str]
     dirty: bool
@@ -107,8 +128,14 @@ def resolve_metal_source(m: Manifest, scratch: Path) -> MetalSource:
             )
         sha = _git(metal, "rev-parse", "HEAD")
         status = _git(metal, "status", "--porcelain")
+        # A filtered copy becomes the build context: handing BuildKit the raw checkout
+        # would transfer the whole worktree (.git 4.6G, .cpmcache 3.6G, python_env
+        # 3.8G, build trees ...) before the Dockerfile's excludes ever run. The tracked
+        # source is ~400 MB; this copy takes seconds and IS the hermetic input.
+        filtered = scratch / "metalsrc"
+        _copy_metal_tree(metal, filtered)
         return MetalSource(
-            mode="local", context=metal, sha=sha,
+            mode="local", context=filtered, origin=metal, sha=sha,
             describe=_git(metal, "describe", "--tags", "--always", "--dirty"),
             dirty=bool(status), scm_version=scm_version(metal),
         )
@@ -130,7 +157,7 @@ def resolve_metal_source(m: Manifest, scratch: Path) -> MetalSource:
             "and it is not a commit sha)"
         )
     return MetalSource(
-        mode="git", context=placeholder, sha=sha, describe=None, dirty=False,
+        mode="git", context=placeholder, origin=None, sha=sha, describe=None, dirty=False,
         scm_version="0.0.0.dev0", git_repo=src.repo, git_ref=sha,
     )
 
@@ -226,7 +253,7 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
     # -- code/ -------------------------------------------------------------------------
     code_dir = ctx / "code"
     if metal.mode == "local":
-        tree = stage_code(m, metal.context, code_dir)
+        tree = stage_code(m, metal.origin, code_dir)
     else:
         # git mode: shallow-clone just to stage code/ (the image build re-clones)
         tmp = ctx / "metal-for-code"

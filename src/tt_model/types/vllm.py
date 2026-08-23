@@ -32,6 +32,13 @@ READY_LINE = "Application startup complete"
 # install resolves the CUDA dependency set (~4 GB of nvidia-* wheels, no device here).
 PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 
+# ttnn pins numpy<2; recent vLLM asks for opencv-python-headless>=4.13, which requires
+# numpy>=2. A hard conflict, not a preference — pip cannot express the resolution, uv's
+# --override can. numpy<2 wins (fixed by ttnn); opencv 4.11 is the last release without
+# a numpy-2 floor, and vLLM only reaches opencv through its lazy video-IO path, which
+# no TT model uses. Mirrors the validated laguna overrides.txt.
+DEFAULT_OVERRIDES = ["numpy>=1.24.4,<2", "opencv-python-headless==4.11.0.86"]
+
 
 class VllmType:
     name = "vllm"
@@ -50,7 +57,7 @@ class VllmType:
         if not plugin.get("repo") or not plugin.get("ref"):
             raise ManifestError("type vllm requires runtime.plugin.{repo, ref} (the standalone vllm-tt-plugin)")
         for key in rt:
-            if key not in ("vllm", "plugin", "extension", "lock"):
+            if key not in ("vllm", "plugin", "extension", "lock", "overrides"):
                 raise ManifestError(f"type vllm does not understand runtime.{key}")
 
     # ---- image build ----------------------------------------------------------------
@@ -72,13 +79,20 @@ class VllmType:
                 f"--no-deps --no-binary vllm vllm=={version}",
             ]
         else:
-            # First build of a model: resolve live (vLLM's common.txt via the sdist's own
-            # metadata), then `package` freezes the result back out as requirements.lock.
+            # First build of a model: resolve live (vLLM's own metadata) under the
+            # numpy/opencv override, then `package` freezes the result back out as
+            # requirements.lock so every later build is reproducible.
+            overrides = DEFAULT_OVERRIDES + list(rt.get("overrides") or [])
+            quoted = " ".join(shlex.quote(o) for o in overrides)
             lines += [
+                f"printf '%s\n' {quoted} > /tmp/tt-overrides.txt",
                 f'VLLM_TARGET_DEVICE=empty uv pip install --python "$VENV/bin/python" '
-                f"--no-binary vllm vllm=={version} "
+                f"--no-binary vllm vllm=={version} --override /tmp/tt-overrides.txt "
                 f"--extra-index-url {PYTORCH_CPU_INDEX} --index-strategy unsafe-best-match",
             ]
+        # transformers imports torchaudio if it is merely installed, and the wheel that
+        # rides along with CPU torch is unloadable — the validated recipe removes it.
+        lines += ['uv pip uninstall --python "$VENV/bin/python" torchaudio || true']
 
         lines += [
             # Standalone plugin, NON-editable: the clone does not survive into the image.

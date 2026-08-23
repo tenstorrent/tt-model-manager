@@ -97,7 +97,14 @@ def test_stage_writes_ctx_and_pins_manifest(tmp_path, monkeypatch):
     assert staged.build_args["PYTHON_VERSION"] == "3.12"
     argv = build.build_argv(staged)
     assert "--progress=plain" in argv
-    assert f"metalsrc={metal}" in " ".join(argv)
+    # the context is a FILTERED copy (BuildKit must never see the 26 GB worktree),
+    # staged from the checkout but excluding models/, .git, build trees ...
+    joined = " ".join(argv)
+    assert f"metalsrc={staged.metal.context}" in joined
+    assert staged.metal.context != metal
+    assert (staged.metal.context / "tt_metal").is_dir()
+    assert not (staged.metal.context / "models").exists()
+    assert staged.metal.origin == metal
 
 
 def test_scm_version_scheme(tmp_path, monkeypatch):
