@@ -142,16 +142,18 @@ def render_install_sh(manifest: Manifest) -> str:
     pyver = (b.python if b and b.python else "3.12")
     plat_wheels = " ".join(f'"$HERE/{w.path}"' for w in (b.wheels if b else []))
     vendored = bool(b and b.deps_vendored)
+    # --link-mode=copy: copy wheel contents INTO the venv instead of hardlinking them from uv's
+    # global cache — the installed folder must not depend on anything outside its own wall.
     if vendored:
         install = (
-            f'uv pip install --python "$VENV/bin/python" --no-index '
+            f'uv pip install --python "$VENV/bin/python" --link-mode=copy --no-index '
             f'--find-links "$HERE/{WHEELS_DIR}" {plat_wheels} -r "$HERE/{REQUIREMENTS}"'
         )
         deps_note = "offline, from the vendored wheels (reproducible, no network)"
     else:
         install = (
-            f'uv pip install --python "$VENV/bin/python" {plat_wheels} && \\\n'
-            f'  uv pip install --python "$VENV/bin/python" '
+            f'uv pip install --python "$VENV/bin/python" --link-mode=copy {plat_wheels} && \\\n'
+            f'  uv pip install --python "$VENV/bin/python" --link-mode=copy '
             f'--extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{REQUIREMENTS}"'
         )
         deps_note = "from the CPU index (deps not vendored — pass --vendor-deps for offline)"
@@ -159,6 +161,12 @@ def render_install_sh(manifest: Manifest) -> str:
 # Install this self-contained TT model package into an isolated, reproducible venv (via uv).
 # Usage: ./{INSTALL_SCRIPT} [venv-path]   (default: ./venv)
 # Deps: {deps_note}
+#
+# HERMETIC INSTALL: everything the model needs to SERVE ends up UNDER this folder — the pinned
+# interpreter (in .python/), the venv (with package contents copied in), and at serve time the
+# caches/weights (run.sh points HF_HOME/TT_CACHE_PATH/... here). After this runs, serving depends
+# on nothing outside the folder except the TT device + system libc. Only THIS install step reaches
+# the network (to fetch the interpreter and, unless --vendor-deps, the pip deps).
 set -euo pipefail
 HERE="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 VENV="${{1:-$HERE/venv}}"
@@ -171,10 +179,14 @@ if ! command -v uv >/dev/null 2>&1; then
   export PATH="$HERE/.uv:$PATH"
 fi
 
-# Provision the exact interpreter (uv downloads it if the host lacks it) and build the venv.
-uv venv --python "$PYVER" "$VENV"
+# Keep the pinned interpreter INSIDE the bundle (not in uv's global ~/.local store), so the venv's
+# python resolves within the folder wall. python-build-standalone (what uv provisions) is
+# relocatable, so a --relocatable venv built against it stays self-contained.
+export UV_PYTHON_INSTALL_DIR="$HERE/.python"
+uv python install "$PYVER"
+uv venv --relocatable --python "$PYVER" "$VENV"
 {install}
-echo "installed into $VENV (python $PYVER)"
+echo "installed into $VENV (python $PYVER, interpreter under $HERE/.python)"
 """
 
 
@@ -243,6 +255,15 @@ export TT_VLLM_BUILTIN_MODELS=0
 export PYTHONPATH="$HERE/{METAL_DIR}:${{PYTHONPATH:-}}"   # resolves the adapter's models.* imports
 export MESH_DEVICE="${{MESH_DEVICE:-{mesh_device}}}"
 export TT_METAL_VISIBLE_DEVICES="${{TT_METAL_VISIBLE_DEVICES:-0}}"
+# HERMETIC RUNTIME: keep every cache/home INSIDE the folder wall, so serving writes and reads
+# nothing outside it (the ttnn tensor cache even DEFAULTS to a hard-coded /mnt/... path upstream —
+# a classic other-machine leak we must override). Each is overridable if the operator sets it.
+export HF_HOME="${{HF_HOME:-$HERE/.hf}}"                  # HF weights + hub cache
+export TT_CACHE_PATH="${{TT_CACHE_PATH:-$HERE/.tt_cache}}"    # ttnn weight/tensor cache
+export TT_CACHE_HOME="${{TT_CACHE_HOME:-$HERE/.tt_cache}}"    # override upstream's /mnt/... default
+export XDG_CACHE_HOME="${{XDG_CACHE_HOME:-$HERE/.cache}}"     # generic catch-all (triton, etc.)
+export TRITON_CACHE_DIR="${{TRITON_CACHE_DIR:-$HERE/.cache/triton}}"
+export TORCHINDUCTOR_CACHE_DIR="${{TORCHINDUCTOR_CACHE_DIR:-$HERE/.cache/inductor}}"
 {hf_export}{extra_env}CMD=("$PYBIN" -m vllm.entrypoints.openai.api_server --model "{weights}" {serving} "$@")
 # TT_MODEL_PRINT=1 (set by `tt-model serve --print`) echoes the fully-resolved command+env
 if [ "${{TT_MODEL_PRINT:-0}}" = "1" ]; then

@@ -119,6 +119,18 @@ def test_stage_package_layout(tmp_path):
     assert 'export HF_MODEL=' in run               # adapter reads HF_MODEL from env
     assert "--max_num_seqs 32" in run and "--block_size 64" in run  # TT backend defaults
     assert "unsloth/Llama-3.2-3B-Instruct" in run and "P150" in run
+    # HERMETIC RUNTIME: every cache/home is redirected under the folder wall (overridable).
+    assert 'HF_HOME="${HF_HOME:-$HERE/.hf}"' in run
+    assert 'TT_CACHE_PATH="${TT_CACHE_PATH:-$HERE/.tt_cache}"' in run
+    assert 'TT_CACHE_HOME="${TT_CACHE_HOME:-$HERE/.tt_cache}"' in run  # override upstream /mnt default
+    assert 'XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HERE/.cache}"' in run
+
+    # HERMETIC INSTALL: the interpreter lives inside the folder; venv is relocatable + copy-linked.
+    inst = (staged / "install.sh").read_text()
+    assert 'UV_PYTHON_INSTALL_DIR="$HERE/.python"' in inst
+    assert "uv python install" in inst
+    assert "uv venv --relocatable" in inst
+    assert "--link-mode=copy" in inst
 
     # manifest
     m2 = Manifest.from_json((staged / "tt_kernel_manifest.json").read_text())
