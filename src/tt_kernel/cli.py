@@ -1186,15 +1186,33 @@ def _vendor_dependencies(bundle_dir: Path, manifest: Manifest) -> None:
         typer.secho("  (no requirements.txt to vendor)", fg=typer.colors.YELLOW)
         return
     typer.echo("Vendoring dependency wheels for offline install (torch/transformers/...) ...")
-    cmd = [
-        sys.executable, "-m", "pip", "download", "-r", str(req), "-d", str(wheels),
-        "--only-binary=:all:", "--extra-index-url", "https://download.pytorch.org/whl/cpu",
-    ]
+    # uv has no `pip download` and uv-created venvs ship no pip, so use an ephemeral SEEDED venv
+    # (uv venv --seed includes pip), pinned to the bundle's target Python so the downloaded wheels
+    # match the consumer's interpreter/platform.
+    pyver = (manifest.bundled.python if manifest.bundled and manifest.bundled.python else None)
+    dl_env = Path(tempfile.mkdtemp(prefix="tt-model-dl-"))
     try:
-        subprocess.run(cmd, check=True)
+        venv_cmd = ["uv", "venv", "--seed"]
+        if pyver:
+            venv_cmd += ["--python", pyver]
+        venv_cmd.append(str(dl_env))
+        subprocess.run(venv_cmd, check=True)
+        pip = dl_env / "bin" / "pip"
+        # Resolve the deps TOGETHER with the shipped platform wheels (ttnn/vLLM/plugin) so the
+        # vendored closure is consistent with what actually gets installed — this pulls vLLM's own
+        # runtime deps AND resolves version conflicts (e.g. vLLM's pydantic floor) up front, instead
+        # of exploding at the consumer's offline install.
+        platform_wheels = sorted(str(w) for w in wheels.glob("*.whl"))
+        subprocess.run(
+            [str(pip), "download", *platform_wheels, "-r", str(req), "-d", str(wheels),
+             "--only-binary=:all:", "--extra-index-url", "https://download.pytorch.org/whl/cpu"],
+            check=True,
+        )
     except subprocess.CalledProcessError as exc:
-        raise _err(f"dependency vendoring failed (pip download exit {exc.returncode}). "
+        raise _err(f"dependency vendoring failed (exit {exc.returncode}). "
                    "Re-run with --no-vendor-deps to install deps from the index instead.")
+    finally:
+        shutil.rmtree(dl_env, ignore_errors=True)
 
 
 def _classify_wheels(wheels_dir: Path) -> dict:

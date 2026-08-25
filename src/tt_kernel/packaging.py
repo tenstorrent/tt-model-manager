@@ -202,6 +202,17 @@ def render_run_sh(manifest: Manifest) -> str:
     serving = f"--max_num_seqs {max_num_seqs} --block_size {block_size}"
     if res and res.max_model_len:
         serving += f" --max_model_len {res.max_model_len}"
+    # Tool/reasoning parsers, if the manifest declares them. Same vLLM flag spelling the
+    # compose path uses (see bundles._compose_launch_command): vLLM's FlexibleArgumentParser
+    # normalizes '_'->'-', so '--tool_parser' would become the nonexistent '--tool-parser';
+    # the real flag is '--tool-call-parser', and vLLM hard-errors on it without
+    # '--enable-auto-tool-choice'. '--reasoning_parser' normalizes to the valid '--reasoning-parser'.
+    cap = manifest.capabilities
+    if cap is not None:
+        if cap.tool_parser:
+            serving += f" --enable-auto-tool-choice --tool-call-parser {cap.tool_parser}"
+        if cap.reasoning_parser:
+            serving += f" --reasoning_parser {cap.reasoning_parser}"
     if res and res.extra_args:
         serving += " " + " ".join(str(a) for a in res.extra_args)
     return f"""#!/usr/bin/env bash
@@ -216,7 +227,10 @@ PYBIN="$VENV/bin/python"
 TTNN_DIR="$("$PYBIN" -c 'import importlib.util,os;print(os.path.dirname(importlib.util.find_spec("ttnn").origin))')"
 # _ttnncpp.so lives in ttnn.libs/ for an auditwheel-repaired (portable) wheel, or build/lib/ for a
 # raw one; preload it to avoid the glibc "static TLS block" error on late dlopen.
-LD_PRELOAD="$(ls "$TTNN_DIR"/../*.libs/_ttnncpp*.so "$TTNN_DIR"/build/lib/_ttnncpp*.so 2>/dev/null | head -1)"
+# Prefer the auditwheel-vendored copy in *.libs/ (that's the one _ttnn.so actually loads via
+# RPATH); fall back to build/lib for a raw (unrepaired) wheel.
+LD_PRELOAD="$(ls "$TTNN_DIR"/../*.libs/_ttnncpp*.so 2>/dev/null | head -1)"
+[ -n "$LD_PRELOAD" ] || LD_PRELOAD="$(ls "$TTNN_DIR"/build/lib/_ttnncpp*.so 2>/dev/null | head -1)"
 export LD_PRELOAD="${{LD_PRELOAD:?could not locate _ttnncpp.so in the ttnn install}}"
 export TT_METAL_HOME="$TTNN_DIR"
 # EXTRA_MODELS_DIR is a PARENT of per-model bundle folders; the plugin scans its children for
