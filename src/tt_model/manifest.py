@@ -172,6 +172,14 @@ class ServeProfile(ServeSettings):
     description: Optional[str] = None
 
 
+class CardSettings(BaseModel):
+    """Optional model-authored Markdown appended to generated model-card sections."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    quickstart: Optional[str] = None
+
+
 def _deep_merge(base: Dict[str, Any], over: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(base)
     for k, v in over.items():
@@ -197,6 +205,7 @@ class Manifest(BaseModel):
     serve: ServeSettings = Field(default_factory=ServeSettings)
     serve_profiles: List[ServeProfile] = Field(min_length=1)
     default_profile: Optional[str] = None
+    card: Optional[CardSettings] = None
 
     # Model-authored build-time assertions: each entry is a Python statement executed
     # inside the finished image (on top of the type's own import checks). This is where

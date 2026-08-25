@@ -26,6 +26,11 @@ weights: org/Weights-7B       # HF id; downloaded to the HOST HF cache, never ba
 type: vllm                    # see docs/model_types.md
 arch: blackhole
 
+card:                         # optional Markdown added under model-card Quickstart
+  quickstart: |
+    ### Use with your client
+    Point it at `http://127.0.0.1:8000` after starting the server below.
+
 source:
   tt_metal: /path/to/your/tt-metal      # or {repo: ..., ref: ...} for CI
   code:                                  # EXACTLY the files that ship. An allowlist.
@@ -100,7 +105,7 @@ What it does:
 
 ```
 build/my-model/
-├── README.md            the generated model card (profiles table, provenance)
+├── README.md            generated model card (quickstart, profiles, provenance)
 ├── tt-model.yaml        the PINNED manifest (shas, built: block)
 ├── requirements.lock
 ├── code/                byte-identical to what is inside the image

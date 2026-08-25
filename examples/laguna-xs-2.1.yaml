@@ -8,6 +8,27 @@ weights: poolside/Laguna-XS-2.1        # gated, ~63 GB — lands in the HOST HF 
 type: vllm
 arch: blackhole
 
+card:
+  quickstart: |
+    ### Use with the pool coding agent
+
+    Install [pool](https://github.com/poolsideai/pool), then point it at the local
+    OpenAI-compatible server started above:
+
+    ```bash
+    curl -fsSL https://downloads.poolside.ai/pool/install.sh | bash
+
+    cd /path/to/your/project
+    POOLSIDE_STANDALONE_BASE_URL="http://127.0.0.1:8000" \
+    POOLSIDE_API_KEY="EMPTY" \
+    POOLSIDE_STANDALONE_MODEL="poolside/Laguna-XS-2.1" \
+    POOLSIDE_STANDALONE_CONTEXT_LENGTH=131072 \
+    pool
+    ```
+
+    The context length above matches the default `p150x4` profile. Use `65536` when
+    serving the `p150x2` profile.
+
 source:
   tt_metal: /home/ttuser/dev/tt-metal  # this checkout carries the SDPA sliding_window_size
                                        # change no released wheel has; ttnn must build from it

@@ -144,10 +144,16 @@ def render_model_card(m: Manifest, code_tree: List[str]) -> str:
         f" self-contained Docker image serving **{m.weights}** on Tenstorrent"
         f" **{m.arch}** hardware.",
         "",
+        "## Quickstart",
+        "",
         "```bash",
         f"tt-model pull  {m.repo}     # image -> docker, weights -> host HF cache",
         f"tt-model serve {m.repo}     # docker run with the right devices and mounts",
         "```",
+    ]
+    if m.card and m.card.quickstart:
+        lines += ["", m.card.quickstart.strip()]
+    lines += [
         "",
         "## Serve profiles",
         "",
