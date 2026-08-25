@@ -137,12 +137,20 @@ author's box. These are now closed by construction:
   the engine wheel on Ubuntu 22.04 (glibc 2.35)** — then it repairs to `manylinux_2_35` and one
   bundle runs on both 22.04 and 24.04. `package --manylinux <policy>` asserts a floor at build time.
 - **serve checks for updates.** When an installed bundle is served, `serve` compares the installed
-  revision to the Hub's current tip and prints a non-blocking advisory if a newer one exists
-  (skipped for a pinned `@revision` install and under `--local-only`).
+  revision to the Hub's current tip (one short, 3s-timeout-bounded request — it can never hang the
+  serve) and prints a non-blocking advisory if a newer one exists, pointing at a plain
+  `tt-model pull <id>`. Skipped for a pinned `@revision` install, under `--local-only`, and with
+  `--no-update-check`.
+- **Updating never needs `--force`.** The recorded revision is the exact commit `pull` fetched
+  (resolved *before* the download, so it always matches what's on disk). A plain `tt-model pull <id>`
+  **reinstalls a stale bundle in place** (and reuses an up-to-date one). `--force` is only for
+  reinstalling regardless, or pushing past a compat/wheel warning — it is *not* the update path
+  (it would also skip those safety gates).
 - **No `VLLM_PLUGINS` in run.sh.** That variable is an allow-list; setting it silently suppressed
   the model's tool/reasoning-parser plugins. The TT platform + registry load via entry points.
 - **`_ttnncpp` preload is located wherever it lives** (`ttnn.libs/` for a repaired wheel, else
   `build/lib/`) — run.sh globs both.
-- **Re-pull preserves your edits** — an existing install is reused unless `--force`.
+- **Re-pull preserves your edits** — an up-to-date install is reused (local edits to `run.sh` etc.
+  kept); a newer revision reinstalls in place; `--force` reinstalls regardless.
 - **serve pass-through + `--print`.** `tt-model serve <id> -- <vllm args>` forwards extra args;
   `--print` echoes the fully *resolved* command+env (not a bare `bash run.sh`).

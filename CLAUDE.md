@@ -64,6 +64,10 @@ bring up (tt-metal-community)  →  package  →  push  →  pull  →  serve  �
   is the nonexistent `--tool-parser`).
 - `serve` passes unknown args through to vLLM (e.g. `--port 8001`); `--print` echoes the resolved
   command+env without launching.
+- **Updating:** `serve` warns (best-effort, 3s-bounded; `--no-update-check` to skip) when a newer
+  revision exists. The update path is a plain `tt-model pull <id>` — it reinstalls a stale bundle in
+  place. Do **not** tell users to `pull --force` to update: `--force` also skips the compat/wheel
+  gates and is only for reinstalling regardless or overriding a warning.
 
 ## When something's wrong
 

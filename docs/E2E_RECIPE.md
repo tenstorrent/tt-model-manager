@@ -142,18 +142,31 @@ message (repackage on Ubuntu 22.04). If the interpreter/arch don't match, same.
 ## Step 4 — Serve (consumer)
 
 ```bash
-tt-model serve <org>/<model-name>                 # launches the OpenAI-compatible server
-tt-model serve <org>/<model-name> --port 8001     # any extra args pass through to vLLM
-tt-model serve <org>/<model-name> --print         # print the fully-resolved command + env, don't run
+tt-model serve <org>/<model-name>                    # launches the OpenAI-compatible server
+tt-model serve <org>/<model-name> --port 8001        # any extra args pass through to vLLM
+tt-model serve <org>/<model-name> --print            # print the fully-resolved command + env, don't run
+tt-model serve <org>/<model-name> --no-update-check   # skip the "is there a newer revision?" check
 ```
 
 `serve` runs the bundle's `run.sh` in the bundle's **own venv**, pointing every cache/home
 (`HF_HOME`, `TT_CACHE_PATH`, …) **inside the folder**. First serve does a weight download + JIT
-warmup (single-chip: several minutes) before it logs **`Application startup complete`**. If a newer
-revision of the bundle has been published, `serve` prints a one-line advisory suggesting a re-pull.
+warmup (single-chip: several minutes) before it logs **`Application startup complete`**.
 
 `serve` also install-then-serves a not-yet-pulled bundle, so on a fresh box you can skip straight to
 `tt-model serve <org>/<model-name>`.
+
+### Updating to a newer published revision
+
+When an installed bundle is served, `serve` makes one short (3s-bounded) Hub check and, if the
+author has published a newer revision, prints a non-blocking advisory. To update, just re-pull:
+
+```bash
+tt-model pull <org>/<model-name>      # reinstalls a stale bundle in place (an up-to-date one is reused)
+```
+
+A plain `pull` is the update path — you do **not** need `--force` (which is only for reinstalling
+regardless, or overriding a compat/wheel warning, and would also skip those safety gates). Disable
+the check per-serve with `--no-update-check`, or entirely offline with `--local-only`.
 
 ---
 
