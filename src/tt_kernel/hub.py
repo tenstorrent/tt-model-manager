@@ -125,17 +125,22 @@ def is_private_safe(repo_id: str) -> Optional[bool]:
         return None
 
 
-def latest_revision(repo_id: str, revision: Optional[str] = None) -> Optional[str]:
+def latest_revision(repo_id: str, revision: Optional[str] = None,
+                    timeout: Optional[float] = 3.0) -> Optional[str]:
     """Best-effort commit sha for the repo at ``revision`` (default: the default-branch tip).
 
     ``serve`` uses this to tell an installed bundle apart from a newer published one, and
-    ``pull``/install records it so that comparison has a baseline. Returns None when the Hub
-    can't be reached or the repo/revision isn't found — an update check (or recording one)
-    must never be the thing that fails a serve or an install.
+    ``pull``/install resolves it BEFORE the download so the recorded sha is exactly what was
+    fetched. Returns None when the Hub can't be reached or the repo/revision isn't found — an
+    update check (or recording one) must never be the thing that fails a serve or an install.
+
+    ``timeout`` bounds the request (default 3s): a half-open network must not hang the serve
+    on a check that is only advisory. ``None`` waits indefinitely (the resolve-before-download
+    caller passes a longer bound, since there it is load-bearing, not advisory).
     """
     try:
-        return getattr(_api().model_info(repo_id, revision=revision), "sha", None)
-    except Exception:  # noqa: BLE001 — offline / 404 / permission: "unknown", never fatal
+        return getattr(_api().model_info(repo_id, revision=revision, timeout=timeout), "sha", None)
+    except Exception:  # noqa: BLE001 — offline / 404 / timeout / permission: "unknown", never fatal
         return None
 
 

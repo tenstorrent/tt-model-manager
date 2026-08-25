@@ -899,8 +899,13 @@ def pull(
     runner_installed = False  # we pip-installed a packaged wheel
     runner_ready = False  # runner is usable (installed, or reference that resolves)
     weights_path: Optional[Path] = None
+    # Resolve the requested revision to a concrete sha BEFORE downloading, then fetch exactly that
+    # sha — so a self-contained install records the commit it actually holds (not one a push may
+    # have moved to between the download and a later query). None => Hub unreachable; fall back to
+    # the plain download and record nothing.
+    resolved = hub.latest_revision(repo_id, revision, timeout=None)
     with tempfile.TemporaryDirectory() as td:
-        snapshot = hub.download_bundle(repo_id, revision, dest=td)
+        snapshot = hub.download_bundle(repo_id, resolved or revision, dest=td)
         manifest_path = snapshot / MANIFEST_NAME
         if not manifest_path.is_file():
             raise _err(f"{repo_id} is not a tt-model bundle (no {MANIFEST_NAME}).")
@@ -912,7 +917,7 @@ def pull(
             _install_self_contained(
                 repo_id, snapshot, manifest, force=force, arch=arch,
                 models_dir=models_dir, with_weights=with_weights and not no_weights,
-                revision=revision,
+                revision=revision, resolved_revision=resolved,
             )
             return
 
@@ -1177,13 +1182,19 @@ def _select_instance(manifest, *, arch, instance_override, force):
 
 
 def _install_self_contained(
-    repo_id, snapshot, manifest, *, force, arch, models_dir, with_weights, revision=None,
+    repo_id, snapshot, manifest, *, force, arch, models_dir, with_weights,
+    revision=None, resolved_revision=None,
 ) -> None:
     """Install a v5 self-contained bundle: materialize it, build its own venv, (optionally) weights.
 
     The consumer needs only a TT card + firmware — the shipped wheels ARE the platform. We copy the
     pulled folder to a persistent install dir, run its ``install.sh`` (venv + wheels + deps), and
     record it so ``serve`` runs from that venv. No host tt-metal/vLLM is required or touched.
+
+    ``resolved_revision`` is the concrete commit sha the caller resolved BEFORE the download and
+    then fetched — recorded verbatim so the pin matches exactly what is on disk (querying it here,
+    after the download, could record a sha a mid-flight push had already moved past). ``revision``
+    is the user's original request, kept only to mark a deliberate ``@revision`` pin.
     """
     env = metal.local_env(arch_override=arch, probe=False)
     report = compare(manifest, env)
@@ -1203,11 +1214,19 @@ def _install_self_contained(
                        "--force to attempt anyway (likely to fail at pip install).")
 
     dest = runtime.resolve_models_dir(models_dir, repo_id)
+    prev = localdb.get(repo_id) or {}
     if dest.exists() and (dest / "venv").exists() and not force:
-        typer.secho(
-            f"✓ already installed at {dest} — reusing it (your local edits to run.sh etc. are "
-            f"kept). Re-run with --force to re-pull and overwrite.", fg=typer.colors.GREEN)
-        return
+        # Reuse when up to date — or when we couldn't resolve the current tip (offline): we must
+        # not wipe a working install just because the check failed. A KNOWN-newer revision falls
+        # through and updates in place, so a plain `pull` updates a stale bundle (no --force, which
+        # would also skip the compat/wheel gates above). --force forces a reinstall regardless.
+        if resolved_revision is None or prev.get("revision") == resolved_revision:
+            typer.secho(
+                f"✓ already installed and up to date at {dest} — reusing it (your local edits to "
+                f"run.sh etc. are kept). Re-run with --force to reinstall.", fg=typer.colors.GREEN)
+            return
+        old = (prev.get("revision") or "?")[:8]
+        typer.secho(f"↻ updating {repo_id}: {old} → {resolved_revision[:8]}", fg=typer.colors.CYAN)
     if dest.exists():
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1237,10 +1256,10 @@ def _install_self_contained(
         "arch": manifest.arch,
         "weights": manifest.weights.repo_id if manifest.weights else None,
         "weights_path": str(weights_path) if weights_path else None,
-        # Resolved commit sha of what we installed, so `serve` can tell it apart from a newer
-        # published revision. `pinned` means the user asked for a specific @revision — don't
-        # nag them to update off a version they deliberately chose. Best-effort (may be None).
-        "revision": hub.latest_revision(repo_id, revision),
+        # The exact commit sha we downloaded (resolved by the caller before the fetch), so `serve`
+        # can tell this install apart from a newer published revision. `pinned` means the user
+        # asked for a specific @revision — don't nag them to update off a version they chose.
+        "revision": resolved_revision,
         "pinned": revision is not None,
     })
     typer.secho(f"✓ installed self-contained bundle -> {dest}", fg=typer.colors.GREEN)
@@ -1267,12 +1286,12 @@ def _warn_if_update_available(repo_id: str, entry: dict) -> None:
     installed = entry.get("revision")
     if not installed:
         return
-    latest = hub.latest_revision(repo_id)
+    latest = hub.latest_revision(repo_id)  # 3s timeout: advisory, must not hang a serve
     if latest and latest != installed:
         typer.secho(
             f"There is an update to {repo_id} "
             f"(installed {installed[:8]}, latest {latest[:8]}). "
-            f"You should consider pulling:  tt-model pull {repo_id} --force",
+            f"You should consider pulling:  tt-model pull {repo_id}",
             fg=typer.colors.YELLOW,
             err=True,
         )
@@ -1782,6 +1801,10 @@ def serve(
         "`tt-model instances list`), overriding the pinned/auto-resolved one."
     ),
     health_check: bool = typer.Option(False, "--health-check", help="(reserved) probe the server after launch."),
+    no_update_check: bool = typer.Option(
+        False, "--no-update-check", help="Skip the best-effort check for a newer published "
+        "bundle revision (that check makes one short, timeout-bounded Hub request)."
+    ),
 ) -> None:
     """Serve a vLLM bundle through the Tenstorrent vLLM plugin (the primary path).
 
@@ -1796,7 +1819,7 @@ def serve(
     # toolchain (ttnn/vLLM versions) is irrelevant here — the bundle ships its own — so don't warn.
     entry = localdb.get(repo_id)
     if entry and entry.get("self_contained"):
-        if not local_only:
+        if not local_only and not no_update_check:
             _warn_if_update_available(repo_id, entry)
         _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
         return
@@ -1808,11 +1831,13 @@ def serve(
         except Exception:  # noqa: BLE001 — fall back to the normal path if we can't peek
             remote = None
         if remote is not None and remote.is_self_contained:
+            resolved = hub.latest_revision(repo_id, revision, timeout=None)  # resolve before fetch
             with tempfile.TemporaryDirectory() as td:
-                snapshot = hub.download_bundle(repo_id, revision, dest=td)
+                snapshot = hub.download_bundle(repo_id, resolved or revision, dest=td)
                 mani = Manifest.from_json((snapshot / MANIFEST_NAME).read_text())
                 _install_self_contained(repo_id, snapshot, mani, force=force, arch=arch,
-                                        models_dir=None, with_weights=False, revision=revision)
+                                        models_dir=None, with_weights=False,
+                                        revision=revision, resolved_revision=resolved)
             entry = localdb.get(repo_id)
             if entry and entry.get("self_contained"):
                 _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
