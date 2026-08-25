@@ -1545,6 +1545,7 @@ def pull(
                 repo_id, snapshot, manifest, force=force, arch=arch,
                 models_dir=models_dir, bundles_dir=bundles_dir,
                 with_weights=with_weights and not no_weights, instance=instance,
+                revision=revision, resolved_revision=resolved,
             )
             return
 
@@ -1703,7 +1704,7 @@ def pull(
 
 
 def _record_pull(repo_id, manifest, out_root, *, runner_installed, weights_path, last_error,
-                 bundle_path=None, instance=None) -> None:
+                 bundle_path=None, instance=None, revision=None, pinned=False) -> None:
     """Write the install binding to the local index (overwrites on re-pull).
 
     For a v4 vLLM bundle, ``instance`` is the selected tt-metal activation, pinned here so
@@ -1735,6 +1736,11 @@ def _record_pull(repo_id, manifest, out_root, *, runner_installed, weights_path,
         "platform_ttnn": ttnn_range,
         "runtime_version": vllm_range,
         "runtime_plugin_version": plugin_range,
+        # Source commit sha this install came from (resolved before the download), so `serve` can
+        # tell a cached bundle apart from a republished one and not silently reuse a stale launch
+        # command (issue #13). `pinned` => the user asked for a specific @revision; don't re-pull it.
+        "revision": revision,
+        "pinned": pinned,
     }
     if last_error:
         entry["last_error"] = last_error
@@ -1940,7 +1946,7 @@ def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional
 
 def _install_vllm_bundle(
     repo_id, snapshot, manifest, *, force, arch, models_dir, bundles_dir, with_weights,
-    instance=None,
+    instance=None, revision=None, resolved_revision=None,
 ) -> None:
     """Install a kernels-less vLLM bundle: verify + lay the model folder into bundles_dir.
 
@@ -2029,7 +2035,7 @@ def _install_vllm_bundle(
 
     _record_pull(repo_id, manifest, out_root="", runner_installed=False,
                  weights_path=weights_path, last_error=None, bundle_path=str(dest),
-                 instance=selected)
+                 instance=selected, revision=resolved_revision, pinned=revision is not None)
     _routine(f"✓ Installed {repo_id}")
     _routine(f"  Serve it:  tt-model serve {repo_id}", fg=typer.colors.CYAN)
 
@@ -2374,13 +2380,36 @@ def _endpoint_from_command(command: List[str]) -> str:
 
 def _ensure_vllm_pulled(repo_id: str, revision: Optional[str], *, arch: Optional[str],
                         bundles_dir: Optional[str], force: bool = False,
-                        instance: Optional[str] = None) -> dict:
-    """Return the local install entry for a vLLM bundle, pulling it first if absent."""
+                        instance: Optional[str] = None, refresh: bool = False) -> dict:
+    """Return the local install entry for a vLLM bundle, pulling it first if absent.
+
+    A cached bundle pins its launch command (including ``--max_model_len``), so a republished
+    model could otherwise be served with a *previous* revision's serving parameters, silently
+    (issue #13). On reuse we compare the recorded source revision against the Hub's current tip and
+    **re-pull when it diverged**, so the launch command matches what's published. ``refresh`` forces
+    a re-pull regardless. Best-effort and timeout-bounded — a Hub we can't reach falls back to
+    reusing the cache (never hang or fail a serve on the check); a pinned ``@revision`` install is
+    never re-pulled out from under the user.
+    """
     entry = localdb.get(repo_id)
-    if entry and entry.get("bundle_path") and Path(entry["bundle_path"]).is_dir():
-        return entry
+    cached = bool(entry and entry.get("bundle_path") and Path(entry["bundle_path"]).is_dir())
+    # Resolve the current tip once, bounded, BEFORE any download: names the sha a re-pull records,
+    # and detects divergence. None => Hub unreachable/timed out -> treat as "can't tell".
+    resolved = hub.latest_revision(repo_id, revision)
+    if cached and not refresh:
+        installed = entry.get("revision")
+        if entry.get("pinned") or not installed or resolved is None or installed == resolved:
+            return entry  # pinned / no baseline / offline / up to date -> reuse as-is
+        typer.secho(
+            f"↻ {repo_id} has changed upstream (installed {installed[:8]}, latest {resolved[:8]}); "
+            "re-pulling so the launch command matches the current revision.",
+            fg=typer.colors.CYAN, err=True)
+    if cached:
+        # refresh or diverged: drop the stale install so the re-pull lays a clean folder.
+        shutil.rmtree(Path(entry["bundle_path"]), ignore_errors=True)
+        localdb.remove(repo_id)
     with tempfile.TemporaryDirectory() as td:
-        snapshot = _hub(lambda: hub.download_bundle(repo_id, revision, dest=td),
+        snapshot = _hub(lambda: hub.download_bundle(repo_id, resolved or revision, dest=td),
                         repo_id, what="Pull",
                         consequence="Nothing was installed.")
         mpath = snapshot / MANIFEST_NAME
@@ -2391,7 +2420,7 @@ def _ensure_vllm_pulled(repo_id: str, revision: Optional[str], *, arch: Optional
             raise _err(f"{repo_id} is not a vLLM bundle.")
         _install_vllm_bundle(repo_id, snapshot, manifest, force=force, arch=arch,
                              models_dir=None, bundles_dir=bundles_dir, with_weights=False,
-                             instance=instance)
+                             instance=instance, revision=revision, resolved_revision=resolved)
     entry = localdb.get(repo_id)
     if not entry or not entry.get("bundle_path"):
         raise _err(f"Failed to install vLLM bundle {repo_id}.")
@@ -2501,7 +2530,7 @@ def _serve_preflight(endpoint: str, inst_python: Optional[str],
 def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, local_only: bool,
                 arch: Optional[str], bundles_dir: Optional[str], do_health: bool,
                 force: bool = False, instance: Optional[str] = None,
-                extra_args: Optional[List[str]] = None) -> None:
+                extra_args: Optional[List[str]] = None, refresh: bool = False) -> None:
     """The vLLM one-command serve flow: pull-if-needed, launch, (optional) health, endpoint."""
     if local_only:
         entry = localdb.get(repo_id)
@@ -2509,7 +2538,7 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
             raise _err(f"No installed vLLM bundle for {repo_id} (and --local-only forbids a pull).")
     else:
         entry = _ensure_vllm_pulled(repo_id, revision, arch=arch, bundles_dir=bundles_dir,
-                                    force=force, instance=instance)
+                                    force=force, instance=instance, refresh=refresh)
 
     bundle_path = Path(entry["bundle_path"])
     if not bundle_path.is_dir():
@@ -2590,20 +2619,28 @@ def serve(
         False, "--no-update-check", help="Skip the best-effort check for a newer published "
         "bundle revision (that check makes one short, timeout-bounded Hub request)."
     ),
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Force a re-pull of the bundle before serving, even if a cached "
+        "install exists — a cached bundle otherwise pins its launch command (e.g. --max_model_len) "
+        "from the revision it was pulled at."
+    ),
 ) -> None:
     """Serve a vLLM bundle through the Tenstorrent vLLM plugin (the primary path).
 
     One command: pull the bundle folder if needed, point EXTRA_MODELS_DIR at it, and launch
     the OpenAI-compatible server with the bundle's per-machine launch command. Repeat
-    invocations skip the pull and go straight to launch.
+    invocations skip the pull and go straight to launch — unless the source revision has
+    changed upstream (then it re-pulls) or --refresh forces it.
     """
     repo_id, revision = _split_revision(repo_id)
     extra_args = list(ctx.args)  # anything after the bundle id is passed through to vLLM
 
     # Self-contained (v5) fast path: an already-installed bundle serves from its own venv. The host
     # toolchain (ttnn/vLLM versions) is irrelevant here — the bundle ships its own — so don't warn.
+    # --refresh (when a pull is allowed) skips the fast path so the install-then-serve block below
+    # re-pulls the current revision.
     entry = localdb.get(repo_id)
-    if entry and entry.get("self_contained"):
+    if entry and entry.get("self_contained") and not (refresh and not local_only):
         if not local_only and not no_update_check:
             _warn_if_update_available(repo_id, entry)
         _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
@@ -2622,7 +2659,7 @@ def serve(
                                 repo_id, what="Pull",
                                 consequence="Nothing was installed.")
                 mani = Manifest.from_json((snapshot / MANIFEST_NAME).read_text())
-                _install_self_contained(repo_id, snapshot, mani, force=force, arch=arch,
+                _install_self_contained(repo_id, snapshot, mani, force=force or refresh, arch=arch,
                                         models_dir=None, with_weights=False,
                                         revision=revision, resolved_revision=resolved)
             entry = localdb.get(repo_id)
@@ -2633,7 +2670,7 @@ def serve(
     # (_serve_vllm warns once it knows which instance's interpreter will serve.)
     _serve_vllm(repo_id, revision, print_only=print_only, local_only=local_only,
                 arch=arch, bundles_dir=bundles_dir, do_health=health_check,
-                force=force, instance=instance, extra_args=extra_args)
+                force=force, instance=instance, extra_args=extra_args, refresh=refresh)
 
 
 @app.command(rich_help_panel="Run a model")
