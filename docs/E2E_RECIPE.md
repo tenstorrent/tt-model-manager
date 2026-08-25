@@ -23,7 +23,14 @@ There are two roles:
 **Both roles**
 - Linux **x86_64**, Ubuntu **22.04 or 24.04**.
 - A Tenstorrent card + firmware/driver (`/dev/tenstorrent/*` present).
-- `tt-model` installed: `pip install tt-model-manager`.
+- `tt-model` installed. It is **not on PyPI** — install it from a clone (which also sets up the
+  serving stack and verifies it):
+  ```bash
+  git clone https://github.com/tenstorrent/tt-model-manager && cd tt-model-manager
+  scripts/install.sh          # bootstraps tt-model, then runs `tt-model install`
+  ```
+  `tt-model install` expects `ttnn` to already be importable in the target env (e.g.
+  `pip install "ttnn>=0.72"`); see the [README](../README.md#install).
 - Authenticated to HF for push/pull of private repos:
   ```bash
   export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
