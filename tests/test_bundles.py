@@ -214,3 +214,125 @@ def test_push_pull_serve_roundtrip(monkeypatch, tmp_path):
     rm = runner.invoke(cli.app, ["rm", "acme/llama"])
     assert rm.exit_code == 0, rm.output
     assert localdb.get("acme/llama") is None
+
+
+# ------------------------------------------------ passthrough args reach vLLM (F15)
+def _seed_print_bundle(tmp_path, port="8100"):
+    src = _make_bundle_folder(
+        tmp_path, arch="LlamaForCausalLM",
+        main_class="models.tt_transformers.tt.generator_vllm:LlamaForCausalLM",
+        launch={"default": {"command": ["python3", "server_example_tt.py", "--model",
+                                        "org/m", "--port", port],
+                            "env": {"MESH_DEVICE": "P150"}}},
+    )
+    dest = bundles.install_bundle(src, tmp_path / "bundles", "org__m")
+    _seed_vllm_installed("org/m", dest)
+    return dest
+
+
+def test_serve_passes_extra_args_through_to_vllm(monkeypatch, tmp_path):
+    """`serve` declares allow_extra_args and documents passthrough, but only the
+    self-contained path ever received it — `_serve_vllm` had no extra_args parameter, so on
+    the host-provisioned path every argument after the bundle id was silently dropped. A
+    silently ignored flag is worse than a rejected one."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_print_bundle(tmp_path)
+    res = runner.invoke(cli.app, ["serve", "org/m", "--print", "--local-only",
+                                  "--port", "7009", "--max-num-seqs", "8"])
+    assert res.exit_code == 0, res.output
+    assert "--port 7009" in res.output
+    assert "--max-num-seqs 8" in res.output
+
+
+def test_user_port_wins_over_the_bundle_default(monkeypatch, tmp_path):
+    """Passthrough is appended after the bundle's own command so argparse last-wins gives
+    the user's --port priority; the bundle default must still be present but overridden."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_print_bundle(tmp_path, port="8100")
+    res = runner.invoke(cli.app, ["serve", "org/m", "--print", "--local-only",
+                                  "--port", "7009"])
+    assert res.exit_code == 0, res.output
+    cmd = res.output.strip().splitlines()[-1]
+    assert cmd.index("--port 8100") < cmd.index("--port 7009")
+
+
+def test_announced_endpoint_matches_the_overridden_port(monkeypatch, tmp_path):
+    """The endpoint was parsed from the bundle's launch command, so `serve --port 7009`
+    announced :8100 while vLLM bound 7009. Announcing a port we are not binding also means
+    a port preflight would check the wrong one."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_print_bundle(tmp_path, port="8100")
+    res = runner.invoke(cli.app, ["serve", "org/m", "--print", "--local-only",
+                                  "--port", "7009"])
+    assert res.exit_code == 0, res.output
+    assert "http://localhost:7009" in res.output
+    assert "http://localhost:8100" not in res.output
+
+
+def test_no_passthrough_leaves_the_bundle_command_alone(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_print_bundle(tmp_path, port="8100")
+    res = runner.invoke(cli.app, ["serve", "org/m", "--print", "--local-only"])
+    assert res.exit_code == 0, res.output
+    assert "http://localhost:8100" in res.output
+
+
+# ----------------------------------------- the serving adapter must exist (preflight)
+class TestAdapterRoot:
+    def test_extracts_the_top_level_package(self):
+        assert runtime.adapter_root(
+            "models.autoports.qwen_qwen3_32b.tt.generator_vllm:Qwen3ForCausalLM") == "models"
+
+    def test_handles_a_bare_module(self):
+        assert runtime.adapter_root("mypkg:Cls") == "mypkg"
+
+    def test_empty_is_none(self):
+        assert runtime.adapter_root("") is None
+        assert runtime.adapter_root(None) is None
+
+
+class TestModuleImportable:
+    def test_true_for_a_stdlib_module(self):
+        assert runtime.module_importable("json") is True
+
+    def test_false_for_a_missing_module(self):
+        assert runtime.module_importable("definitely_not_a_module_xyz") is False
+
+    def test_fails_open_when_the_interpreter_cannot_be_probed(self):
+        """An unanswerable check must not become a blocker — that would refuse to serve a
+        model that would have worked."""
+        assert runtime.module_importable("json", python="/nonexistent/python") is True
+
+
+def test_serve_blocks_when_the_adapter_tree_is_absent(monkeypatch, tmp_path):
+    """The ttnn PyPI wheel ships no models/ tree, so a fully green toolchain still cannot
+    serve a bundle whose main_class lives under models.*. Without this the failure arrives
+    as an ImportError from inside vLLM, after startup has already burned ~18 seconds."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    src = _make_bundle_folder(
+        tmp_path, arch="Qwen3ForCausalLM",
+        main_class="models.autoports.qwen_qwen3_32b.tt.generator_vllm:Qwen3ForCausalLM",
+        launch={"default": {"command": ["python3", "server.py", "--port", "8123"], "env": {}}},
+    )
+    dest = bundles.install_bundle(src, tmp_path / "bundles", "org__m")
+    _seed_vllm_installed("org/m", dest)
+    monkeypatch.setattr(runtime, "vllm_available", lambda python=None: True)
+    res = runner.invoke(cli.app, ["serve", "org/m", "--local-only"])
+    assert res.exit_code == 1
+    assert "serving adapter is missing" in res.output
+    assert "models" in res.output
+    assert "no models/ tree" in res.output
+
+
+def test_serve_does_not_block_when_the_adapter_is_present(monkeypatch, tmp_path):
+    """Guard against the check refusing a bundle that would have served."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    src = _make_bundle_folder(
+        tmp_path, arch="X", main_class="json:Whatever",
+        launch={"default": {"command": ["python3", "server.py", "--port", "8124"], "env": {}}},
+    )
+    dest = bundles.install_bundle(src, tmp_path / "bundles", "org__ok")
+    _seed_vllm_installed("org/ok", dest)
+    monkeypatch.setattr(runtime, "vllm_available", lambda python=None: True)
+    res = runner.invoke(cli.app, ["serve", "org/ok", "--local-only", "--print"])
+    assert "serving adapter is missing" not in res.output

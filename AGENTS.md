@@ -16,6 +16,10 @@ violates one of these is wrong even if tests pass:
 1. **tt-model is the standalone path.** The full flow — `package → push → pull → install →
    serve` — MUST work with tt-model alone (only a TT card + firmware). Never add a dependency
    on `tt-cli`; tt-cli is an *optional* wrapper that calls tt-model, not the reverse.
+   Host provisioning is `tt-model install` and lives in `provision.py`. It is the ONLY
+   module that installs the surrounding platform: `doctor`, `toolchain`, `instances`, and
+   the compatibility gates stay strictly declarative — they discover, probe, and report.
+   That separation is what makes a `doctor` verdict trustworthy, so keep it.
 2. **Distribution is HuggingFace, not GitHub Releases.** Bundles are HF `model` repos; large
    binaries go to git-LFS via `hub.upload_folder`. Do not add Release-based or ad-hoc download flows.
 3. **Weights are a pointer, never embedded** (`WeightsRef` = HF repo id). Do not stage weights
@@ -56,7 +60,18 @@ violates one of these is wrong even if tests pass:
 ## Reuse, don't reinvent
 `hub.py` (HF push/pull), `runtime.py` (`download_weights`, `pip_install_wheels`,
 `install_self_contained`), `bundles.py` (EXTRA_MODELS_DIR materialization + metadata render),
-`packaging.py` (staging). Prefer extending these over new parallel code paths.
+`packaging.py` (staging), `provision.py` (host setup). Prefer extending these over new
+parallel code paths.
+
+**All terminal output goes through `console.py`.** No new `typer.secho`, no scattered
+`print`. See [docs/cli_output.md](docs/cli_output.md) for the vocabulary and the rules that
+are easy to get wrong — chiefly: capture subprocess noise and surface it only on failure,
+never gate a failure on `show_detail()`, and keep `--print`/`--json` on `console.raw()` so
+Rich cannot wrap a pasteable command or a JSON document.
+
+**Scripts in `scripts/` are shims.** `install.sh` and `make_test_cache.sh` exist for the
+bootstrap case only and forward to the CLI. Logic added there cannot reuse tt-model's own
+detection and drifts from the CLI silently; `tests/test_install_script.py` enforces this.
 
 ## Don't
 - Don't vendor `torch`/`vllm`/`transformers` — they are pip deps.

@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import importlib.metadata as md
 import importlib.util
+import json
 import re
+import subprocess
+import sys
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -156,6 +159,48 @@ def _spec_present(*module_names: str) -> bool:
     return False
 
 
+#: Emitted as JSON by :func:`_probe_interpreter`. Detection only — ``find_spec`` never
+#: executes the module, so probing cannot open a device or pull in a multi-second import.
+_PROBE_SRC = """
+import importlib.util as u, json, sys
+def present(name):
+    try:
+        return u.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+def version(dists):
+    import importlib.metadata as md
+    for d in dists:
+        try:
+            return md.version(d)
+        except Exception:
+            continue
+    return None
+mods, dists = json.loads(sys.argv[1])
+json.dump({"present": {m: present(m) for m in mods}, "version": version(dists)}, sys.stdout)
+"""
+
+#: A probe is detection in a fresh interpreter; 30s matches ``runtime.vllm_available``.
+_PROBE_TIMEOUT = 30
+
+
+def _probe_interpreter(python: str, modules: Tuple[str, ...],
+                       dists: Tuple[str, ...]) -> Optional[dict]:
+    """Ask *python* which of *modules* it can import, and the version of *dists*.
+
+    Returns ``None`` when the interpreter cannot be probed at all (missing, broken, timed
+    out). ``None`` is distinct from "probed, found nothing": the caller must not turn an
+    unreachable interpreter into a confident "not installed".
+    """
+    try:
+        out = subprocess.run([python, "-c", _PROBE_SRC, json.dumps([list(modules), list(dists)])],
+                             capture_output=True, text=True, timeout=_PROBE_TIMEOUT, check=True)
+        data = json.loads(out.stdout)
+        return data if isinstance(data, dict) else None
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError):
+        return None
+
+
 def _component(name: str, *, found: bool, version: Optional[str]) -> ComponentReport:
     required = LOCK[name]
     if not found:
@@ -171,39 +216,131 @@ def _component(name: str, *, found: bool, version: Optional[str]) -> ComponentRe
                            f"version {version} is older than required {required} — upgrade")
 
 
-def _vllm_component() -> ComponentReport:
+def _vllm_component(python: Optional[str] = None) -> ComponentReport:
     """Presence check for the Tenstorrent vLLM serving stack (fork + plugin).
 
     The fork tracks the ``dev`` branch, so this is presence-based rather than a strict
     version floor: both ``vllm`` and the ``vllm_tt_plugin`` package must be importable.
+
+    With *python* set, the check runs in THAT interpreter. tt-model is routinely installed
+    in a venv of its own (pipx, or a manager venv) while the build that actually serves
+    lives in another — so an in-process ``find_spec`` reports the plugin missing for an
+    instance that can serve perfectly well. ``serve`` already guards its hard error this
+    way (:func:`runtime.vllm_available`); the warning path has to agree with it, or the two
+    contradict each other on the same host.
     """
     required = "tenstorrent/vllm@dev + plugin"
-    version = _dist_version(_VLLM_DISTS)
-    if not _spec_present("vllm"):
+
+    if python is not None and python != sys.executable:
+        probed = _probe_interpreter(python, ("vllm", "vllm_tt_plugin"), _VLLM_DISTS)
+        if probed is None:
+            # Unreachable interpreter. Reported as inadequate (serving through it would
+            # fail) but worded as what we actually know, not as "vLLM is not installed".
+            return ComponentReport("vllm", False, None, required, False,
+                                   f"could not probe the instance interpreter ({python})")
+        present, version = probed.get("present") or {}, probed.get("version")
+        found_vllm, found_plugin = bool(present.get("vllm")), bool(present.get("vllm_tt_plugin"))
+        where = f" in {python}"
+    else:
+        found_vllm, found_plugin = _spec_present("vllm"), _spec_present("vllm_tt_plugin")
+        version, where = _dist_version(_VLLM_DISTS), ""
+
+    if not found_vllm:
         return ComponentReport(
             "vllm", False, None, required, False,
-            "not found — install the Tenstorrent vLLM fork + plugin (see scripts/install.sh)",
+            f"not found{where} — install the Tenstorrent vLLM fork + plugin "
+            "(see scripts/install.sh)",
         )
-    if not _spec_present("vllm_tt_plugin"):
+    if not found_plugin:
         return ComponentReport(
             "vllm", True, version, required, False,
-            "vllm present but the TT plugin (vllm_tt_plugin) is not importable — "
+            f"vllm present but the TT plugin (vllm_tt_plugin) is not importable{where} — "
             "pip install -e plugins/vllm-tt-plugin",
         )
     return ComponentReport("vllm", True, version, required, True, "ok (vllm + TT plugin present)")
 
 
-def check_toolchain() -> ToolchainReport:
+@dataclass
+class EnvConflict:
+    """One unsatisfied requirement between two installed distributions."""
+    package: str
+    requirement: str
+    installed: Optional[str]
+
+    @property
+    def message(self) -> str:
+        have = f"have {self.installed}" if self.installed else "not installed"
+        return f"{self.package} requires {self.requirement} ({have})"
+
+
+def check_environment(python: Optional[str] = None) -> List[EnvConflict]:
+    """Report installed distributions whose requirements are mutually unsatisfiable.
+
+    Version checks alone said "toolchain adequate" on an environment pip had just called
+    broken: installing ttnn (which pins numpy<2) into a venv holding the vLLM fork (whose
+    opencv-python-headless wants numpy>=2) satisfies every individual check while leaving
+    the env internally inconsistent. Three imports resolving is not the same as an
+    environment that works, so ask pip.
+
+    Advisory by design: a conflict may involve a package the TT serving path never imports,
+    so callers should surface these and let the user judge, not block on them. Returns []
+    when pip cannot be run — an unavailable check is not a passing check, but it is also not
+    a conflict we can name.
+    """
+    exe = python or sys.executable
+    try:
+        proc = subprocess.run([exe, "-m", "pip", "check"], capture_output=True, text=True,
+                              timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode == 0:
+        return []
+    conflicts: List[EnvConflict] = []
+    # Real `pip check` output, captured from the venv in the bug report:
+    #   opencv-python-headless 5.0.0.93 has requirement numpy>=2; python_version >= "3.9",
+    #   but you have numpy 1.26.4.
+    # "has requirement" and "requires" are both in the wild depending on pip version, and a
+    # requirement may itself contain commas ("numpy>=1.24,<2"), so the split is on the
+    # literal ", but you have" rather than on any comma.
+    pattern = re.compile(
+        r"^(?P<pkg>\S+)\s+\S+\s+(?:has requirement|requires)\s+(?P<req>.+?),\s+"
+        r"but you have\s+(?P<have>.+?)\.?$"
+    )
+    for line in proc.stdout.splitlines():
+        m = pattern.match(line.strip())
+        if m:
+            have = m.group("have").strip()
+            conflicts.append(EnvConflict(
+                package=m.group("pkg"),
+                requirement=m.group("req").strip(),
+                installed=None if have.endswith("not installed") else have,
+            ))
+    return conflicts
+
+
+def check_toolchain(python: Optional[str] = None) -> ToolchainReport:
     """Inspect the local tt-metal + vLLM serving stack. Never imports the heavy modules and
     never installs anything — detection via metadata, find_spec, and the tt-metal version
     resolver already used by ``compare``. tt-lang and tt-api (leftovers from an earlier
-    serving prototype) are not part of the vLLM path and are not checked."""
+    serving prototype) are not part of the vLLM path and are not checked.
+
+    *python* is the interpreter to inspect — pass the selected tt-metal instance's, so the
+    report describes the environment that will actually serve rather than the one running
+    tt-model. Omitted (the default) keeps the in-process behaviour.
+    """
     tt_metal_version = metal.resolve_version()
+    ttnn_found = bool(tt_metal_version)
+    if not ttnn_found:
+        if python is not None and python != sys.executable:
+            probed = _probe_interpreter(python, ("ttnn",), ())
+            ttnn_found = bool((probed or {}).get("present", {}).get("ttnn"))
+        else:
+            ttnn_found = _spec_present("ttnn")
     return ToolchainReport(components=[
-        _component("tt-metal", found=bool(tt_metal_version) or _spec_present("ttnn"),
-                   version=tt_metal_version),
-        _vllm_component(),
+        _component("tt-metal", found=ttnn_found, version=tt_metal_version),
+        _vllm_component(python),
     ])
 
 
-__all__ = ["LOCK", "ComponentReport", "ToolchainReport", "check_toolchain"]
+__all__ = ["LOCK", "ComponentReport", "EnvConflict", "ToolchainReport",
+           "check_environment", "check_toolchain"]

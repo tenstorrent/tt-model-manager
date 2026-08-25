@@ -11,7 +11,7 @@ import json
 from typer.testing import CliRunner
 
 from tt_kernel import cli, packaging
-from tt_kernel.manifest import Manifest, Mesh, WeightsRef
+from tt_kernel.manifest import Capabilities, Manifest, Mesh, Producer, WeightsRef
 
 _runner = CliRunner()
 
@@ -28,6 +28,43 @@ def _fake_wheel(dirpath, filename, content=b"PK\x03\x04 fake wheel"):
     p = dirpath / filename
     p.write_bytes(content)
     return p
+
+
+def _run_sh_manifest(**over):
+    base = dict(
+        schema_version="5",
+        name="m",
+        arch="blackhole",
+        tt_metal_version="0.75.0",
+        producer=Producer(tt_kernel_version="0.0.0", created_at="2026-08-20T00:00:00Z"),
+        weights=WeightsRef(repo="org/model"),
+        mesh=Mesh(devices=1, topology="P150"),
+    )
+    base.update(over)
+    return Manifest(**base)
+
+
+def test_render_run_sh_tool_parser_uses_vllm_flag_names():
+    """The self-contained run.sh must emit the SAME vLLM flags the compose path does (PR #16).
+
+    vLLM's FlexibleArgumentParser normalizes '_'->'-', so '--tool_parser' becomes the nonexistent
+    '--tool-parser'; the real flag is '--tool-call-parser', and vLLM hard-errors on it without
+    '--enable-auto-tool-choice'. This is the shipped launch path — before the fix it dropped the
+    capability entirely, so a bundle declaring tool_parser silently got no tool calling.
+    """
+    run = packaging.render_run_sh(
+        _run_sh_manifest(capabilities=Capabilities(tool_parser="qwen3_coder",
+                                                   reasoning_parser="qwen3_coder"))
+    )
+    assert "--tool_parser" not in run and "--tool-parser" not in run
+    assert "--enable-auto-tool-choice --tool-call-parser qwen3_coder" in run
+    assert "--reasoning_parser qwen3_coder" in run
+
+
+def test_render_run_sh_no_tool_flags_without_capability():
+    """No tool_parser declared => neither flag appears (bare --enable-auto-tool-choice is an error)."""
+    run = packaging.render_run_sh(_run_sh_manifest())
+    assert "--enable-auto-tool-choice" not in run and "--tool-call-parser" not in run
 
 
 def test_stage_package_layout(tmp_path):

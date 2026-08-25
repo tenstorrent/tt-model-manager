@@ -174,7 +174,8 @@ def _fake_hub(monkeypatch, tmp_path):
     monkeypatch.setattr(hub, "download_bundle", download_bundle)
     monkeypatch.setattr(metal, "detect_device",
                         lambda arch_override=None: DeviceInfo(arch="blackhole", device_count=4, source="test"))
-    monkeypatch.setattr(toolchain, "check_toolchain", lambda: toolchain.ToolchainReport(components=[]))
+    monkeypatch.setattr(toolchain, "check_toolchain",
+                        lambda python=None: toolchain.ToolchainReport(components=[]))
 
 
 def test_pull_pins_newest_satisfying_then_serve_replays(monkeypatch, tmp_path, capsys):

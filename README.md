@@ -43,23 +43,36 @@ win; nothing overrides them.
 
 ## Install
 
-```bash
-pip install tt-model        # from this repo: pip install -e .
-```
-
-To serve, you also need the Tenstorrent **vLLM fork + plugin** on top of a working tt-metal
-env. `scripts/install.sh` sets up the whole serving stack (vLLM fork + plugin + tt-model) and
-runs `tt-model doctor`:
+From a fresh clone, one command sets up the whole serving stack — the Tenstorrent **vLLM
+fork + plugin** plus `tt-model` — on top of a working tt-metal env, and verifies it:
 
 ```bash
-scripts/install.sh           # installs fork + plugin + tt-model into the tt-metal venv
+scripts/install.sh           # bootstraps tt-model, then runs `tt-model install`
 ```
+
+Once `tt-model` is on PATH, use the CLI directly:
+
+```bash
+tt-model install                                  # same thing, without the shim
+tt-model install --venv <tt-metal>/python_env     # target a specific tt-metal env
+tt-model install --verbose                        # stream pip instead of collapsing it
+```
+
+`install` expects tt-metal (`ttnn`) to already be importable in the target environment —
+building it is out of scope — and **stops before installing anything** if it is not,
+rather than spending ~450MB on an environment that could never serve a model. If `ttnn`
+is missing it tells you the two ways to get it, one of which is just
+`pip install "ttnn>=0.72"` from PyPI.
+
+Exit codes: `0` installed and adequate · `1` preflight failed, nothing installed ·
+`2` usage error · `3` installed, but the toolchain is still not adequate.
 
 ## Usage
 
 ```bash
+tt-model install                                 # set up the serving stack, then verify
 tt-model login                                   # reuses huggingface_hub's token store
-tt-model doctor                                  # check tt-metal/tt-lang/vLLM + hardware
+tt-model doctor                                  # check tt-metal/vLLM + hardware
 
 # vLLM (default) — serve a model through the Tenstorrent vLLM plugin
 tt-model serve you/mymodel                        # pull if needed, register, launch the OpenAI server
@@ -227,9 +240,10 @@ no build step. See **[web/README.md](web/README.md)**.
 
 ## Checking your toolchain
 
-`tt-model` expects the serving stack — tt-metal and the vLLM fork + plugin — to already be
-present on the system. It does **not** install them (use `scripts/install.sh` for that); it
-checks they are adequate and warns when they are not.
+`tt-model doctor` only ever *checks* — it never installs, so its verdict is always a
+report on the machine as it is. Provisioning is the separate, explicit
+[`tt-model install`](#install); `doctor`, `instances`, and the compatibility gates stay
+declarative.
 
 ```bash
 tt-model doctor
@@ -268,7 +282,8 @@ A cached binary is only valid when the consumer's environment matches the produc
 `runtime.plugin_version` (the `vllm_tt_plugin` package) as PEP 440 specifiers. On `pull`, an
 installed version outside a range is a **forceable** block (`--force` overrides), never fatal;
 `arch` stays fatal; a bare git-sha checkout is treated as "assume OK". `tt-model doctor <id>`
-reports the required-vs-installed verdict declaratively — it never installs.
+reports the required-vs-installed verdict declaratively — it never installs (that is
+`tt-model install`).
 
 **Multiple tt-metal builds → the instance registry.** When several tt-metal builds are on a
 host, `pull` selects the **newest installed instance that satisfies the manifest's ranges** and

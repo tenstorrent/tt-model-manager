@@ -3,6 +3,8 @@
 
 """Tests for the toolchain version-check (WS2). No hardware; all detection is faked."""
 
+import sys
+
 from typer.testing import CliRunner
 
 from tt_kernel import cli, metal, toolchain
@@ -89,3 +91,151 @@ def test_doctor_ok(monkeypatch):
     res = runner.invoke(cli.app, ["doctor"])
     assert res.exit_code == 0, res.output
     assert "toolchain adequate" in res.output
+
+
+# --------------------------------------------------------------- probing an instance's venv
+#
+# tt-model is routinely installed in a venv of its own (pipx, or a manager venv) while the
+# tt-metal build that actually serves lives in another. An in-process ``find_spec`` therefore
+# describes the WRONG interpreter. These use a real subprocess against ``sys.executable``
+# rather than a fake, because the bug was precisely that the probe ran in the wrong process —
+# a mocked-out subprocess would have passed against the broken code too.
+
+def test_vllm_component_probes_the_given_interpreter(tmp_path, monkeypatch):
+    """A python whose venv HAS the stack reports ok even when this process does not."""
+    fake = tmp_path / "site"
+    (fake / "vllm").mkdir(parents=True)
+    (fake / "vllm" / "__init__.py").write_text("")
+    (fake / "vllm_tt_plugin").mkdir()
+    (fake / "vllm_tt_plugin" / "__init__.py").write_text("")
+
+    # Simpler and more honest than a shell shim: call the probe directly with PYTHONPATH.
+    monkeypatch.setenv("PYTHONPATH", str(fake))
+    probed = toolchain._probe_interpreter(sys.executable, ("vllm", "vllm_tt_plugin"), ())
+    assert probed is not None, "probing a working interpreter must not return None"
+    assert probed["present"] == {"vllm": True, "vllm_tt_plugin": True}
+
+
+def test_probe_interpreter_returns_none_when_unreachable(tmp_path):
+    """An unprobeable interpreter is None — NOT a confident 'not installed'.
+
+    The distinction matters: reporting "vllm not found" for an interpreter we merely failed
+    to run would send the user to reinstall a stack that is already there.
+    """
+    assert toolchain._probe_interpreter(str(tmp_path / "no-such-python"), ("vllm",), ()) is None
+
+
+def test_unreachable_interpreter_reports_what_we_know(tmp_path):
+    """The message says the probe failed, not that vLLM is missing."""
+    c = toolchain._vllm_component(str(tmp_path / "no-such-python"))
+    assert not c.adequate
+    assert "could not probe" in c.message
+
+
+def test_absent_plugin_in_probed_interpreter_is_reported(tmp_path, monkeypatch):
+    """vllm present + plugin absent, decided in the probed interpreter."""
+    fake = tmp_path / "site"
+    (fake / "vllm").mkdir(parents=True)
+    (fake / "vllm" / "__init__.py").write_text("")
+    monkeypatch.setenv("PYTHONPATH", str(fake))
+    probed = toolchain._probe_interpreter(sys.executable, ("vllm", "vllm_tt_plugin"), ())
+    assert probed["present"]["vllm"] is True
+    assert probed["present"]["vllm_tt_plugin"] is False
+
+
+def test_check_toolchain_accepts_a_python_and_stays_backward_compatible():
+    """The parameter is optional: no argument keeps the in-process behaviour."""
+    assert {c.name for c in check_toolchain().components} == {"tt-metal", "vllm"}
+    assert {c.name for c in check_toolchain(sys.executable).components} == {"tt-metal", "vllm"}
+
+
+# ------------------------------------------- environment coherence (pip check)
+_PIP_CHECK_REAL = (
+    'opencv-python-headless 5.0.0.93 has requirement numpy>=2; python_version >= "3.9", '
+    "but you have numpy 1.26.4.\n"
+)
+
+
+def _fake_pip(monkeypatch, stdout, returncode=1):
+    import subprocess as sp
+
+    class R:
+        pass
+
+    def run(*a, **k):
+        r = R()
+        r.returncode, r.stdout, r.stderr = returncode, stdout, ""
+        return r
+
+    monkeypatch.setattr(sp, "run", run)
+
+
+def test_parses_the_real_pip_check_wording(monkeypatch):
+    """Captured from the venv in the bug report. Note pip says "has requirement", not
+    "requires" — matching only the latter silently found zero conflicts on an environment
+    pip had just called broken."""
+    _fake_pip(monkeypatch, _PIP_CHECK_REAL)
+    conflicts = toolchain.check_environment()
+    assert len(conflicts) == 1
+    c = conflicts[0]
+    assert c.package == "opencv-python-headless"
+    assert c.requirement == 'numpy>=2; python_version >= "3.9"'
+    assert c.installed == "numpy 1.26.4"
+    assert "numpy>=2" in c.message
+
+
+def test_parses_the_other_pip_wording(monkeypatch):
+    _fake_pip(monkeypatch, "foo 1.0 requires bar>=2, but you have bar 1.0.\n")
+    assert toolchain.check_environment()[0].package == "foo"
+
+
+def test_requirement_containing_a_comma_is_not_truncated(monkeypatch):
+    """"numpy>=1.24,<2" is one requirement. Splitting on the first comma would report it
+    as "numpy>=1.24" and quietly understate the constraint."""
+    _fake_pip(monkeypatch, "foo 1.0 has requirement numpy>=1.24,<2, but you have numpy 2.1.\n")
+    c = toolchain.check_environment()[0]
+    assert c.requirement == "numpy>=1.24,<2"
+
+
+def test_missing_dependency_records_no_installed_version(monkeypatch):
+    _fake_pip(monkeypatch, "foo 1.0 requires bar, but you have bar not installed.\n")
+    c = toolchain.check_environment()[0]
+    assert c.installed is None
+    assert "not installed" in c.message
+
+
+def test_clean_environment_reports_nothing(monkeypatch):
+    _fake_pip(monkeypatch, "", returncode=0)
+    assert toolchain.check_environment() == []
+
+
+def test_unparseable_output_does_not_invent_conflicts(monkeypatch):
+    _fake_pip(monkeypatch, "something entirely unexpected\n")
+    assert toolchain.check_environment() == []
+
+
+def test_pip_unavailable_is_not_a_conflict(monkeypatch):
+    """An unavailable check is not a passing check, but it is also not a conflict we can
+    name — so report nothing rather than a fabricated problem."""
+    import subprocess as sp
+
+    def boom(*a, **k):
+        raise OSError("no pip")
+
+    monkeypatch.setattr(sp, "run", boom)
+    assert toolchain.check_environment() == []
+
+
+def test_doctor_surfaces_a_conflict_without_claiming_plain_adequacy(monkeypatch):
+    """The bug: pip printed a hard ERROR about numpy and `doctor` printed
+    "✓ toolchain adequate" immediately after. Advisory, so still exit 0 — but never
+    an unqualified claim of adequacy."""
+    from tt_kernel import cli
+
+    monkeypatch.setattr(toolchain, "check_environment", lambda *a, **k: [
+        toolchain.EnvConflict("opencv-python-headless", "numpy>=2", "numpy 1.26.4")])
+    res = runner.invoke(cli.app, ["doctor"])
+    assert "opencv-python-headless" in res.output
+    assert "environment conflict" in res.output
+    if res.exit_code == 0:
+        assert "✓ toolchain adequate —" in res.output

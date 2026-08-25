@@ -231,7 +231,8 @@ def _fake_hub(monkeypatch, *, tt_metal="0.73.0", vllm="0.24.1"):
     monkeypatch.setattr(metal, "_vllm_version", lambda: vllm)
     monkeypatch.setattr(metal, "_vllm_plugin_version", lambda: None)
     # Silence the toolchain warning path (no real tt-metal/vLLM in the test env).
-    monkeypatch.setattr(toolchain, "check_toolchain", lambda: toolchain.ToolchainReport(components=[]))
+    monkeypatch.setattr(toolchain, "check_toolchain",
+                        lambda python=None: toolchain.ToolchainReport(components=[]))
     # Hermetic instance resolution: the active env is the only candidate (no real fs scan /
     # ~/.config), and it reports the mocked versions. Mirrors a single-build box.
     active = instances.Instance(name="active", python="/venv/bin/python", source="active")
@@ -462,7 +463,8 @@ def test_doctor_reports_bundle_ranges(monkeypatch):
                         lambda arch_override=None: DeviceInfo(arch="blackhole", device_count=4, source="test"))
     monkeypatch.setattr(metal, "resolve_version", lambda: "0.80.0")  # out of range
     monkeypatch.setattr(metal, "_vllm_version", lambda: "0.24.1")    # in range
-    monkeypatch.setattr(toolchain, "check_toolchain", lambda: toolchain.ToolchainReport(components=[]))
+    monkeypatch.setattr(toolchain, "check_toolchain",
+                        lambda python=None: toolchain.ToolchainReport(components=[]))
 
     res = runner.invoke(cli.app, ["doctor", "acme/laguna", "--arch", "blackhole"])
     # An out-of-range requirement must fail the gate (doctor's documented contract), not exit 0.
@@ -472,6 +474,56 @@ def test_doctor_reports_bundle_ranges(monkeypatch):
     assert "target: p150x4" in res.output
 
 
+def test_doctor_names_the_instance_that_would_serve(monkeypatch):
+    """`doctor <bundle>` must name the instance it resolves, not just the ranges.
+
+    REGRESSION: this reporting block sat after `_report_bundle_requirements`'s `return`,
+    so it never executed — doctor printed a bundle's required ranges and then went quiet
+    about which of the host's registered builds actually satisfies them, which is the one
+    thing a user runs `doctor <bundle>` to find out. Dead code prints nothing and fails
+    nothing, so only an output assertion catches it.
+    """
+    m = _v4_manifest(platform=Platform(ttnn=">=0.72,<0.76"), runtime=Runtime(version=">=0.24"))
+    monkeypatch.setattr(hub, "fetch_manifest", lambda rid, rev: m)
+    monkeypatch.setattr(metal, "detect_device",
+                        lambda arch_override=None: DeviceInfo(arch="blackhole", device_count=4,
+                                                              source="test"))
+    monkeypatch.setattr(metal, "resolve_version", lambda: "0.73.0")
+    monkeypatch.setattr(metal, "_vllm_version", lambda: "0.24.1")
+    monkeypatch.setattr(toolchain, "check_toolchain",
+                        lambda python=None: toolchain.ToolchainReport(components=[]))
+
+    chosen = instances.Instance(name="sel", python="/venv/bin/python3", source="registry")
+    monkeypatch.setattr(instances, "select",
+                        lambda **kw: instances.SelectionResult(
+                            chosen=chosen, candidates=[], reason="sel (ttnn=0.73.0)"))
+
+    res = runner.invoke(cli.app, ["doctor", "acme/laguna", "--arch", "blackhole"])
+    assert res.exit_code == 0, res.output
+    assert "would link to instance" in res.output, res.output
+    assert "sel (ttnn=0.73.0)" in res.output
+
+
+def test_doctor_reports_when_no_instance_is_selectable(monkeypatch):
+    """The other half of the same block: an unsatisfiable set says so, and says what to do."""
+    m = _v4_manifest(platform=Platform(ttnn=">=0.72,<0.76"), runtime=Runtime(version=">=0.24"))
+    monkeypatch.setattr(hub, "fetch_manifest", lambda rid, rev: m)
+    monkeypatch.setattr(metal, "detect_device",
+                        lambda arch_override=None: DeviceInfo(arch="blackhole", device_count=4,
+                                                              source="test"))
+    monkeypatch.setattr(metal, "resolve_version", lambda: "0.73.0")
+    monkeypatch.setattr(metal, "_vllm_version", lambda: "0.24.1")
+    monkeypatch.setattr(toolchain, "check_toolchain",
+                        lambda python=None: toolchain.ToolchainReport(components=[]))
+    monkeypatch.setattr(instances, "select",
+                        lambda **kw: instances.SelectionResult(
+                            chosen=None, candidates=[], reason="nothing registered"))
+
+    res = runner.invoke(cli.app, ["doctor", "acme/laguna", "--arch", "blackhole"])
+    assert "no instance selectable" in res.output, res.output
+    assert "tt-model instances add" in res.output
+
+
 def test_doctor_in_range_exits_zero(monkeypatch):
     m = _v4_manifest(platform=Platform(ttnn=">=0.72,<0.76"), runtime=Runtime(version=">=0.24"))
     monkeypatch.setattr(hub, "fetch_manifest", lambda rid, rev: m)
@@ -479,6 +531,7 @@ def test_doctor_in_range_exits_zero(monkeypatch):
                         lambda arch_override=None: DeviceInfo(arch="blackhole", device_count=4, source="test"))
     monkeypatch.setattr(metal, "resolve_version", lambda: "0.73.0")   # in range
     monkeypatch.setattr(metal, "_vllm_version", lambda: "0.24.1")     # in range
-    monkeypatch.setattr(toolchain, "check_toolchain", lambda: toolchain.ToolchainReport(components=[]))
+    monkeypatch.setattr(toolchain, "check_toolchain",
+                        lambda python=None: toolchain.ToolchainReport(components=[]))
     res = runner.invoke(cli.app, ["doctor", "acme/laguna", "--arch", "blackhole"])
     assert res.exit_code == 0, res.output

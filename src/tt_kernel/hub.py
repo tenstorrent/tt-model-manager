@@ -61,13 +61,19 @@ def set_visibility(repo_id: str, private: bool) -> None:
 
 
 def push_folder(repo_id: str, folder: Path, commit_message: str) -> None:
-    """Upload an entire staged bundle folder. Large binaries go to LFS automatically."""
-    _api().upload_folder(
-        repo_id=repo_id,
-        repo_type=_REPO_TYPE,
-        folder_path=str(folder),
-        commit_message=commit_message,
-    )
+    """Upload an entire staged bundle folder. Large binaries go to LFS automatically.
+
+    ``upload_folder`` takes no ``tqdm_class``, so the bridge here silences HF's writers and
+    shows an indeterminate activity line rather than a byte count. An honest spinner beats
+    a bar fighting our own output for the row.
+    """
+    with progress_bridge(f"Uploading to {repo_id}"):
+        _api().upload_folder(
+            repo_id=repo_id,
+            repo_type=_REPO_TYPE,
+            folder_path=str(folder),
+            commit_message=commit_message,
+        )
 
 
 def tag_repo(repo_id: str, tags: List[str]) -> None:
@@ -145,12 +151,18 @@ def latest_revision(repo_id: str, revision: Optional[str] = None,
 
 
 def download_bundle(repo_id: str, revision: Optional[str], dest: Optional[str] = None) -> Path:
-    """Snapshot-download a bundle and return the local snapshot path."""
+    """Snapshot-download a bundle and return the local snapshot path.
+
+    HF's own tqdm/xet bars are diverted into our activity row (see ``progress_bridge``) so
+    only one writer ever owns the terminal.
+    """
     from huggingface_hub import snapshot_download
 
-    path = snapshot_download(
-        repo_id=repo_id, repo_type=_REPO_TYPE, revision=revision, local_dir=dest
-    )
+    with progress_bridge(f"Downloading {repo_id}") as tqdm_class:
+        path = snapshot_download(
+            repo_id=repo_id, repo_type=_REPO_TYPE, revision=revision, local_dir=dest,
+            tqdm_class=tqdm_class,
+        )
     return Path(path)
 
 
@@ -158,9 +170,10 @@ def fetch_manifest(repo_id: str, revision: Optional[str]) -> Manifest:
     """Download just the manifest file and parse it (used by ``info``)."""
     from huggingface_hub import hf_hub_download
 
-    path = hf_hub_download(
-        repo_id=repo_id, repo_type=_REPO_TYPE, filename=MANIFEST_NAME, revision=revision
-    )
+    with progress_bridge(f"Fetching manifest for {repo_id}"):
+        path = hf_hub_download(
+            repo_id=repo_id, repo_type=_REPO_TYPE, filename=MANIFEST_NAME, revision=revision
+        )
     return Manifest.from_json(Path(path).read_text())
 
 
@@ -197,3 +210,212 @@ def search(
             }
         )
     return out
+
+
+# --------------------------------------------------------------------- diagnosis
+# Hub failures used to escape as a ~60-line Rich traceback (`tt-model pull <404>` and
+# `tt-model info <404>` both did). Classification lives here, as a PURE function, so the
+# 404/401/403/gated/offline matrix is unit-testable with no network and the CLI can render
+# one card instead of a stack.
+def _evidence(text: str) -> str:
+    """The first line of an exception, minus tracking noise.
+
+    huggingface_hub appends "(Request ID: Root=1-...;...)" to its HTTP errors. That is for
+    a support ticket, not for the person reading their terminal, and it crowds out the
+    part that matters.
+    """
+    line = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
+    return line.split(" (Request ID:")[0].strip()
+
+
+def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
+    """Map a huggingface_hub exception to ``{cause, detail, evidence, actions}``.
+
+    Pure: exception in, dict out. Keys match what ``console.failure_card`` renders.
+
+    The 404 wording is deliberately two-sided. The Hub answers 404 for *both* "no such
+    repo" and "private repo you cannot see" — it will not distinguish them for an
+    unauthorised caller — so asserting "it does not exist" would be a guess that sends
+    the user down the wrong path half the time.
+    """
+    name = type(exc).__name__
+    text = str(exc)
+    low = text.lower()
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+
+    # Offline / DNS / TLS beats everything: an unreachable Hub also can't confirm a repo,
+    # and "you are offline" is the more useful half of that pair.
+    if (name in ("LocalEntryNotFoundError", "OfflineModeIsEnabled")
+            or any(k in low for k in ("no such host", "dial tcp", "i/o timeout",
+                                      "tls handshake", "connection refused",
+                                      "connection error", "max retries exceeded",
+                                      "temporary failure in name resolution"))):
+        return {
+            "cause": "cannot reach the Hub",
+            "detail": "The request never got a response — this looks like a network or DNS problem, "
+                      "not a missing bundle.",
+            "evidence": _evidence(text),
+            "actions": ["check your connection, then re-run",
+                        "HF_HUB_OFFLINE=1 tt-model list   # what is already installed"],
+        }
+
+    if status == 401 or name == "GatedRepoError" or "gated" in low:
+        return {
+            "cause": "you do not have access",
+            "detail": f"The Hub recognised {repo_id} but refused it for this token — it is gated, "
+                      "or the token is missing, expired, or lacks read scope.",
+            "evidence": _evidence(text),
+            "actions": ["tt-model login", f"accept the terms at https://huggingface.co/{repo_id}"],
+        }
+
+    if status == 403:
+        return {
+            "cause": "not authorised",
+            "detail": f"The Hub rejected this token for {repo_id}. It may lack read scope, or the "
+                      "repo's terms may not be accepted for your account.",
+            "evidence": _evidence(text),
+            "actions": ["tt-model login", f"open https://huggingface.co/{repo_id}"],
+        }
+
+    if status == 404 or name == "RepositoryNotFoundError" or "not found" in low:
+        return {
+            "cause": "no such bundle, or no access",
+            "detail": f"The Hub returned 404 for {repo_id}. Either the id is wrong, or the repo is "
+                      "private and your token cannot see it — the Hub reports both the same way.",
+            "evidence": _evidence(text),
+            "actions": [f"tt-model search {repo_id.split('/')[-1]}   # find the right id",
+                        "tt-model login                     # if it is private"],
+        }
+
+    if name == "EntryNotFoundError" or MANIFEST_NAME in text:
+        return {
+            "cause": "not a tt-model bundle",
+            "detail": f"The repo exists but has no {MANIFEST_NAME}, so there is nothing for tt-model "
+                      "to install.",
+            "evidence": _evidence(text),
+            "actions": ["tt-model search --catalog     # bundles published for tt-model"],
+        }
+
+    return {
+        "cause": "the Hub request failed",
+        "detail": f"{name} while talking to the Hugging Face Hub about {repo_id}.",
+        "evidence": _evidence(text),
+        "actions": ["re-run with --verbose for the full traceback"],
+    }
+
+
+# ----------------------------------------------------------------- progress bridge
+# huggingface_hub writes its own tqdm bars, and hf_xet writes more ("Download complete",
+# "Reconstruction complete"). With our spinner or a `secho` also writing, two processes
+# fought for one terminal row: bars and status text interleaved mid-line, and unterminated
+# bar output survived the process and painted over the next shell prompt — at which point
+# leftover bytes were handed to bash as commands. So the CLI takes sole ownership of the
+# row: HF's writers are silenced and their byte counts are re-reported through our own
+# activity line.
+class _ActivityTqdm:
+    """A tqdm stand-in that reports into ``console.activity`` instead of the terminal.
+
+    huggingface_hub instantiates whatever ``tqdm_class`` it is handed, so implementing the
+    slice it actually uses (init / update / close / context manager, plus the ``total`` and
+    ``n`` attributes it reads back) is enough to divert the whole download's progress into
+    one line we control.
+    """
+
+    label = "Working"
+    _live = {}  # id -> (n, total), so concurrent file bars can be summed
+
+    def __init__(self, *args, **kwargs):
+        from . import console
+
+        self._console = console
+        self.total = kwargs.get("total")
+        self.n = kwargs.get("initial", 0) or 0
+        self.desc = kwargs.get("desc") or ""
+        self.unit = kwargs.get("unit", "")
+        self._key = id(self)
+        # Only byte-denominated bars are worth aggregating; a "Fetching 5 files" bar has a
+        # different unit and would corrupt the byte total.
+        self._bytes = self.unit in ("B", "iB")
+        if self._bytes:
+            _ActivityTqdm._live[self._key] = (self.n, self.total or 0)
+            self._render()
+
+    # -- the tqdm surface huggingface_hub touches ---------------------------------
+    def update(self, n=1):
+        self.n += n or 0
+        if self._bytes:
+            _ActivityTqdm._live[self._key] = (self.n, self.total or 0)
+            self._render()
+
+    def close(self):
+        _ActivityTqdm._live.pop(self._key, None)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+    def set_description(self, desc=None, refresh=True):
+        self.desc = desc or ""
+
+    def set_description_str(self, desc=None, refresh=True):
+        self.desc = desc or ""
+
+    def set_postfix(self, *a, **k):
+        pass
+
+    def set_postfix_str(self, *a, **k):
+        pass
+
+    def refresh(self, *a, **k):
+        pass
+
+    def reset(self, total=None):
+        self.n = 0
+        self.total = total
+
+    def write(self, s, **k):
+        pass  # tqdm.write() is a terminal escape hatch; we own the terminal here
+
+    def __iter__(self):
+        return iter(())
+
+    @classmethod
+    def _render(cls):
+        done = sum(n for n, _ in cls._live.values())
+        if not done:
+            return
+        from . import console
+
+        console.activity.set(f"{cls.label}  {console.fmt_bytes(done)}")
+
+
+def progress_bridge(label: str):
+    """Silence HF/xet progress writers and route their byte counts to the activity row.
+
+    Returns a ``tqdm_class`` to hand to ``snapshot_download``. Use as a context manager so
+    the bars are restored on every exit path — leaving them disabled would silently strip
+    progress from anything else in the process.
+    """
+    import contextlib
+
+    from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
+
+    from . import console
+
+    @contextlib.contextmanager
+    def _ctx():
+        _ActivityTqdm.label = label
+        _ActivityTqdm._live.clear()
+        disable_progress_bars()
+        console.activity.start(label)
+        try:
+            yield _ActivityTqdm
+        finally:
+            console.activity.stop()
+            enable_progress_bars()
+            _ActivityTqdm._live.clear()
+
+    return _ctx()

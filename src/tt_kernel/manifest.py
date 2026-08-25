@@ -428,6 +428,11 @@ def compare(manifest: Manifest, local: "LocalEnv") -> CompatibilityReport:  # no
       tt-metal would look under a different directory => silent miss (forceable).
     - ``device_count`` mismatch is a warning (forceable).
 
+    A **self-contained** (v5) bundle ships its own ttnn/vLLM engine wheels, so the host's
+    tt-metal is irrelevant entirely: it is gated ONLY on ``arch`` (fatal) and ``device_count``
+    (forceable) — no tt_metal_version, build_key, harvesting, or version-range check applies,
+    and the host need not have tt-metal installed at all.
+
     A **kernels-less** bundle (``build_key is None``) ships no precompiled cache, so none
     of the cache-dependent gates apply: only ``arch`` (still fatal — the adapter/kernels
     JIT for a specific ISA) and ``device_count`` are checked. For a **v4** bundle the
@@ -445,13 +450,30 @@ def compare(manifest: Manifest, local: "LocalEnv") -> CompatibilityReport:  # no
             Incompatibility(field="arch", expected=manifest.arch, detected=local.arch, fatal=True)
         )
 
+    # A self-contained (v5) bundle ships its own ttnn/vLLM engine wheels and installs them into its
+    # OWN venv, so NONE of the host's tt-metal facts are relevant: not the tt_metal_version (the
+    # engine that runs is the bundle's, not the host's — the host need not have tt-metal at all),
+    # not the kernel-cache build_key / harvesting (the bundle JITs into its own cache), not the
+    # platform/runtime version ranges. Gate ONLY on arch (the ISA the shipped binaries target —
+    # still fatal above) and device_count (the mesh the model needs). The shipped wheels' own
+    # interpreter/platform tags are verified separately at install time (host_incompatible_wheels).
+    if manifest.is_self_contained:
+        if local.device_count and manifest.device_count != local.device_count:
+            issues.append(
+                Incompatibility(
+                    field="device_count",
+                    expected=str(manifest.device_count),
+                    detected=str(local.device_count),
+                    fatal=False,
+                )
+            )
+        return CompatibilityReport(compatible=not issues, issues=issues)
+
     if manifest.build_key is None:
-        # Kernels-less: skip every cache-dependent gate. v4 range gates + device_count only.
-        # A v5 self-contained bundle SHIPS its ttnn/vLLM wheels, so the host-version ranges are
-        # irrelevant (the installed versions come from the bundle, not the host) — skip them. The
-        # shipped wheel's own interpreter/platform tags are verified separately at install time.
-        if not manifest.is_self_contained:
-            issues.extend(_range_issues(manifest, local))
+        # Kernels-less (non-self-contained v3/v4): skip every cache-dependent gate. A v4 bundle
+        # references a host-provisioned tt-metal, so its declared platform/runtime version ranges
+        # DO gate here (an installed version outside the range is forceable). device_count too.
+        issues.extend(_range_issues(manifest, local))
         if local.device_count and manifest.device_count != local.device_count:
             issues.append(
                 Incompatibility(
@@ -519,6 +541,10 @@ def runner_version_advisory(manifest: Manifest, local: "LocalEnv") -> Optional[I
     informational ``Incompatibility`` (always ``fatal=False``) or None.
     """
     if manifest.runner is None and manifest.weights is None:
+        return None
+    # A self-contained bundle ships its own engine; the host tt-metal version is irrelevant to it
+    # (and the host may not have tt-metal installed at all), so never advise on it.
+    if manifest.is_self_contained:
         return None
     if local.tt_metal_version and manifest.tt_metal_version != local.tt_metal_version:
         return Incompatibility(
