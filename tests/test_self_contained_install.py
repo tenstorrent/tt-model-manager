@@ -48,6 +48,38 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setattr(metal, "local_env", lambda **k: metal.LocalEnv(arch="blackhole", device_count=1))
 
 
+def test_glibc_floor_of_tag():
+    assert packaging.glibc_floor_of_tag("manylinux_2_39_x86_64") == (2, 39)
+    assert packaging.glibc_floor_of_tag("manylinux_2_35_x86_64") == (2, 35)
+    assert packaging.glibc_floor_of_tag("manylinux2014_x86_64") == (2, 17)
+    assert packaging.glibc_floor_of_tag("linux_x86_64") is None  # unrepaired: no declared floor
+    assert packaging.glibc_floor_of_tag("any") is None
+
+
+def test_host_incompatible_wheels_flags_glibc_too_old(monkeypatch):
+    # A manylinux_2_39 wheel on a glibc-2.35 host (Ubuntu 22.04) must be flagged clearly.
+    monkeypatch.setattr(packaging, "host_glibc", lambda: (2, 35))
+    monkeypatch.setattr(packaging, "host_python_tag", lambda: "cp312")
+    bundled = BundledPlatform(
+        ttnn_wheel=WheelArtifact(path="wheels/ttnn-0.75.0-cp312-cp312-manylinux_2_39_x86_64.whl",
+                                 sha256="x", python_tag="cp312", abi_tag="cp312",
+                                 platform_tag="manylinux_2_39_x86_64"),
+    )
+    problems = packaging.host_incompatible_wheels(bundled)
+    assert any("needs glibc >= 2.39" in p and "2.35" in p for p in problems)
+
+
+def test_host_incompatible_wheels_ok_when_glibc_new_enough(monkeypatch):
+    monkeypatch.setattr(packaging, "host_glibc", lambda: (2, 39))
+    monkeypatch.setattr(packaging, "host_python_tag", lambda: "cp312")
+    bundled = BundledPlatform(
+        ttnn_wheel=WheelArtifact(path="wheels/ttnn-0.75.0-cp312-cp312-manylinux_2_35_x86_64.whl",
+                                 sha256="x", python_tag="cp312", abi_tag="cp312",
+                                 platform_tag="manylinux_2_35_x86_64"),
+    )
+    assert packaging.host_incompatible_wheels(bundled) == []
+
+
 def test_host_incompatible_wheels_flags_python_mismatch():
     bundled = BundledPlatform(
         ttnn_wheel=WheelArtifact(path="wheels/ttnn-0.75.0-cp999-cp999-linux_x86_64.whl",

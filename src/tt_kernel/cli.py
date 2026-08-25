@@ -1140,12 +1140,20 @@ def _push_vllm(
 
 
 # -------------------------------------------------------------------------- package
-def _ensure_portable_wheel(wheel: Path, *, repair: bool) -> Path:
+def _ensure_portable_wheel(wheel: Path, *, repair: bool, plat: Optional[str] = None) -> Path:
     """Make the ttnn wheel self-contained with auditwheel: vendor its external libs (libtracy/
     libmpi/libhwloc/libnuma/...) and rewrite RPATH to $ORIGIN. Without this the shipped .so's load
     from the author's build tree / host and fail on another machine (the #1 cross-machine bug).
     Skips an already-portable (manylinux-tagged) wheel; --no-repair ships the raw wheel with a loud
-    warning."""
+    warning.
+
+    ``plat`` optionally forces an auditwheel target policy (e.g. ``manylinux_2_28_x86_64``).
+    auditwheel already auto-picks the LOWEST glibc the wheel's symbols permit, so this can only
+    ASSERT a floor, not lower one: if the wheel was compiled against a newer glibc than ``plat``
+    allows, auditwheel errors — which is the point (fail at package time, on the author's box,
+    instead of at every consumer). To actually broaden compatibility, build the ttnn wheel on the
+    OLDEST target OS (e.g. Ubuntu 22.04, glibc 2.35); then it repairs to manylinux_2_35 and runs
+    on both 22.04 and 24.04."""
     if "manylinux" in wheel.name:
         return wheel  # already repaired/portable
     if not repair:
@@ -1161,14 +1169,22 @@ def _ensure_portable_wheel(wheel: Path, *, repair: bool) -> Path:
                    "libmpi/libnuma/libhwloc and rewrites RPATH to $ORIGIN). Install it with "
                    "`pip install auditwheel patchelf`, or re-run with --no-repair to ship as-is.")
     outdir = Path(tempfile.mkdtemp(prefix="tt-model-repair-"))
-    typer.echo("Repairing ttnn wheel for portability (auditwheel: vendor libs + $ORIGIN RPATH) ...")
+    plat_note = f" targeting {plat}" if plat else ""
+    typer.echo(f"Repairing ttnn wheel for portability (auditwheel: vendor libs + $ORIGIN RPATH){plat_note} ...")
+    cmd = [sys.executable, "-m", "auditwheel", "repair", str(wheel), "-w", str(outdir)]
+    if plat:
+        cmd += ["--plat", plat]
     try:
-        subprocess.run([sys.executable, "-m", "auditwheel", "repair", str(wheel), "-w", str(outdir)],
-                       check=True)
+        subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as exc:
+        hint = ""
+        if plat:
+            hint = (f" If it reports the wheel requires a newer glibc than {plat} allows, the ttnn "
+                    "wheel was built on too-new an OS — rebuild it on the oldest target (e.g. "
+                    "Ubuntu 22.04, glibc 2.35) to reach that floor.")
         raise _err(f"auditwheel repair failed (exit {exc.returncode}). The build tree the wheel was "
                    "built from must be present so auditwheel can find the external libs to vendor; "
-                   "or re-run with --no-repair. See the output above.")
+                   f"or re-run with --no-repair.{hint} See the output above.")
     repaired = sorted(outdir.glob("ttnn-*.whl"))
     if not repaired:
         raise _err("auditwheel produced no wheel; re-run with --no-repair or repair manually.")
@@ -1308,6 +1324,12 @@ def package(
         "(vendors external libs + $ORIGIN RPATH). --no-repair ships the raw wheel (likely fails "
         "on another machine)."
     ),
+    manylinux: Optional[str] = typer.Option(
+        None, "--manylinux", help="auditwheel target policy, e.g. manylinux_2_28_x86_64. Asserts a "
+        "glibc floor: repair fails if the wheel needs a newer glibc. To serve older hosts (Ubuntu "
+        "22.04 = glibc 2.35 as well as 24.04), build the ttnn wheel on the OLDEST target OS. Default: "
+        "auditwheel auto-picks the lowest glibc the wheel allows (= the build host's glibc)."
+    ),
     out: Optional[str] = typer.Option(
         None, "--out", help="Stage the running folder here (kept even without a push target)."
     ),
@@ -1353,7 +1375,7 @@ def package(
     for label, p in (("ttnn", picked["ttnn"]), ("vllm", picked["vllm"]), ("plugin", picked["plugin"])):
         if p is not None and not p.is_file():
             raise _err(f"{label} wheel {str(p)!r} does not exist.")
-    picked["ttnn"] = _ensure_portable_wheel(picked["ttnn"], repair=repair_wheel)
+    picked["ttnn"] = _ensure_portable_wheel(picked["ttnn"], repair=repair_wheel, plat=manylinux)
 
     # vllm_metadata: an authored file, or synthesized from --arch-name/--main-class.
     if metadata:

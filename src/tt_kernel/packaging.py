@@ -64,26 +64,78 @@ def host_python_tag() -> str:
     return f"cp{sys.version_info.major}{sys.version_info.minor}"
 
 
+# manylinux platform tags → the minimum glibc (major, minor) they require. The perennial
+# ``manylinux_<major>_<minor>`` form encodes it directly; the legacy aliases are fixed points.
+_LEGACY_MANYLINUX_GLIBC = {
+    "manylinux1": (2, 5),
+    "manylinux2010": (2, 12),
+    "manylinux2014": (2, 17),
+}
+
+
+def glibc_floor_of_tag(platform_tag: Optional[str]) -> Optional[tuple]:
+    """The minimum glibc (major, minor) a manylinux platform tag requires, or None.
+
+    ``manylinux_2_39_x86_64`` -> (2, 39); ``manylinux2014_x86_64`` -> (2, 17). A bare
+    ``linux_x86_64`` (unrepaired) or ``any`` carries no declared floor -> None (we can't
+    reason about it, so it's never flagged here).
+    """
+    if not platform_tag:
+        return None
+    for legacy, floor in _LEGACY_MANYLINUX_GLIBC.items():
+        if platform_tag.startswith(legacy):
+            return floor
+    m = re.match(r"manylinux_(\d+)_(\d+)_", platform_tag)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def host_glibc() -> Optional[tuple]:
+    """This host's glibc (major, minor), or None if it can't be determined (e.g. musl)."""
+    import platform as _platform
+
+    try:
+        _name, ver = _platform.libc_ver()
+        if ver:
+            parts = ver.split(".")
+            return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def host_incompatible_wheels(bundled: "BundledPlatform") -> List[str]:  # noqa: F821
     """Shipped wheels whose interpreter/platform tags don't match this host.
 
-    The shipped wheels are the author's build (e.g. cp312/linux_x86_64), NOT universal — a
-    consumer on a different Python minor or OS can't install them. Universal wheels
-    (``py3-none-any`` like the plugin) are skipped. Returns human-readable reasons; empty ==
+    The shipped wheels are the author's build (e.g. cp312/manylinux_2_39_x86_64), NOT universal —
+    a consumer on a different Python minor, OS, or an older glibc can't install them. Universal
+    wheels (``py3-none-any`` like the plugin) are skipped. Returns human-readable reasons; empty ==
     all installable here.
+
+    The glibc check turns the otherwise-cryptic runtime failure (``version 'GLIBC_2.39' not
+    found`` at dlopen) into a clear, actionable message at pull time: the author must repackage
+    on an older Ubuntu (e.g. 22.04, glibc 2.35) to serve older hosts.
     """
     import sys
 
     problems: List[str] = []
     host_py = host_python_tag()
     host_is_linux = sys.platform.startswith("linux")
+    hg = host_glibc()
     for w in bundled.wheels:
         if not w.python_tag or w.python_tag.startswith("py") or w.abi_tag in (None, "none"):
             continue  # universal / non-CPython-pinned wheel
+        name = Path(w.path).name
         if w.python_tag != host_py:
-            problems.append(f"{Path(w.path).name}: built for {w.python_tag}, host is {host_py}")
+            problems.append(f"{name}: built for {w.python_tag}, host is {host_py}")
         if w.platform_tag and w.platform_tag != "any" and "linux" in w.platform_tag and not host_is_linux:
-            problems.append(f"{Path(w.path).name}: built for {w.platform_tag}, host is {sys.platform}")
+            problems.append(f"{name}: built for {w.platform_tag}, host is {sys.platform}")
+        floor = glibc_floor_of_tag(w.platform_tag)
+        if floor and hg and hg < floor:
+            problems.append(
+                f"{name}: needs glibc >= {floor[0]}.{floor[1]}, host has {hg[0]}.{hg[1]} — "
+                f"the bundle must be repackaged on an older Ubuntu (e.g. 22.04, glibc 2.35) "
+                f"to run on this host"
+            )
     return problems
 
 
