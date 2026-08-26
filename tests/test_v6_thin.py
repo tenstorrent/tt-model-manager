@@ -57,6 +57,7 @@ def test_thin_default_requirements_template_has_todo_pins(tmp_path):
     assert "tt-metal-models" in req                  # the models wheel (incl. tt_transformers)
     assert "tt-metal#54340" in req                   # tracks the upstream packaging PR (#29 M0)
     assert "SFPI" in req and "NOT listed" in req     # SFPI is an external box dep
+    assert "vllm" in req and "vllm_tt_plugin" in req  # vLLM serve path needs the fork + plugin (pinned, not embedded)
 
 
 def test_thin_install_sh_builds_venv_from_pins(tmp_path):

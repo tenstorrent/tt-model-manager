@@ -486,6 +486,13 @@ _THIN_REQUIREMENTS_TEMPLATE = """\
 #
 ttnn>=0.77                 # engine (PyPI today; bundles the tt-metal runtime). Until tt-metal-models
                            # lands you pin ttnn directly; after, tt-metal-models pulls the exact ttnn.
+#
+# For the vLLM serve path (serve.kind: vllm — the default), the venv also needs the Tenstorrent vLLM
+# fork (VLLM_TARGET_DEVICE=empty build — NOT stock PyPI vllm) + the plugin. These are a FORK, so pin
+# them from wherever the team publishes them (not embedded in a thin bundle):
+# vllm==<empty-target-fork-build>     # TODO: pin the TT vLLM fork (not stock PyPI vllm)
+# vllm_tt_plugin==<X>                 # TODO: pin the TT vLLM plugin
+#
 # <your-model>-ops==<Z>    # optional: your generic_op custom-op wheel (ship it in custom_ops/)
 """
 

@@ -110,8 +110,12 @@ The key discipline: **pin what actually worked** — `pip freeze` in your workin
    # tt-metal-models==<X>       # the models tree (incl. tt_transformers); pins ttnn==<X> exactly
    #                            # (upstream tt-metal#54340) — pulls the matching ttnn transitively
    ttnn==0.77.0                 # engine (PyPI today; pin directly until tt-metal-models lands)
+   # vllm==<empty-target-fork>  # the TT vLLM FORK (VLLM_TARGET_DEVICE=empty) — NOT stock PyPI vllm
+   # vllm_tt_plugin==<X>        # the TT vLLM plugin  (both needed for serve.kind: vllm)
    my_model_ops==0.1            # your generic_op custom-op wheel (if any)
    ```
+   Note: unlike a v5 fat bundle (which can **embed** the vLLM fork + plugin wheels), a thin bundle
+   **pins** them — they're a fork, so pin from wherever the team publishes them, not stock PyPI.
    SFPI + firmware are external box deps — **not** in `requirements.txt`. (Omit `--requirements` and
    `package-thin` writes this as a template with the `tt-metal-models` TODO pin.)
 3. **(Custom ops only)** put your built `generic_op` wheel in a folder, e.g.
