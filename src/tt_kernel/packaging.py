@@ -492,13 +492,11 @@ _THIN_REQUIREMENTS_TEMPLATE = """\
 ttnn>=0.77                 # engine (PyPI today; bundles the tt-metal runtime). Until tt-metal-models
                            # lands you pin ttnn directly; after, tt-metal-models pulls the exact ttnn.
 #
-# Do NOT add `vllm` here. The TT vLLM is the locally built empty-target build (VLLM_TARGET_DEVICE=
-# empty), NOT the CUDA `vllm` on PyPI — and per tenstorrent/vllm-tt-plugin, declaring `vllm` as a
-# resolvable dep silently uninstalls the TT build and pulls the PyPI wheel. So the vLLM fork + the
-# `vllm-tt-plugin` are shipped as BUNDLED WHEELS (installed by path, base before plugin), not pins:
-# pass --vllm-wheel + --plugin-wheel to `tt-model package-thin`.
+# vLLM: the direction is stock vLLM + the vllm-tt-plugin (we no longer ship a custom vLLM fork).
+# The vLLM *integration* is the `vllm-tt-plugin` — ship it as a bundled wheel (--plugin-wheel);
+# vLLM core comes via the plugin (see tenstorrent/vllm-tt-plugin). Don't hand-pin CUDA `vllm`.
 #
-# <your-model>-ops==<Z>    # optional: your generic_op custom-op wheel (ship it in custom_ops/)
+# <your-model>-ops==<Z>    # optional: your generic_op custom-op wheel (ship it via --ops-wheel)
 """
 
 
@@ -511,7 +509,6 @@ def stage_thin_package(
     vllm_metadata: dict,
     tt_kernel_version: str,
     requirements: Optional[Path] = None,
-    vllm_wheel: Optional[Path] = None,
     plugin_wheel: Optional[Path] = None,
     extra_wheels: Optional[List[Path]] = None,
     weights: Optional[WeightsRef] = None,
@@ -526,11 +523,11 @@ def stage_thin_package(
 
     Ships: ``model.py`` (the runner), a ``requirements.txt`` of index pins (ttnn / tt-metal-models),
     the ``vllm_metadata.json`` (EXTRA_MODELS_DIR contract), generated ``install.sh``/``run.sh``, and
-    — in ``wheels/`` — the **bundled wheels installed by path**: the Tenstorrent vLLM fork
-    (``--vllm-wheel``, the empty-target build), the ``vllm-tt-plugin`` (``--plugin-wheel``), and any
-    ``generic_op`` custom-op wheels (``extra_wheels``). vLLM is shipped, never pinned: it's the
-    empty-target build, not PyPI vllm (see tenstorrent/vllm-tt-plugin). NO embedded ttnn wheel, NO
-    metal tree — ttnn/tt-metal-models resolve from the index at install. Weights stay a pointer.
+    — in ``wheels/`` — the **bundled wheels installed by path**: the ``vllm-tt-plugin``
+    (``--plugin-wheel``, the vLLM integration) and any ``generic_op`` custom-op wheels
+    (``extra_wheels``). We do NOT ship a custom vLLM fork — the direction is stock vLLM +
+    vllm-tt-plugin (see tenstorrent/vllm-tt-plugin). NO embedded ttnn wheel, NO metal tree —
+    ttnn/tt-metal-models resolve from the index at install. Weights stay a pointer.
 
     NOTE (draft): reflects the #29 plan; fully functional once tt-metal-models publishes so the
     ttnn/tt-metal-models pins are real.
@@ -548,11 +545,11 @@ def stage_thin_package(
     else:
         (staged / REQUIREMENTS).write_text(_THIN_REQUIREMENTS_TEMPLATE)
 
-    # Bundled wheels -> wheels/, installed BY PATH in this order: the TT vLLM fork FIRST, then the
-    # plugin (the plugin must not precede its base), then any generic_op custom-op wheels. These are
-    # the things not on a pinnable index; ttnn/tt-metal-models still come from requirements.txt.
+    # Bundled wheels -> wheels/, installed BY PATH: the vllm-tt-plugin (the vLLM integration — we
+    # ship no custom vLLM fork), then any generic_op custom-op wheels. These are the things not on a
+    # pinnable index; ttnn/tt-metal-models still come from requirements.txt.
     deps_wheels: List[str] = []
-    ordered = [w for w in (vllm_wheel, plugin_wheel, *(extra_wheels or [])) if w is not None]
+    ordered = [w for w in (plugin_wheel, *(extra_wheels or [])) if w is not None]
     if ordered:
         wheels_root = staged / WHEELS_DIR
         wheels_root.mkdir(exist_ok=True)
