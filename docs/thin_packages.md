@@ -41,16 +41,56 @@ A TT **card**, its **firmware/driver**, and **SFPI** (SFPI is a separate, extern
 dependency — provisioned by tt-cli, or installed by the user on a bare box; it is **not** in `ttnn`
 and **not** in the venv). No separate tt-metal install — the tt-metal runtime rides inside `ttnn`.
 
-## Author a thin bundle
-```bash
-tt-model package-thin <org>/<model> \
-  --model-py ./model.py \
-  --requirements ./requirements.txt \      # your pins (or omit for the #29 TODO template)
-  --wheels-dir ./custom_ops \              # optional: your generic_op wheel(s)
-  --arch blackhole --arch-name QwenForCausalLM --main-class model:QwenForCausalLM \
-  --weights Qwen/Qwen3-4B --mesh P150 \
-  --out ./bundle                           # stage locally (omit + pass <org>/<model> to push)
-```
+## Author a thin bundle — from a "works on my box" model
+
+A thin package is not the engine; it's a thin description of *your* model plus the recipe to rebuild
+its venv anywhere. "Making the package" = capturing the exact recipe your working box used.
+
+### What "working on my box" must already include → where it lands
+| You have (working box) | Becomes (in the package) |
+|---|---|
+| `model.py` — your runner, built on **TTTv2** blocks and/or calling `ttnn.generic_op` for custom ops | shipped at the bundle root |
+| the **exact dep versions** you ran with — `ttnn==…`, `tt-transformers`(TTTv2)`==…`, the models wheel`==…`, any custom-op wheel | `requirements.txt` pins |
+| *(if you wrote custom ops)* a **`generic_op` wheel** you built | `custom_ops/` + a pin |
+| the **serving entrypoint** — the HF architecture name + the `module:Class` the vLLM plugin loads | `vllm_metadata.json` (`arch` → `main_class`) |
+| the **weights** (an HF repo id) + the **serving knobs** you validated (mesh, max_num_seqs, block_size) | manifest pointer + `resources`/`mesh` |
+
+The key discipline: **pin what actually worked** — `pip freeze` in your working venv gives the real
+`ttnn`/TTTv2/models-wheel versions to put in `requirements.txt`.
+
+### Steps
+1. **Make `model.py` importable by its class path.** Class `QwenForCausalLM` in `model.py` → the
+   entrypoint is `model:QwenForCausalLM` (module = filename without `.py`; at serve time `PYTHONPATH`
+   is the bundle root).
+2. **Write `requirements.txt`** with the versions your box ran:
+   ```
+   ttnn==0.77.0                 # engine (PyPI / team-provided); SFPI is external, not here
+   tt-transformers==<X>         # TTTv2 framework wheel
+   tt-metal-models==<Y>         # the tiny "models wheel"
+   my_model_ops==0.1            # your generic_op custom-op wheel (if any)
+   ```
+   (Omit `--requirements` and `package-thin` writes this as a template with TODO pins.)
+3. **(Custom ops only)** put your built `generic_op` wheel in a folder, e.g.
+   `./custom_ops/my_model_ops-0.1-*.whl`; `model.py` calls `ttnn.generic_op(...)` to use it.
+4. **Run `package-thin`:**
+   ```bash
+   tt-model package-thin <org>/<model> \
+     --model-py ./model.py \
+     --requirements ./requirements.txt \      # your pins (or omit for the #29 TODO template)
+     --wheels-dir ./custom_ops \              # optional: your generic_op wheel(s)
+     --arch blackhole \
+     --arch-name QwenForCausalLM --main-class model:QwenForCausalLM \
+     --weights Qwen/Qwen3-4B \                # pointer, never embedded
+     --mesh P150 --max-num-seqs 32 --block-size 64 \
+     --out ./bundle                           # stage locally (omit + pass <org>/<model> to push)
+   ```
+5. **Result** — the bundle layout shown above (`model.py` + `requirements.txt` + `custom_ops/` +
+   `vllm_models/<name>/vllm_metadata.json` + manifest + `install.sh`/`run.sh`; no `wheels/`, no `metal/`).
+6. **Round-trip** — on any card + firmware + SFPI box: `tt-model pull <org>/<model>` builds the venv
+   from `requirements.txt` and fetches the weights; `tt-model serve <org>/<model>` launches it.
+
+**Required from you:** `model.py` + a `requirements.txt` of real pins + *(optional)* a `generic_op`
+wheel + the entrypoint (`--arch-name`/`--main-class`) + a weights repo id. Everything else is generated.
 
 ## Testing it in the lab (today)
 1. `tt-model package-thin ... --out /tmp/thin`
