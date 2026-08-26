@@ -1,0 +1,73 @@
+# A container (v5.1) package: the whole platform ships as an OCI image, so a consumer
+# needs only Docker and a TT card. This one file is the entire authoring interface —
+# `tt-model package --container examples/container-example.yaml`.
+
+# The format version of this file. It is the same number the published manifest carries
+# as "schema_version", so there is one version to reason about, not two.
+schema: "5.1"
+
+repo: you/my-model              # the HF repo `push` publishes to
+name: my-model
+weights: org/Weights-7B         # a POINTER: downloaded to the HOST HF cache, never baked
+kind: vllm                      # vllm (stock + standalone plugin) | vllm-legacy (fork)
+arch: blackhole                 # fixed by the build; every profile shares it
+
+image:
+  registry: hf                  # default: OCI blobs ride inside the HF repo under image/.
+                                # Set to e.g. ghcr.io/tenstorrent to publish the image to a
+                                # real registry instead — the repo then carries a pointer and
+                                # plain `docker pull` works for people without tt-model.
+
+source:
+  tt_metal: /path/to/your/tt-metal   # or {repo: ..., ref: ...} to clone in CI
+  code:                              # EXACTLY what ships. An allowlist, never a denylist.
+    - models/common
+    - models/autoports/my_model/tt
+    - models/autoports/my_model/vllm_ext
+  ubuntu: "22.04"
+  python: "3.12"
+
+runtime:
+  vllm: {version: "0.24.0"}
+  plugin: {repo: https://github.com/tenstorrent/vllm-tt-plugin, ref: main}
+  extension: models/autoports/my_model/vllm_ext
+
+serve:                          # defaults every profile inherits
+  port: 8000
+  block_size: 64                # required — the TT backend rejects vLLM's default
+
+  # Tool calling and reasoning. Declare the parser NAMES here and tt-model renders the
+  # flags correctly.
+  capabilities:
+    tool_parser: hermes         # e.g. hermes | llama3_json | mistral | qwen3_coder
+    reasoning_parser: deepseek_r1
+
+  # Anything else you would type after `vllm serve`. Prefer a named field above when one
+  # exists; these are passed through verbatim and cannot be validated.
+  args: [--trust-remote-code]
+
+# OPTIONAL. Omit this whole block for a single-configuration model — a flat `serve:` block
+# above is then the entire launch config (the v4/v5 idiom, where the repo name carries the
+# target, e.g. you/my-model-blackholex4). Declare profiles only when ONE image should serve
+# SEVERAL configs: different device targets, or different deployment shapes on the same
+# hardware — e.g. max_num_seqs 1 for one interactive user at full speed vs 32 for a fleet.
+serve_profiles:                 # ONE image serves ALL of these; pick at `serve` time
+  - name: p150x2
+    hardware: p150x2
+    mesh_device: P150x2         # the plugin's closed enum, validated at load
+    max_num_seqs: 8
+    max_model_len: 65536
+  - name: p150x4
+    hardware: p150x4
+    mesh_device: P150x4
+    max_num_seqs: 32
+    max_model_len: 131072
+default_profile: p150x4
+
+verify:                         # build-time assertions run INSIDE the finished image
+  - "import models.autoports.my_model.tt as m; assert m"
+
+card:
+  quickstart: |
+    ### Use with your client
+    Point it at `http://127.0.0.1:8000` once the server is up.

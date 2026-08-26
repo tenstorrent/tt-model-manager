@@ -17,6 +17,7 @@ dependencies = [
     "rich>=13",
     "pydantic>=2",
     "packaging>=21",
+    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]

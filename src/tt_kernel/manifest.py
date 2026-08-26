@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # Current authored schema. ``from_json`` also accepts prior versions so a bundle already
 # published to the Hub keeps installing unchanged (see SUPPORTED_SCHEMAS).
@@ -26,8 +26,14 @@ SCHEMA_VERSION = "5"
 # INSIDE the bundle, so a consumer needs only a TT card + firmware. v4 is the unified "model +
 # manifest" schema (structured target/mesh/ranges/resources — vLLM only, host-provisioned
 # platform); v3 is the legacy kernel-cache/dispatch schema, read-only supported. A bundle on any
-# other version is refused outright rather than silently half-read.
-SUPPORTED_SCHEMAS = frozenset({"3", "4", "5"})
+# other version is refused outright rather than silently half-read. v5.1 is the CONTAINER schema: the
+# platform ships as an OCI image instead of as wheels-in-a-venv (see ``container``), so the consumer
+# needs only Docker + a TT card. It is numbered as a POINT release of v5 because it is the same
+# promise — a package that needs no host tt-metal — delivered by a stronger mechanism; the next
+# whole number stays free for a genuinely new path. v5.1 is additive: it changes nothing about how
+# v3/v4/v5 are read, staged, installed, or served.
+CONTAINER_SCHEMA = "5.1"
+SUPPORTED_SCHEMAS = frozenset({"3", "4", "5", "5.1"})
 
 
 class FileEntry(BaseModel):
@@ -264,6 +270,162 @@ class Capabilities(BaseModel):
     reasoning_parser: Optional[str] = None
 
 
+class ContainerCapabilities(Capabilities):
+    """``Capabilities`` with typos made fatal, for the container path only.
+
+    The base model stays permissive because v3/v4/v5 bundles are already published and an
+    unknown key must not retroactively make one unreadable. A v5.1 manifest is authored by
+    hand in YAML, where a silently-ignored ``tool_praser:`` means the model ships without
+    tool calling and nobody finds out until a client's tool call comes back as prose — so
+    here the typo is refused at load.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ImageRef(BaseModel):
+    """Where the container image lives — the registry is pluggable.
+
+    ``registry="hf"`` (the default) means the image travels *inside the model repo* as an
+    exploded OCI layout under ``image/``: one identity, one auth, one visibility gate for
+    code + image + weights, and xet dedupes layers across models built on the same tt-metal
+    commit. tt-model-manager can fetch the artifact and run it with docker.
+
+    Any other value is an OCI registry namespace (e.g. ``ghcr.io/tenstorrent``), in which case
+    the repo carries only a pointer and the image is fetched with ``docker pull``. That variant
+    is what makes the image consumable by k8s/CI and by those not using tt-model-manager.
+    """
+
+    registry: str = "hf"  # "hf" => blobs under image/ in this repo; else an OCI namespace
+    repository: Optional[str] = None  # for a real registry: the name under it, e.g. "laguna"
+    tag: str  # the image tag, e.g. "tt-model/laguna:a1b2c3d4e"
+    digest: Optional[str] = None  # sha256:… of the image manifest, when known
+
+    @property
+    def is_hub_hosted(self) -> bool:
+        return self.registry == "hf"
+
+    @property
+    def pull_ref(self) -> Optional[str]:
+        """The ``docker pull`` reference, or None when the image rides in the repo."""
+        if self.is_hub_hosted:
+            return None
+        name = self.repository or self.tag.split("/")[-1].split(":")[0]
+        ref = f"{self.registry.rstrip('/')}/{name}"
+        return f"{ref}@{self.digest}" if self.digest else f"{ref}:{self.tag.split(':')[-1]}"
+
+
+class ServeSettings(BaseModel):
+    """Launch settings for a container package.
+
+    ``serve`` holds the defaults every profile inherits; each entry of ``serve_profiles``
+    deep-merges over them (dicts merge, everything else overrides wholesale).
+    """
+
+    hardware: Optional[str] = None  # device target label: p150, p150x2, p150x4 ...
+    mesh_device: Optional[str] = None  # verbatim plugin string: "P150x4", "(1, 4)" ...
+    port: Optional[int] = None
+    max_model_len: Optional[int] = None
+    max_num_seqs: Optional[int] = None  # REQUIRED after merge: the TT backend's default fails
+    block_size: Optional[int] = None  # REQUIRED after merge: the TT backend's default fails
+    server_timeout: Optional[int] = None
+
+    # Tool-calling / reasoning parsers. Same block, same field names, same rendering rules
+    # as the v4 path (see ``bundles._compose_launch_*``): ``tool_parser`` emits
+    # ``--enable-auto-tool-choice --tool-call-parser X`` because vLLM hard-errors on the
+    # latter without the former, and ``reasoning_parser`` keeps its underscore on purpose.
+    # Mergeable like everything else: declare it once under ``serve:``, override per profile.
+    capabilities: Optional[ContainerCapabilities] = None
+
+    # Escape hatch for launcher settings that have no first-class field. Prefer a named
+    # field when one exists — this dict is passed through opaquely and cannot be validated.
+    additional_config: Dict[str, object] = Field(default_factory=dict)
+    args: List[object] = Field(default_factory=list)  # str | [str, str] pairs
+    env: Dict[str, str] = Field(default_factory=dict)
+
+    def flat_args(self) -> List[str]:
+        """Flatten ``[--flag, [--opt, value]]`` into a single argv fragment."""
+        out: List[str] = []
+        for a in self.args:
+            if isinstance(a, list):
+                out.extend(str(x) for x in a)
+            else:
+                out.append(str(a))
+        return out
+
+
+class ServeProfile(ServeSettings):
+    """A named, launchable configuration.
+
+    ONE image serves ALL of a model's profiles — kernels are JIT-compiled against whatever
+    mesh is opened at launch, so a device target (p150x2 vs p150x4) and a deployment shape
+    (latency vs capacity) are both just launch arguments, not separate builds.
+    """
+
+    name: str
+    description: Optional[str] = None
+
+
+class ContainerSpec(BaseModel):
+    """The v5.1 block: the model's platform as an OCI image plus how to launch it.
+
+    Present <=> this is a container package. Absent for every v3/v4/v5 bundle, which is
+    what keeps those paths byte-for-byte unaffected.
+    """
+
+    image: ImageRef
+    kind: str = "vllm"  # launcher flavour: "vllm" (stock + plugin) | "vllm-legacy" (fork)
+    runtime: Dict[str, object] = Field(default_factory=dict)  # shape is kind-specific
+    serve: ServeSettings = Field(default_factory=ServeSettings)
+    serve_profiles: List[ServeProfile] = Field(default_factory=list)
+    default_profile: Optional[str] = None
+    code_dir: Optional[str] = None  # browsable copy of what is inside the image, e.g. "code"
+    verify: List[str] = Field(default_factory=list)  # build-time assertions run in the image
+    built: Dict[str, object] = Field(default_factory=dict)  # pinned provenance from `package`
+
+    def profile_names(self) -> List[str]:
+        return [p.name for p in self.serve_profiles]
+
+    def resolved_default(self) -> str:
+        if self.default_profile:
+            return self.default_profile
+        if not self.serve_profiles:
+            raise ValueError(
+                "this container package declares no serve profiles — it was published by "
+                "a tt-model that could not render them, or the manifest was hand-edited"
+            )
+        return self.serve_profiles[0].name
+
+    def resolve_profile(self, name: Optional[str] = None) -> ServeProfile:
+        """The fully merged profile: ``serve`` defaults with the named profile on top."""
+        wanted = name or self.resolved_default()
+        for p in self.serve_profiles:
+            if p.name == wanted:
+                merged = _deep_merge(
+                    self.serve.model_dump(exclude_none=True),
+                    p.model_dump(exclude_none=True),
+                )
+                return ServeProfile.model_validate(merged)
+        raise ValueError(
+            f"no serve profile named {wanted!r}; available: {', '.join(self.profile_names())}"
+        )
+
+
+def _deep_merge(base: Dict[str, object], over: Dict[str, object]) -> Dict[str, object]:
+    """Merge ``over`` onto ``base``: dicts recurse, everything else overrides wholesale.
+
+    Empty values in ``over`` do not erase a set default — a profile that omits ``args``
+    inherits the ``serve:`` args rather than blanking them.
+    """
+    out = dict(base)
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        elif v is not None and v != [] and v != {}:
+            out[k] = v
+    return out
+
+
 class Manifest(BaseModel):
     """Root document of a bundle (``tt_kernel_manifest.json``)."""
 
@@ -310,6 +472,11 @@ class Manifest(BaseModel):
     # self-contained and needs only a TT card + firmware.
     bundled: Optional[BundledPlatform] = None
 
+    # --- v5.1 container block (optional; absent => v3/v4/v5, untouched) --------------------------
+    # The platform as an OCI image rather than wheels-in-a-venv. When present, pull loads the
+    # image into docker and serve runs it: the host needs Docker + a TT card and nothing else.
+    container: Optional[ContainerSpec] = None
+
     @property
     def is_v4(self) -> bool:
         """True for a unified vLLM manifest (has an entrypoint / platform block)."""
@@ -319,6 +486,11 @@ class Manifest(BaseModel):
     def is_self_contained(self) -> bool:
         """True for a v5 bundle that ships its own platform wheels (needs no host tt-metal/vLLM)."""
         return self.bundled is not None and bool(self.bundled.wheels)
+
+    @property
+    def is_container(self) -> bool:
+        """True for a v5.1 container package (the platform ships as an OCI image)."""
+        return self.container is not None
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)
@@ -450,6 +622,24 @@ def compare(manifest: Manifest, local: "LocalEnv") -> CompatibilityReport:  # no
             Incompatibility(field="arch", expected=manifest.arch, detected=local.arch, fatal=True)
         )
 
+    # A CONTAINER (v5.1) package ships the entire platform — OS, tt-metal, vLLM, plugin — inside an
+    # OCI image, so nothing about the host's python, glibc, tt-metal or vLLM can matter: the image
+    # is the wall. Only the two facts the image cannot carry are checked: the ISA its binaries were
+    # built for (arch, fatal above) and whether the box has enough chips for the profile the user
+    # picked (device_count, forceable). Wheel interpreter/platform tags are not checked at all —
+    # there is no host interpreter in the picture.
+    if manifest.is_container:
+        if local.device_count and manifest.device_count > local.device_count:
+            issues.append(
+                Incompatibility(
+                    field="device_count",
+                    expected=str(manifest.device_count),
+                    detected=str(local.device_count),
+                    fatal=False,
+                )
+            )
+        return CompatibilityReport(compatible=not issues, issues=issues)
+
     # A self-contained (v5) bundle ships its own ttnn/vLLM engine wheels and installs them into its
     # OWN venv, so NONE of the host's tt-metal facts are relevant: not the tt_metal_version (the
     # engine that runs is the bundle's, not the host's — the host need not have tt-metal at all),
@@ -544,7 +734,7 @@ def runner_version_advisory(manifest: Manifest, local: "LocalEnv") -> Optional[I
         return None
     # A self-contained bundle ships its own engine; the host tt-metal version is irrelevant to it
     # (and the host may not have tt-metal installed at all), so never advise on it.
-    if manifest.is_self_contained:
+    if manifest.is_self_contained or manifest.is_container:
         return None
     if local.tt_metal_version and manifest.tt_metal_version != local.tt_metal_version:
         return Incompatibility(
