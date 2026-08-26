@@ -1470,6 +1470,120 @@ def package(
     typer.secho(f"  Anyone: tt-model pull {repo_id} && tt-model serve {repo_id}", fg=typer.colors.CYAN)
 
 
+# ------------------------------------------------------------------- package-thin (v6)
+@app.command(name="package-thin", rich_help_panel="Publish models")
+def package_thin(
+    repo_id: Optional[str] = typer.Argument(None, help="HF target namespace/name (omit + --out to stage only)."),
+    model_py: str = typer.Option(..., "--model-py", help="Path to the model.py / run.py runner."),
+    requirements: Optional[str] = typer.Option(
+        None, "--requirements", help="requirements.txt of pip pins (ttnn/TTTv2/models wheel). "
+        "Omitted => a #29 template with TODO pins for the not-yet-published wheels."),
+    wheels_dir: Optional[str] = typer.Option(
+        None, "--wheels-dir", help="Dir of bundled wheels (e.g. your generic_op custom-op wheel) "
+        "-> shipped in custom_ops/ and added to the install via --find-links."),
+    arch: Optional[str] = typer.Option(None, "--arch", help="TT arch (blackhole|wormhole_b0); detected if omitted."),
+    arch_name: Optional[str] = typer.Option(None, "--arch-name", help="HF architecture -> vllm_metadata."),
+    main_class: Optional[str] = typer.Option(None, "--main-class", help='"module:Class" the plugin loads.'),
+    metadata: Optional[str] = typer.Option(None, "--metadata", help="Authored vllm_metadata.json instead of --arch-name/--main-class."),
+    weights: Optional[str] = typer.Option(None, "--weights", help="HF weights repo id (pointer, never embedded)."),
+    weights_revision: Optional[str] = typer.Option(None, "--weights-revision"),
+    mesh_topology: Optional[str] = typer.Option(None, "--mesh", help='Device topology, e.g. "P150" / "1x4".'),
+    device_count: int = typer.Option(1, "--device-count"),
+    python_version: str = typer.Option("3.12", "--python", help="Pinned interpreter (uv provisions)."),
+    max_num_seqs: Optional[int] = typer.Option(None, "--max-num-seqs"),
+    block_size: Optional[int] = typer.Option(None, "--block-size"),
+    max_model_len: Optional[int] = typer.Option(None, "--max-model-len"),
+    env: Optional[List[str]] = typer.Option(None, "--env", help="KEY=VALUE serving env (repeatable)."),
+    name: Optional[str] = typer.Option(None, "--name"),
+    out: Optional[str] = typer.Option(None, "--out", help="Stage the bundle here (kept even without a push target)."),
+    private: bool = typer.Option(True, "--private/--public", help="Repo visibility when pushing."),
+    publish: bool = typer.Option(False, "--publish", help="List in the community catalog (requires --public)."),
+) -> None:
+    """Package a v6 THIN bundle (issue #29): ship ``model.py`` + pip dependency pins
+    (ttnn / TTTv2 / models wheel) + optional ``generic_op`` wheels. The per-model venv is built from
+    those pins at install — NOT from an embedded ttnn wheel or a metal tree. Weights stay a pointer;
+    SFPI is an external box dep.
+
+    DRAFT (reflects the plan): fully installable once TTTv2 + the models wheel publish so the pins are
+    real; until then the generated requirements.txt carries TODO pins for those two (ttnn already
+    resolves from PyPI).
+    """
+    if publish and private:
+        raise _err("--publish requires --public (a catalog listing is public by definition).")
+    if repo_id is None and not out:
+        raise _err("Nothing to do: pass a repo_id to push, or --out to stage locally.")
+    model_path = Path(model_py).expanduser()
+    if not model_path.is_file():
+        raise _err(f"--model-py {model_py!r} is not a file.")
+    if metadata:
+        vmeta = json.loads(Path(metadata).expanduser().read_text())
+        if not vmeta.get("arch") or not vmeta.get("main_class"):
+            raise _err(f"{metadata} must set both 'arch' and 'main_class'.")
+    elif arch_name and main_class:
+        vmeta = {"arch": arch_name, "main_class": main_class}
+    else:
+        raise _err("Provide the serving entrypoint: --metadata, or both --arch-name and --main-class.")
+    resolved_arch = arch or metal.detect_device(arch_override=arch).arch
+    if not resolved_arch:
+        raise _err("Could not detect arch. Pass --arch (blackhole | wormhole_b0 | ...).")
+    weights_block = WeightsRef(repo_id=weights, revision=weights_revision) if weights else None
+    env_map: dict = {}
+    for kv in env or []:
+        if "=" not in kv:
+            raise _err(f"--env expects KEY=VALUE, got {kv!r}.")
+        k, v = kv.split("=", 1)
+        env_map[k] = v
+    mesh = Mesh(devices=device_count, topology=mesh_topology) if mesh_topology else None
+    resources = Resources(
+        max_num_seqs=max_num_seqs, block_size=block_size, max_model_len=max_model_len
+    ) if (max_num_seqs or block_size or max_model_len) else None
+    bundle_name = name or (repo_id.split("/")[-1] if repo_id else model_path.stem)
+
+    if out:
+        staged = Path(out).expanduser()
+        if staged.exists():
+            shutil.rmtree(staged)
+    else:
+        staged = Path(tempfile.mkdtemp(prefix="tt-model-thin-")) / "bundle"
+    manifest = packaging.stage_thin_package(
+        staged, name=bundle_name, arch=resolved_arch, model_py=model_path,
+        vllm_metadata=vmeta, tt_kernel_version=__version__,
+        requirements=Path(requirements).expanduser() if requirements else None,
+        wheels_dir=Path(wheels_dir).expanduser() if wheels_dir else None,
+        weights=weights_block, device_count=device_count, mesh=mesh, env=env_map,
+        resources=resources, python_version=python_version,
+        tt_metal_version=metal.resolve_version() or "unknown",
+    )
+    typer.secho(f"✓ Staged v6 thin bundle {manifest.name} at {staged}", fg=typer.colors.GREEN)
+    typer.echo(f"  runner: {model_path.name}   deps: {manifest.deps.requirements}"
+               + (f" + {manifest.deps.wheels_dir}/" if manifest.deps.wheels_dir else ""))
+    typer.echo(f"  arch registration: {manifest.entrypoint.arch_name}  ->  {manifest.entrypoint.cls}")
+    if manifest.weights:
+        typer.echo(f"  weights (pointer): {manifest.weights.repo_id}")
+    if requirements is None:
+        typer.secho("  ! requirements.txt has TODO pins for TTTv2 + the models wheel (issue #29 M0) — "
+                    "edit them once those wheels publish.", fg=typer.colors.YELLOW)
+    if repo_id is None:
+        typer.secho("  (no push target — staged only)", fg=typer.colors.CYAN)
+        return
+
+    tags = [TT_MODEL_TAG, manifest.arch, "vllm", "thin"]
+    if mesh_topology:
+        tags.append(mesh_topology.lower())
+    if publish:
+        tags.append(TT_MODEL_CATALOG_TAG)
+    typer.echo(f"Creating repo {repo_id} (private={private})")
+    hub.create_repo(repo_id, private=private)
+    hub.set_visibility(repo_id, private=private)
+    hub.push_folder(repo_id, staged, commit_message=f"tt-model package-thin {manifest.name} (v6 thin)")
+    try:
+        hub.tag_repo(repo_id, tags)
+    except Exception as exc:  # tagging is best-effort
+        typer.secho(f"  (could not write tags: {exc})", fg=typer.colors.YELLOW)
+    typer.secho(f"✓ Pushed v6 thin bundle {repo_id}", fg=typer.colors.GREEN)
+    typer.secho(f"  Anyone: tt-model pull {repo_id} && tt-model serve {repo_id}", fg=typer.colors.CYAN)
+
+
 # ---------------------------------------------------------------------------- pull
 @app.command(rich_help_panel="Get models")
 def pull(
@@ -1528,9 +1642,9 @@ def pull(
             raise _err(f"{repo_id} is not a tt-model bundle (no {MANIFEST_NAME}).")
         manifest = Manifest.from_json(manifest_path.read_text())
 
-        # v5 self-contained ("fat") bundle: ships its own ttnn/vLLM/plugin wheels. Install the
-        # platform into the bundle's own venv — no host tt-metal/vLLM needed — then return.
-        if manifest.is_self_contained:
+        # A bundle that builds its own venv — v5 fat (embedded wheels) or v6 thin (pip pins) —
+        # installs into that venv; no host tt-metal/vLLM needed. Then return.
+        if manifest.has_own_venv:
             _install_self_contained(
                 repo_id, snapshot, manifest, force=force, arch=arch,
                 models_dir=models_dir, with_weights=with_weights and not no_weights,
@@ -1803,11 +1917,10 @@ def _install_self_contained(
     repo_id, snapshot, manifest, *, force, arch, models_dir, with_weights,
     revision=None, resolved_revision=None,
 ) -> None:
-    """Install a v5 self-contained bundle: materialize it, build its own venv, (optionally) weights.
-
-    The consumer needs only a TT card + firmware — the shipped wheels ARE the platform. We copy the
-    pulled folder to a persistent install dir, run its ``install.sh`` (venv + wheels + deps), and
-    record it so ``serve`` runs from that venv. No host tt-metal/vLLM is required or touched.
+    """Install a bundle that builds its OWN venv — v5 fat (embedded wheels) or v6 thin (pip pins):
+    materialize it, run its ``install.sh`` to build the venv, (optionally) weights, and record it so
+    ``serve`` runs from that venv. Consumer needs only a TT card + firmware (+ SFPI for v6). No host
+    tt-metal/vLLM is required or touched.
 
     ``resolved_revision`` is the concrete commit sha the caller resolved BEFORE the download and
     then fetched — recorded verbatim so the pin matches exactly what is on disk (querying it here,
@@ -1822,14 +1935,16 @@ def _install_self_contained(
     if report.issues and not force:
         raise _err("Refusing to install: re-run with --force to override the warnings above.")
 
-    # The shipped wheels are the author's build (cp312/linux_x86_64), not universal.
-    bad = packaging.host_incompatible_wheels(manifest.bundled)
-    if bad:
-        for b in bad:
-            typer.secho(f"  ! {b}", fg=typer.colors.YELLOW)
-        if not force:
-            raise _err("Shipped wheel(s) not built for this interpreter/platform; "
-                       "--force to attempt anyway (likely to fail at pip install).")
+    # v5 fat: the shipped wheels are the author's build (cp312/linux_x86_64), not universal — verify
+    # their tags. v6 thin ships no platform wheels (its deps resolve via pip at install), so skip.
+    if manifest.bundled is not None:
+        bad = packaging.host_incompatible_wheels(manifest.bundled)
+        if bad:
+            for b in bad:
+                typer.secho(f"  ! {b}", fg=typer.colors.YELLOW)
+            if not force:
+                raise _err("Shipped wheel(s) not built for this interpreter/platform; "
+                           "--force to attempt anyway (likely to fail at pip install).")
 
     dest = runtime.resolve_models_dir(models_dir, repo_id)
     prev = localdb.get(repo_id) or {}
@@ -1863,10 +1978,10 @@ def _install_self_contained(
         typer.echo(f"Downloading weights {manifest.weights.repo_id} ...")
         weights_path = runtime.download_weights(manifest.weights, dest / "weights")
 
-    run_script = dest / (manifest.bundled.run_script or "run.sh")
+    run_script = dest / ((manifest.bundled.run_script if manifest.bundled else None) or "run.sh")
     localdb.record(repo_id, {
         "repo_id": repo_id,
-        "self_contained": True,
+        "self_contained": True,  # "has its own venv" — true for v5 fat and v6 thin; serve runs run.sh
         "install_dir": str(dest),
         "bundle_path": str(dest),  # holds vllm_metadata.json (== EXTRA_MODELS_DIR entry)
         "python": str(venv_python),
@@ -2615,7 +2730,7 @@ def serve(
             remote = hub.fetch_manifest(repo_id, revision)
         except Exception:  # noqa: BLE001 — fall back to the normal path if we can't peek
             remote = None
-        if remote is not None and remote.is_self_contained:
+        if remote is not None and remote.has_own_venv:
             resolved = hub.latest_revision(repo_id, revision, timeout=None)  # resolve before fetch
             with tempfile.TemporaryDirectory() as td:
                 snapshot = _hub(lambda: hub.download_bundle(repo_id, resolved or revision, dest=td),

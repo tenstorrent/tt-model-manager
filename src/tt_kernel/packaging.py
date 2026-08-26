@@ -30,6 +30,7 @@ from typing import Dict, List, Optional
 from . import bundles
 from .manifest import (
     BundledPlatform,
+    Deps,
     Entrypoint,
     Manifest,
     Mesh,
@@ -190,25 +191,38 @@ def render_install_sh(manifest: Manifest) -> str:
 
     Idempotent and path-relative; takes an optional venv path as ``$1`` (default ``./venv``).
     """
-    b = manifest.bundled
-    pyver = (b.python if b and b.python else "3.12")
-    plat_wheels = " ".join(f'"$HERE/{w.path}"' for w in (b.wheels if b else []))
-    vendored = bool(b and b.deps_vendored)
     # --link-mode=copy: copy wheel contents INTO the venv instead of hardlinking them from uv's
     # global cache — the installed folder must not depend on anything outside its own wall.
-    if vendored:
+    if manifest.deps is not None:
+        # v6 "thin": build the venv from pip dependency pins (ttnn / TTTv2 / models wheel, listed in
+        # requirements) + any bundled wheels (e.g. the model's generic_op wheel) via --find-links.
+        # No embedded platform wheels, no metal tree. (SFPI is an external box dep, not installed here.)
+        d = manifest.deps
+        pyver = d.python or "3.12"
+        find_links = f'--find-links "$HERE/{d.wheels_dir}" ' if d.wheels_dir else ""
         install = (
-            f'uv pip install --python "$VENV/bin/python" --link-mode=copy --no-index '
-            f'--find-links "$HERE/{WHEELS_DIR}" {plat_wheels} -r "$HERE/{REQUIREMENTS}"'
+            f'uv pip install --python "$VENV/bin/python" --link-mode=copy '
+            f'--extra-index-url {_PYTORCH_CPU_INDEX} {find_links}-r "$HERE/{d.requirements}"'
         )
-        deps_note = "offline, from the vendored wheels (reproducible, no network)"
+        deps_note = "v6 thin: pip pins (ttnn/TTTv2/models wheel) + any bundled generic_op wheels"
     else:
-        install = (
-            f'uv pip install --python "$VENV/bin/python" --link-mode=copy {plat_wheels} && \\\n'
-            f'  uv pip install --python "$VENV/bin/python" --link-mode=copy '
-            f'--extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{REQUIREMENTS}"'
-        )
-        deps_note = "from the CPU index (deps not vendored — pass --vendor-deps for offline)"
+        b = manifest.bundled
+        pyver = (b.python if b and b.python else "3.12")
+        plat_wheels = " ".join(f'"$HERE/{w.path}"' for w in (b.wheels if b else []))
+        vendored = bool(b and b.deps_vendored)
+        if vendored:
+            install = (
+                f'uv pip install --python "$VENV/bin/python" --link-mode=copy --no-index '
+                f'--find-links "$HERE/{WHEELS_DIR}" {plat_wheels} -r "$HERE/{REQUIREMENTS}"'
+            )
+            deps_note = "offline, from the vendored wheels (reproducible, no network)"
+        else:
+            install = (
+                f'uv pip install --python "$VENV/bin/python" --link-mode=copy {plat_wheels} && \\\n'
+                f'  uv pip install --python "$VENV/bin/python" --link-mode=copy '
+                f'--extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{REQUIREMENTS}"'
+            )
+            deps_note = "from the CPU index (deps not vendored — pass --vendor-deps for offline)"
     return f"""#!/usr/bin/env bash
 # Install this self-contained TT model package into an isolated, reproducible venv (via uv).
 # Usage: ./{INSTALL_SCRIPT} [venv-path]   (default: ./venv)
@@ -279,6 +293,14 @@ def render_run_sh(manifest: Manifest) -> str:
             serving += f" --reasoning_parser {cap.reasoning_parser}"
     if res and res.extra_args:
         serving += " " + " ".join(str(a) for a in res.extra_args)
+    # PYTHONPATH: a v5 fat bundle embeds the modified metal tree at metal/; a v6 thin bundle gets
+    # tt_transformers/TTTv2 from the installed wheels and only needs its own model.py on the path
+    # (bundle root, or deps.model_dir). This is the one serve-time difference between the regimes.
+    if manifest.deps is not None:
+        md = (manifest.deps.model_dir or ".").strip("/")
+        pythonpath_entry = "$HERE" if md in ("", ".") else f"$HERE/{md}"
+    else:
+        pythonpath_entry = f"$HERE/{METAL_DIR}"
     return f"""#!/usr/bin/env bash
 # Serve this model on TT hardware. Assumes ./{INSTALL_SCRIPT} has been run.
 set -euo pipefail
@@ -304,7 +326,7 @@ export TT_VLLM_BUILTIN_MODELS=0
 # Do NOT set VLLM_PLUGINS: it is an ALLOW-LIST — setting it suppresses the vllm.general_plugins
 # group, so the model's tool/reasoning-parser overrides would silently not load. The TT platform
 # + model registry load via entry points without it.
-export PYTHONPATH="$HERE/{METAL_DIR}:${{PYTHONPATH:-}}"   # resolves the adapter's models.* imports
+export PYTHONPATH="{pythonpath_entry}:${{PYTHONPATH:-}}"   # resolves the adapter/model imports
 export MESH_DEVICE="${{MESH_DEVICE:-{mesh_device}}}"
 export TT_METAL_VISIBLE_DEVICES="${{TT_METAL_VISIBLE_DEVICES:-0}}"
 # HERMETIC RUNTIME: keep every cache/home INSIDE the folder wall, so serving writes and reads
@@ -448,9 +470,119 @@ def stage_package(
     return manifest
 
 
+CUSTOM_OPS_DIR = "custom_ops"
+
+# Placeholder requirements for a v6 thin bundle when the author doesn't supply one. Reflects the
+# issue #29 plan exactly; the not-yet-published deps are commented TODOs the lab uncomments/pins
+# once TTTv2 and the models wheel land (M0).
+_THIN_REQUIREMENTS_TEMPLATE = """\
+# v6 thin bundle — per-model venv dependency pins (see issue #29).
+# SFPI + firmware are EXTERNAL box deps (installer-managed) and are NOT listed here.
+ttnn>=0.77                 # engine (team-provided / PyPI); bundles the tt-metal runtime
+# tt-transformers==<X>     # TTTv2 framework wheel — TODO: pin once published upstream (#29 M0)
+# tt-metal-models==<Y>     # the tiny "models wheel" — TODO: pin once published upstream (#29 M0)
+# <your-model>-ops==<Z>    # optional: your generic_op custom-op wheel (ship it in custom_ops/)
+"""
+
+
+def stage_thin_package(
+    staged: Path,
+    *,
+    name: str,
+    arch: str,
+    model_py: Path,
+    vllm_metadata: dict,
+    tt_kernel_version: str,
+    requirements: Optional[Path] = None,
+    wheels_dir: Optional[Path] = None,
+    weights: Optional[WeightsRef] = None,
+    device_count: int = 1,
+    mesh: Optional[Mesh] = None,
+    env: Optional[Dict[str, str]] = None,
+    resources: Optional[Resources] = None,
+    python_version: str = "3.12",
+    tt_metal_version: str = "unknown",
+) -> Manifest:
+    """Materialize a v6 "thin" bundle (issue #29) and return its manifest.
+
+    Ships: ``model.py`` (the runner), a ``requirements.txt`` of pip pins (ttnn / TTTv2 / models
+    wheel), an optional ``custom_ops/`` dir of bundled generic_op wheels, the ``vllm_metadata.json``
+    (EXTRA_MODELS_DIR contract), and generated ``install.sh``/``run.sh``. NO embedded ttnn wheel,
+    NO metal tree — the venv is built from the pins at install. Weights stay a pointer.
+
+    NOTE (draft): this reflects the #29 plan; it becomes fully functional once TTTv2 and the models
+    wheel are published so the requirements can pin real versions.
+    """
+    staged.mkdir(parents=True, exist_ok=True)
+
+    # The runner, copied to the bundle root under its own name so `--main-class <module>:<Class>`
+    # resolves it via PYTHONPATH=$HERE at serve time.
+    model_dest = staged / Path(model_py).name
+    shutil.copy2(model_py, model_dest)
+
+    # requirements.txt: the author's pins, or the #29 template with TODO lines for the lab to fill.
+    if requirements is not None:
+        shutil.copy2(requirements, staged / REQUIREMENTS)
+    else:
+        (staged / REQUIREMENTS).write_text(_THIN_REQUIREMENTS_TEMPLATE)
+
+    # Optional bundled wheels (e.g. the model's generic_op custom-op wheel) -> custom_ops/.
+    deps_wheels_dir: Optional[str] = None
+    if wheels_dir is not None:
+        dest_wheels = staged / CUSTOM_OPS_DIR
+        shutil.copytree(wheels_dir, dest_wheels, ignore=shutil.ignore_patterns("__pycache__"))
+        deps_wheels_dir = CUSTOM_OPS_DIR
+
+    # vllm_metadata.json in the per-model subfolder under vllm_models/ (EXTRA_MODELS_DIR contract).
+    safe_key = name.replace("/", "__")
+    model_bundle = staged / METADATA_DIR / safe_key
+    model_bundle.mkdir(parents=True, exist_ok=True)
+    (model_bundle / bundles.VLLM_METADATA_NAME).write_text(json.dumps(vllm_metadata, indent=2))
+
+    deps = Deps(
+        python=python_version,
+        requirements=REQUIREMENTS,
+        wheels_dir=deps_wheels_dir,
+        model_dir=".",
+    )
+    entrypoint = Entrypoint(
+        **{"class": vllm_metadata["main_class"], "arch_name": vllm_metadata["arch"]}
+    )
+    manifest = Manifest(
+        schema_version="6",
+        name=name,
+        tt_metal_version=tt_metal_version,
+        arch=arch,
+        device_count=device_count,
+        build_key=None,
+        kernel_count=0,
+        fast_path_kernels=None,
+        producer=Producer(
+            tt_kernel_version=tt_kernel_version,
+            created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            hostname=socket.gethostname(),
+        ),
+        weights=weights,
+        entrypoint=entrypoint,
+        mesh=mesh,
+        env=env or {},
+        resources=resources,
+        deps=deps,
+    )
+
+    (staged / INSTALL_SCRIPT).write_text(render_install_sh(manifest))
+    (staged / RUN_SCRIPT).write_text(render_run_sh(manifest))
+    for s in (INSTALL_SCRIPT, RUN_SCRIPT):
+        (staged / s).chmod(0o700)
+
+    (staged / "tt_kernel_manifest.json").write_text(manifest.to_json())
+    return manifest
+
+
 __all__ = [
     "WHEELS_DIR",
     "METAL_DIR",
+    "CUSTOM_OPS_DIR",
     "sha256_file",
     "parse_wheel_tags",
     "make_wheel_artifact",
@@ -459,4 +591,5 @@ __all__ = [
     "render_install_sh",
     "render_run_sh",
     "stage_package",
+    "stage_thin_package",
 ]
