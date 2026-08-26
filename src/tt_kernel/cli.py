@@ -1483,6 +1483,16 @@ def package_thin(
         "ship a custom vLLM fork); shipped in wheels/ and installed by path."),
     ops_wheel: Optional[List[str]] = typer.Option(
         None, "--ops-wheel", help="A generic_op custom-op wheel to ship in wheels/ (repeatable)."),
+    vllm_wheel: Optional[str] = typer.Option(
+        None, "--vllm-wheel", help="Optional PREBUILT empty-target vLLM wheel (stock vLLM built with "
+        "VLLM_TARGET_DEVICE=empty — NOT the CUDA vllm, NOT a fork). Ships in wheels/ for a hermetic "
+        "install; omit and install.sh builds vLLM from source per the plugin's install-vllm-tt.sh."),
+    vllm_version: str = typer.Option(
+        packaging.VLLM_VERSION, "--vllm-version", help="Upstream vLLM tag the plugin builds against "
+        "(empty target)."),
+    with_vllm: bool = typer.Option(
+        True, "--vllm/--no-vllm", help="Install vLLM (empty target) for the vllm-tt-plugin. "
+        "--no-vllm packages a non-vLLM model (no vLLM step)."),
     arch: Optional[str] = typer.Option(None, "--arch", help="TT arch (blackhole|wormhole_b0); detected if omitted."),
     arch_name: Optional[str] = typer.Option(None, "--arch-name", help="HF architecture -> vllm_metadata."),
     main_class: Optional[str] = typer.Option(None, "--main-class", help='"module:Class" the plugin loads.'),
@@ -1553,6 +1563,8 @@ def package_thin(
         requirements=Path(requirements).expanduser() if requirements else None,
         plugin_wheel=Path(plugin_wheel).expanduser() if plugin_wheel else None,
         extra_wheels=[Path(w).expanduser() for w in (ops_wheel or [])],
+        vllm_wheel=Path(vllm_wheel).expanduser() if vllm_wheel else None,
+        vllm_version=vllm_version, with_vllm=with_vllm,
         weights=weights_block, device_count=device_count, mesh=mesh, env=env_map,
         resources=resources, python_version=python_version,
         tt_metal_version=metal.resolve_version() or "unknown",
@@ -1560,7 +1572,14 @@ def package_thin(
     typer.secho(f"✓ Staged v6 thin bundle {manifest.name} at {staged}", fg=typer.colors.GREEN)
     typer.echo(f"  runner: {model_path.name}   deps: {manifest.deps.requirements}"
                + (f" + {len(manifest.deps.wheels)} bundled wheel(s)" if manifest.deps.wheels else ""))
-    if not plugin_wheel:
+    if with_vllm:
+        vspec = manifest.deps.vllm
+        if vspec and vspec.wheel:
+            typer.echo(f"  vLLM: prebuilt empty-target wheel {Path(vspec.wheel).name} (installed by path)")
+        else:
+            typer.echo(f"  vLLM: stock v{vspec.version if vspec else vllm_version} built empty-target at "
+                       "install (--vllm-wheel ships a prebuilt one for a hermetic install)")
+    if with_vllm and not plugin_wheel:
         typer.secho("  ! no --plugin-wheel given: the vllm serve path needs vllm-tt-plugin in the "
                     "bundle (the vLLM integration; we no longer ship a custom vLLM fork).",
                     fg=typer.colors.YELLOW)

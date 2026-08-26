@@ -36,6 +36,7 @@ from .manifest import (
     Mesh,
     Producer,
     Resources,
+    Vllm,
     WeightsRef,
     WheelArtifact,
 )
@@ -46,6 +47,11 @@ METAL_DIR = "metal"
 INSTALL_SCRIPT = "install.sh"
 RUN_SCRIPT = "run.sh"
 REQUIREMENTS = "requirements.txt"
+# Override file for the empty-target vLLM install (pins that keep ttnn's numpy<2 from being bumped).
+VLLM_OVERRIDES = "vllm-overrides.txt"
+# Default upstream vLLM tag the vllm-tt-plugin builds against (empty target). Keep in step with the
+# plugin's docs/install-vllm-tt.sh (tenstorrent/vllm-tt-plugin).
+VLLM_VERSION = "0.25.1"
 # Per-model vLLM bundle folders live under here; this dir (not the bundle root) is EXTRA_MODELS_DIR
 # so the plugin's child-scan finds exactly the model metadata and not metal/, wheels/, venv/.
 METADATA_DIR = "vllm_models"
@@ -194,22 +200,58 @@ def render_install_sh(manifest: Manifest) -> str:
     # --link-mode=copy: copy wheel contents INTO the venv instead of hardlinking them from uv's
     # global cache — the installed folder must not depend on anything outside its own wall.
     if manifest.deps is not None:
-        # v6 "thin": build the venv from pip dependency pins (ttnn / TTTv2 / models wheel, listed in
-        # requirements) + any bundled wheels (e.g. the model's generic_op wheel) via --find-links.
-        # No embedded platform wheels, no metal tree. (SFPI is an external box dep, not installed here.)
+        # v6 "thin": build the venv from pip dependency pins (ttnn / tt-metal-models, listed in
+        # requirements) + a separate empty-target vLLM build + bundled wheels (the vllm-tt-plugin and
+        # the model's generic_op wheel) installed by path. No embedded platform wheels, no metal tree.
+        # (SFPI is an external box dep, not installed here.) The order is load-bearing — see below.
         d = manifest.deps
         pyver = d.python or "3.12"
-        # Bundled wheels installed BY PATH (the TT vLLM fork + plugin + any generic_op wheel — not on
-        # a pinnable index); requirements.txt pulls the index deps (ttnn / tt-metal-models). One
-        # `uv pip install` resolves both together.
-        bundled = " ".join(f'"$HERE/{w}"' for w in d.wheels)
-        find_links = f'--find-links "$HERE/{d.wheels_dir}" ' if d.wheels_dir else ""
-        install = (
-            f'uv pip install --python "$VENV/bin/python" --link-mode=copy '
-            f'--extra-index-url {_PYTORCH_CPU_INDEX} {find_links}{(bundled + " ") if bundled else ""}'
-            f'-r "$HERE/{d.requirements}"'
+        pip = 'uv pip install --python "$VENV/bin/python" --link-mode=copy'
+        steps: List[str] = []
+        # (1) Engine + models FIRST: ttnn (bundles the tt-metal runtime) and, once published,
+        # tt-metal-models. This establishes torch + numpy<2 in the venv before vLLM's deps resolve.
+        steps.append(
+            f'{pip} --extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{d.requirements}"'
         )
-        deps_note = "v6 thin: index pins (ttnn/tt-metal-models) + bundled wheels (vLLM fork + plugin + ops)"
+        # (2) vLLM core for the plugin: STOCK upstream vLLM built with VLLM_TARGET_DEVICE=empty (NOT
+        # the CUDA `vllm` on PyPI). Mirrors tenstorrent/vllm-tt-plugin docs/install-vllm-tt.sh: install
+        # vLLM's common deps under the TT override set (so ttnn's numpy<2 is not bumped by opencv),
+        # then vLLM itself with --no-deps. VLLM_TARGET_DEVICE is build-time only.
+        if d.vllm is not None:
+            v = d.vllm
+            override = f'--override "$HERE/{v.overrides}" ' if v.overrides else ""
+            if v.common_requirements:
+                common_src = f'"$HERE/{v.common_requirements}"'
+                fetch = ""
+                cleanup = ""
+            else:
+                common_src = '"$VLLM_COMMON"'
+                fetch = (
+                    'VLLM_COMMON="$(mktemp)"\n'
+                    f'curl -fsSL "https://raw.githubusercontent.com/vllm-project/vllm/'
+                    f'v{v.version}/requirements/common.txt" -o "$VLLM_COMMON"\n'
+                )
+                cleanup = '\nrm -f "$VLLM_COMMON"'
+            common_install = f'{fetch}{pip} {override}-r {common_src}{cleanup}'
+            if v.wheel:
+                # Prebuilt empty-target wheel (stock vLLM built empty, NOT the fork): install by path.
+                core = f'{pip} --no-deps "$HERE/{v.wheel}"'
+            else:
+                # Build stock upstream vLLM from source with the empty target.
+                core = (
+                    f'VLLM_TARGET_DEVICE={v.target_device} {pip} '
+                    f'--no-deps --no-binary vllm vllm=={v.version}'
+                )
+            steps.append(common_install)
+            steps.append(core)
+        # (3) The vllm-tt-plugin + any generic_op wheels, installed BY PATH, AFTER vLLM. The plugin's
+        # pyproject omits vllm on purpose, so this never re-resolves the empty-target build.
+        if d.wheels:
+            bundled = " ".join(f'"$HERE/{w}"' for w in d.wheels)
+            find_links = f'--find-links "$HERE/{d.wheels_dir}" ' if d.wheels_dir else ""
+            steps.append(f'{pip} {find_links}{bundled}')
+        install = "\n".join(steps)
+        deps_note = "v6 thin: ttnn/tt-metal-models (index) + empty-target vLLM + plugin/ops wheels (by path)"
     else:
         b = manifest.bundled
         pyver = (b.python if b and b.python else "3.12")
@@ -492,11 +534,25 @@ _THIN_REQUIREMENTS_TEMPLATE = """\
 ttnn>=0.77                 # engine (PyPI today; bundles the tt-metal runtime). Until tt-metal-models
                            # lands you pin ttnn directly; after, tt-metal-models pulls the exact ttnn.
 #
-# vLLM: the direction is stock vLLM + the vllm-tt-plugin (we no longer ship a custom vLLM fork).
-# The vLLM *integration* is the `vllm-tt-plugin` — ship it as a bundled wheel (--plugin-wheel);
-# vLLM core comes via the plugin (see tenstorrent/vllm-tt-plugin). Don't hand-pin CUDA `vllm`.
+# vLLM is NOT pinned here. It is stock upstream vLLM built with VLLM_TARGET_DEVICE=empty and is
+# installed by install.sh in its own ordered step (mirroring tenstorrent/vllm-tt-plugin's
+# docs/install-vllm-tt.sh) — NOT the CUDA `vllm` on PyPI. The `vllm-tt-plugin` (the integration)
+# ships as a bundled wheel (--plugin-wheel). Don't add `vllm` to this file: a resolvable pin would
+# silently pull the CUDA wheel and clobber the empty-target build.
 #
 # <your-model>-ops==<Z>    # optional: your generic_op custom-op wheel (ship it via --ops-wheel)
+"""
+
+# The empty-target vLLM install applies these overrides to vLLM's requirements/common.txt so the
+# tt-metal env's numpy<2 is not upgraded (opencv is vLLM's only numpy-2 puller and no TT-registered
+# model uses its video path). Kept verbatim in step with tenstorrent/vllm-tt-plugin docs/vllm-overrides.txt.
+_VLLM_OVERRIDES_TEMPLATE = """\
+# vLLM dependency overrides for the empty-target (TT) build — see tenstorrent/vllm-tt-plugin.
+# ttnn needs numpy<2; vLLM's common.txt wants opencv-python-headless>=4.13 which needs numpy>=2.
+# Pin opencv to the last numpy-1 release (its video path is unused by TT models) and hold numpy<2
+# (fixed by the tt-metal/ttnn env this runs inside). Revisit on a vLLM bump or if a model gains video.
+opencv-python-headless==4.11.0.86
+numpy>=1.24.4,<2
 """
 
 
@@ -511,6 +567,9 @@ def stage_thin_package(
     requirements: Optional[Path] = None,
     plugin_wheel: Optional[Path] = None,
     extra_wheels: Optional[List[Path]] = None,
+    vllm_wheel: Optional[Path] = None,
+    vllm_version: str = VLLM_VERSION,
+    with_vllm: bool = True,
     weights: Optional[WeightsRef] = None,
     device_count: int = 1,
     mesh: Optional[Mesh] = None,
@@ -525,8 +584,15 @@ def stage_thin_package(
     the ``vllm_metadata.json`` (EXTRA_MODELS_DIR contract), generated ``install.sh``/``run.sh``, and
     — in ``wheels/`` — the **bundled wheels installed by path**: the ``vllm-tt-plugin``
     (``--plugin-wheel``, the vLLM integration) and any ``generic_op`` custom-op wheels
-    (``extra_wheels``). We do NOT ship a custom vLLM fork — the direction is stock vLLM +
-    vllm-tt-plugin (see tenstorrent/vllm-tt-plugin). NO embedded ttnn wheel, NO metal tree —
+    (``extra_wheels``).
+
+    vLLM core is installed by ``install.sh`` as **stock upstream vLLM built with
+    ``VLLM_TARGET_DEVICE=empty``** (the plugin's ``docs/install-vllm-tt.sh`` path — NOT the CUDA
+    ``vllm`` on PyPI, NOT a fork). We ship a ``vllm-overrides.txt`` (numpy<2 / opencv pins) so that
+    step doesn't clobber ttnn's numpy; the upstream ``common.txt`` is fetched at install unless the
+    author bundles a pinned copy. Pass ``vllm_wheel`` to ship a prebuilt empty-target wheel (stock
+    vLLM built empty) for a hermetic install instead of building from source. ``with_vllm=False``
+    packages a non-vLLM model (no vLLM step). NO embedded ttnn wheel, NO metal tree —
     ttnn/tt-metal-models resolve from the index at install. Weights stay a pointer.
 
     NOTE (draft): reflects the #29 plan; fully functional once tt-metal-models publishes so the
@@ -557,6 +623,20 @@ def stage_thin_package(
             shutil.copy2(w, wheels_root / Path(w).name)
             deps_wheels.append(f"{WHEELS_DIR}/{Path(w).name}")
 
+    # vLLM core: stock upstream vLLM built empty-target (see Vllm). Ship the override file (numpy<2 /
+    # opencv pin) so the common-deps install doesn't bump ttnn's numpy; the upstream common.txt is
+    # fetched at install. An optional prebuilt empty-target wheel avoids building from source.
+    vllm_spec: Optional[Vllm] = None
+    if with_vllm:
+        (staged / VLLM_OVERRIDES).write_text(_VLLM_OVERRIDES_TEMPLATE)
+        vllm_rel: Optional[str] = None
+        if vllm_wheel is not None:
+            wheels_root = staged / WHEELS_DIR
+            wheels_root.mkdir(exist_ok=True)
+            shutil.copy2(vllm_wheel, wheels_root / Path(vllm_wheel).name)
+            vllm_rel = f"{WHEELS_DIR}/{Path(vllm_wheel).name}"
+        vllm_spec = Vllm(version=vllm_version, overrides=VLLM_OVERRIDES, wheel=vllm_rel)
+
     # vllm_metadata.json in the per-model subfolder under vllm_models/ (EXTRA_MODELS_DIR contract).
     safe_key = name.replace("/", "__")
     model_bundle = staged / METADATA_DIR / safe_key
@@ -567,7 +647,8 @@ def stage_thin_package(
         python=python_version,
         requirements=REQUIREMENTS,
         wheels=deps_wheels,
-        wheels_dir=(WHEELS_DIR if deps_wheels else None),
+        wheels_dir=(WHEELS_DIR if (deps_wheels or (vllm_spec and vllm_spec.wheel)) else None),
+        vllm=vllm_spec,
         model_dir=".",
     )
     entrypoint = Entrypoint(

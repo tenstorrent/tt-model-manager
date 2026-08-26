@@ -197,23 +197,52 @@ class BundledPlatform(BaseModel):
         return [w for w in ordered if w is not None]
 
 
+class Vllm(BaseModel):
+    """How a v6 thin bundle installs vLLM core for the ``vllm-tt-plugin``.
+
+    vLLM is **not** a plain pip pin. It must be **stock upstream vLLM built with
+    ``VLLM_TARGET_DEVICE=empty``** — NOT the CUDA ``vllm`` wheel on PyPI — because the ``tt``
+    platform is supplied by the ``vllm-tt-plugin`` at runtime (out-of-tree platform plugin). This
+    mirrors the plugin's own ``docs/install-vllm-tt.sh``: install vLLM's *common* deps under a TT
+    **override set** first (so ttnn's ``numpy<2`` is not bumped to numpy 2 by opencv), then install
+    vLLM itself with ``--no-deps`` — either built from source (``--no-binary vllm``) or from a
+    prebuilt empty-target wheel. See tenstorrent/vllm-tt-plugin.
+
+    The plugin wheel itself and any ``generic_op`` wheels ride in ``Deps.wheels`` (installed by path
+    AFTER vLLM). ``VLLM_TARGET_DEVICE`` is a *build-time* variable only — it is never set at serve.
+    """
+
+    version: str = "0.25.1"          # upstream vllm-project/vllm tag (empty-target build)
+    target_device: str = "empty"     # VLLM_TARGET_DEVICE at build; the plugin provides `tt` at runtime
+    overrides: Optional[str] = None  # bundle-relative override file (opencv/numpy pins) applied to common.txt
+    # bundle-relative pinned copy of vLLM's requirements/common.txt; None => fetch it from the pinned tag
+    common_requirements: Optional[str] = None
+    # bundle-relative PREBUILT empty-target vLLM wheel (stock vLLM built empty, NOT the fork). When set,
+    # install it with --no-deps instead of building from source — a hermetic, faster install.
+    wheel: Optional[str] = None
+
+
 class Deps(BaseModel):
     """v6 "thin" bundle: the per-model venv is built from pip dependency pins + bundled wheels,
     not from embedded platform wheels (see issue #29).
 
     ``requirements`` (a file shipped in the bundle) lists the pins — ``ttnn`` (team-provided /
     PyPI), ``tt-transformers``/TTTv2, the "models wheel", etc. ``wheels_dir`` is a bundle folder
-    of shipped wheels (e.g. the model's ``generic_op`` custom-op wheel) added to the install via
-    ``--find-links``. ``model_dir`` is where ``model.py`` lives (added to PYTHONPATH at serve).
-    SFPI and firmware are external, box-managed deps — never in here.
+    of shipped wheels (the ``vllm-tt-plugin`` and the model's ``generic_op`` custom-op wheel) added
+    to the install via ``--find-links`` and installed BY PATH. ``vllm`` describes the separate
+    empty-target vLLM install step (see ``Vllm``) — vLLM is NOT in ``requirements`` or ``wheels``
+    because it needs its own ordered build. ``model_dir`` is where ``model.py`` lives (added to
+    PYTHONPATH at serve). SFPI and firmware are external, box-managed deps — never in here.
     """
 
     python: Optional[str] = None            # pinned interpreter (major.minor), uv provisions
     requirements: str = "requirements.txt"  # pip pins from an index: ttnn, tt-metal-models, ...
-    # Bundle-relative wheels installed BY PATH (things not on a pinnable index): the Tenstorrent
-    # vLLM FORK (VLLM_TARGET_DEVICE=empty), the vllm_tt_plugin, and any generic_op custom-op wheel.
+    # Bundle-relative wheels installed BY PATH (things not on a pinnable index): the ``vllm-tt-plugin``
+    # and any ``generic_op`` custom-op wheel. Installed AFTER vLLM (see ``vllm``).
     wheels: List[str] = Field(default_factory=list)
     wheels_dir: Optional[str] = None         # bundle dir holding those wheels -> also on --find-links
+    # vLLM core install (empty-target, for the plugin). None => bundle serves no vLLM (non-vLLM model).
+    vllm: Optional["Vllm"] = None
     model_dir: str = "."                     # where model.py lives (bundle root), added to PYTHONPATH
 
 

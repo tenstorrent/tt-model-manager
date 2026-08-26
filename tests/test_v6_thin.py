@@ -19,7 +19,8 @@ from tt_kernel.manifest import Manifest, Mesh, Resources, WeightsRef, compare
 _runner = CliRunner()
 
 
-def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=None):
+def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=None,
+                vllm_wheel=None, with_vllm=True):
     model_py = tmp_path / "model.py"
     model_py.write_text("class QwenForCausalLM:  # the runner\n    pass\n")
     staged = tmp_path / "thin"
@@ -28,6 +29,7 @@ def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=Non
         vllm_metadata={"arch": "QwenForCausalLM", "main_class": "model:QwenForCausalLM"},
         tt_kernel_version="0.0.0", requirements=requirements,
         plugin_wheel=plugin_wheel, extra_wheels=extra_wheels,
+        vllm_wheel=vllm_wheel, with_vllm=with_vllm,
         weights=WeightsRef(repo="Qwen/Qwen3-4B"), mesh=Mesh(devices=1, topology="P150"),
         resources=Resources(max_num_seqs=32, block_size=64),
     )
@@ -42,9 +44,13 @@ def test_thin_layout_and_manifest(tmp_path):
     assert m.deps.requirements == "requirements.txt" and m.deps.wheels_dir is None and m.deps.wheels == []
     assert m.entrypoint.arch_name == "QwenForCausalLM"
     assert m.weights.repo_id == "Qwen/Qwen3-4B"
-    # layout: model.py + requirements + metadata subfolder + scripts; NO wheels/ or metal/
+    # vLLM: empty-target build recorded (no wheel by default -> built from source), overrides shipped
+    assert m.deps.vllm is not None and m.deps.vllm.target_device == "empty" and m.deps.vllm.wheel is None
+    assert m.deps.vllm.overrides == "vllm-overrides.txt"
+    # layout: model.py + requirements + vllm-overrides + metadata subfolder + scripts; NO wheels/ or metal/
     assert (staged / "model.py").is_file()
     assert (staged / "requirements.txt").is_file()
+    assert (staged / "vllm-overrides.txt").is_file()
     assert (staged / "vllm_models" / "qwen-thin" / "vllm_metadata.json").is_file()
     assert not (staged / "wheels").exists() and not (staged / "metal").exists()
     m2 = Manifest.from_json((staged / "tt_kernel_manifest.json").read_text())
@@ -58,9 +64,50 @@ def test_thin_default_requirements_template_has_todo_pins(tmp_path):
     assert "tt-metal-models" in req                  # the models wheel (incl. tt_transformers)
     assert "tt-metal#54340" in req                   # tracks the upstream packaging PR (#29 M0)
     assert "SFPI" in req and "NOT listed" in req     # SFPI is an external box dep
-    # vLLM: stock vLLM + the plugin — no custom vLLM fork; vLLM integration is vllm-tt-plugin.
+    # vLLM must NOT be a pin here — it's the empty-target build done by install.sh; the plugin ships
+    # as a bundled wheel. A resolvable `vllm` pin would clobber the empty build with the CUDA wheel.
+    assert "VLLM_TARGET_DEVICE=empty" in req
     assert "vllm-tt-plugin" in req
-    assert "fork" in req                             # note: "no longer ship a custom vLLM fork"
+    assert "\nvllm==" not in req and "\nvllm>=" not in req  # never a resolvable vllm pin
+
+
+def test_thin_ships_vllm_overrides_matching_the_plugin(tmp_path):
+    staged, _ = _stage_thin(tmp_path)
+    ov = (staged / "vllm-overrides.txt").read_text()
+    # These are the exact pins the plugin's docs/vllm-overrides.txt uses so ttnn's numpy<2 survives.
+    assert "opencv-python-headless==4.11.0.86" in ov
+    assert "numpy>=1.24.4,<2" in ov
+
+
+def test_thin_install_sh_builds_empty_target_vllm_from_source(tmp_path):
+    staged, _ = _stage_thin(tmp_path)   # no --vllm-wheel -> from source
+    inst = (staged / "install.sh").read_text()
+    # ttnn/models install BEFORE vLLM (torch + numpy<2 first), then the empty-target vLLM steps.
+    i_req = inst.index('-r "$HERE/requirements.txt"')
+    i_vllm = inst.index("VLLM_TARGET_DEVICE=empty")
+    assert i_req < i_vllm
+    # common deps under the TT override set, then vLLM from source with --no-deps --no-binary.
+    assert '--override "$HERE/vllm-overrides.txt"' in inst
+    assert "requirements/common.txt" in inst                 # fetched from the pinned upstream tag
+    assert "--no-deps --no-binary vllm vllm==0.25.1" in inst
+
+
+def test_thin_prebuilt_vllm_wheel_installed_by_path_not_built(tmp_path):
+    vw = tmp_path / "vllm-0.25.1-cp312-cp312-linux_x86_64.whl"; vw.write_bytes(b"PK\x03\x04")
+    staged, m = _stage_thin(tmp_path, vllm_wheel=vw)
+    assert m.deps.vllm.wheel == f"wheels/{vw.name}"
+    assert (staged / "wheels" / vw.name).is_file()
+    inst = (staged / "install.sh").read_text()
+    assert "--no-binary vllm" not in inst                    # not built from source
+    assert f'--no-deps "$HERE/wheels/{vw.name}"' in inst     # installed by path
+
+
+def test_thin_no_vllm_skips_the_vllm_step(tmp_path):
+    staged, m = _stage_thin(tmp_path, with_vllm=False)
+    assert m.deps.vllm is None
+    assert not (staged / "vllm-overrides.txt").exists()
+    inst = (staged / "install.sh").read_text()
+    assert "VLLM_TARGET_DEVICE" not in inst and "requirements/common.txt" not in inst
 
 
 def test_thin_install_sh_builds_venv_from_pins(tmp_path):
