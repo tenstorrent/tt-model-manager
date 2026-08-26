@@ -19,14 +19,15 @@ from tt_kernel.manifest import Manifest, Mesh, Resources, WeightsRef, compare
 _runner = CliRunner()
 
 
-def _stage_thin(tmp_path, requirements=None, wheels_dir=None):
+def _stage_thin(tmp_path, requirements=None, vllm_wheel=None, plugin_wheel=None, extra_wheels=None):
     model_py = tmp_path / "model.py"
     model_py.write_text("class QwenForCausalLM:  # the runner\n    pass\n")
     staged = tmp_path / "thin"
     m = packaging.stage_thin_package(
         staged, name="qwen-thin", arch="blackhole", model_py=model_py,
         vllm_metadata={"arch": "QwenForCausalLM", "main_class": "model:QwenForCausalLM"},
-        tt_kernel_version="0.0.0", requirements=requirements, wheels_dir=wheels_dir,
+        tt_kernel_version="0.0.0", requirements=requirements,
+        vllm_wheel=vllm_wheel, plugin_wheel=plugin_wheel, extra_wheels=extra_wheels,
         weights=WeightsRef(repo="Qwen/Qwen3-4B"), mesh=Mesh(devices=1, topology="P150"),
         resources=Resources(max_num_seqs=32, block_size=64),
     )
@@ -38,7 +39,7 @@ def test_thin_layout_and_manifest(tmp_path):
     # manifest
     assert m.schema_version == "6"
     assert m.is_thin is True and m.has_own_venv is True and m.is_self_contained is False
-    assert m.deps.requirements == "requirements.txt" and m.deps.wheels_dir is None
+    assert m.deps.requirements == "requirements.txt" and m.deps.wheels_dir is None and m.deps.wheels == []
     assert m.entrypoint.arch_name == "QwenForCausalLM"
     assert m.weights.repo_id == "Qwen/Qwen3-4B"
     # layout: model.py + requirements + metadata subfolder + scripts; NO wheels/ or metal/
@@ -57,7 +58,9 @@ def test_thin_default_requirements_template_has_todo_pins(tmp_path):
     assert "tt-metal-models" in req                  # the models wheel (incl. tt_transformers)
     assert "tt-metal#54340" in req                   # tracks the upstream packaging PR (#29 M0)
     assert "SFPI" in req and "NOT listed" in req     # SFPI is an external box dep
-    assert "vllm" in req and "vllm_tt_plugin" in req  # vLLM serve path needs the fork + plugin (pinned, not embedded)
+    # vLLM must NOT be a pip pin (it's the empty-target fork, not PyPI vllm) — shipped as a wheel.
+    assert "Do NOT add `vllm`" in req
+    assert "vllm-tt-plugin" in req                   # named as a bundled wheel, not a pin
 
 
 def test_thin_install_sh_builds_venv_from_pins(tmp_path):
@@ -69,15 +72,22 @@ def test_thin_install_sh_builds_venv_from_pins(tmp_path):
     assert "wheels/" not in inst                     # no embedded platform wheels
 
 
-def test_thin_install_sh_find_links_when_wheels_shipped(tmp_path):
-    wd = tmp_path / "ops"
-    wd.mkdir()
-    (wd / "my_ops-0.1-py3-none-any.whl").write_bytes(b"PK\x03\x04")
-    staged, m = _stage_thin(tmp_path, wheels_dir=wd)
-    assert m.deps.wheels_dir == "custom_ops"
-    assert (staged / "custom_ops" / "my_ops-0.1-py3-none-any.whl").is_file()
+def test_thin_ships_vllm_fork_and_plugin_as_wheels_by_path(tmp_path):
+    vw = tmp_path / "vllm-0.1.dev0empty-py3-none-any.whl"; vw.write_bytes(b"PK\x03\x04")
+    pw = tmp_path / "vllm_tt_plugin-0.1.0-py3-none-any.whl"; pw.write_bytes(b"PK\x03\x04")
+    ow = tmp_path / "my_ops-0.1-py3-none-any.whl"; ow.write_bytes(b"PK\x03\x04")
+    staged, m = _stage_thin(tmp_path, vllm_wheel=vw, plugin_wheel=pw, extra_wheels=[ow])
+    # recorded in deps.wheels in order — vLLM fork FIRST, then plugin, then ops — and shipped in wheels/
+    assert m.deps.wheels == [f"wheels/{vw.name}", f"wheels/{pw.name}", f"wheels/{ow.name}"]
+    assert m.deps.wheels_dir == "wheels"
+    for w in (vw, pw, ow):
+        assert (staged / "wheels" / w.name).is_file()
     inst = (staged / "install.sh").read_text()
-    assert '--find-links "$HERE/custom_ops"' in inst  # bundled generic_op wheel is discoverable
+    # installed BY PATH (never pinned), base before plugin; requirements still pulls index deps
+    assert f'"$HERE/wheels/{vw.name}"' in inst and f'"$HERE/wheels/{pw.name}"' in inst
+    assert inst.index(vw.name) < inst.index(pw.name)   # vLLM fork installed before its plugin
+    assert '--find-links "$HERE/wheels"' in inst
+    assert '-r "$HERE/requirements.txt"' in inst
 
 
 def test_thin_scripts_are_owner_rw_only_not_executable(tmp_path):

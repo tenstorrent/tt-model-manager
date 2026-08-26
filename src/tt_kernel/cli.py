@@ -1478,9 +1478,14 @@ def package_thin(
     requirements: Optional[str] = typer.Option(
         None, "--requirements", help="requirements.txt of pip pins (ttnn/TTTv2/models wheel). "
         "Omitted => a #29 template with TODO pins for the not-yet-published wheels."),
-    wheels_dir: Optional[str] = typer.Option(
-        None, "--wheels-dir", help="Dir of bundled wheels (e.g. your generic_op custom-op wheel) "
-        "-> shipped in custom_ops/ and added to the install via --find-links."),
+    vllm_wheel: Optional[str] = typer.Option(
+        None, "--vllm-wheel", help="The Tenstorrent vLLM FORK wheel (empty-target build, NOT PyPI "
+        "vllm) — shipped in wheels/ and installed by path (never pinned)."),
+    plugin_wheel: Optional[str] = typer.Option(
+        None, "--plugin-wheel", help="The vllm-tt-plugin wheel — shipped in wheels/, installed after "
+        "the vLLM fork."),
+    ops_wheel: Optional[List[str]] = typer.Option(
+        None, "--ops-wheel", help="A generic_op custom-op wheel to ship in wheels/ (repeatable)."),
     arch: Optional[str] = typer.Option(None, "--arch", help="TT arch (blackhole|wormhole_b0); detected if omitted."),
     arch_name: Optional[str] = typer.Option(None, "--arch-name", help="HF architecture -> vllm_metadata."),
     main_class: Optional[str] = typer.Option(None, "--main-class", help='"module:Class" the plugin loads.'),
@@ -1549,14 +1554,20 @@ def package_thin(
         staged, name=bundle_name, arch=resolved_arch, model_py=model_path,
         vllm_metadata=vmeta, tt_kernel_version=__version__,
         requirements=Path(requirements).expanduser() if requirements else None,
-        wheels_dir=Path(wheels_dir).expanduser() if wheels_dir else None,
+        vllm_wheel=Path(vllm_wheel).expanduser() if vllm_wheel else None,
+        plugin_wheel=Path(plugin_wheel).expanduser() if plugin_wheel else None,
+        extra_wheels=[Path(w).expanduser() for w in (ops_wheel or [])],
         weights=weights_block, device_count=device_count, mesh=mesh, env=env_map,
         resources=resources, python_version=python_version,
         tt_metal_version=metal.resolve_version() or "unknown",
     )
     typer.secho(f"✓ Staged v6 thin bundle {manifest.name} at {staged}", fg=typer.colors.GREEN)
     typer.echo(f"  runner: {model_path.name}   deps: {manifest.deps.requirements}"
-               + (f" + {manifest.deps.wheels_dir}/" if manifest.deps.wheels_dir else ""))
+               + (f" + {len(manifest.deps.wheels)} bundled wheel(s)" if manifest.deps.wheels else ""))
+    if not (vllm_wheel and plugin_wheel):
+        typer.secho("  ! no --vllm-wheel/--plugin-wheel given: the vllm serve path needs the TT vLLM "
+                    "fork + vllm-tt-plugin shipped in the bundle (they're not on PyPI).",
+                    fg=typer.colors.YELLOW)
     typer.echo(f"  arch registration: {manifest.entrypoint.arch_name}  ->  {manifest.entrypoint.cls}")
     if manifest.weights:
         typer.echo(f"  weights (pointer): {manifest.weights.repo_id}")

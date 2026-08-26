@@ -209,8 +209,11 @@ class Deps(BaseModel):
     """
 
     python: Optional[str] = None            # pinned interpreter (major.minor), uv provisions
-    requirements: str = "requirements.txt"  # pip pins: ttnn, tttv2, models wheel, ...
-    wheels_dir: Optional[str] = None         # bundle dir of shipped wheels (e.g. "custom_ops") -> --find-links
+    requirements: str = "requirements.txt"  # pip pins from an index: ttnn, tt-metal-models, ...
+    # Bundle-relative wheels installed BY PATH (things not on a pinnable index): the Tenstorrent
+    # vLLM FORK (VLLM_TARGET_DEVICE=empty), the vllm_tt_plugin, and any generic_op custom-op wheel.
+    wheels: List[str] = Field(default_factory=list)
+    wheels_dir: Optional[str] = None         # bundle dir holding those wheels -> also on --find-links
     model_dir: str = "."                     # where model.py lives (bundle root), added to PYTHONPATH
 
 

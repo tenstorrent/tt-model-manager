@@ -199,12 +199,17 @@ def render_install_sh(manifest: Manifest) -> str:
         # No embedded platform wheels, no metal tree. (SFPI is an external box dep, not installed here.)
         d = manifest.deps
         pyver = d.python or "3.12"
+        # Bundled wheels installed BY PATH (the TT vLLM fork + plugin + any generic_op wheel — not on
+        # a pinnable index); requirements.txt pulls the index deps (ttnn / tt-metal-models). One
+        # `uv pip install` resolves both together.
+        bundled = " ".join(f'"$HERE/{w}"' for w in d.wheels)
         find_links = f'--find-links "$HERE/{d.wheels_dir}" ' if d.wheels_dir else ""
         install = (
             f'uv pip install --python "$VENV/bin/python" --link-mode=copy '
-            f'--extra-index-url {_PYTORCH_CPU_INDEX} {find_links}-r "$HERE/{d.requirements}"'
+            f'--extra-index-url {_PYTORCH_CPU_INDEX} {find_links}{(bundled + " ") if bundled else ""}'
+            f'-r "$HERE/{d.requirements}"'
         )
-        deps_note = "v6 thin: pip pins (ttnn/TTTv2/models wheel) + any bundled generic_op wheels"
+        deps_note = "v6 thin: index pins (ttnn/tt-metal-models) + bundled wheels (vLLM fork + plugin + ops)"
     else:
         b = manifest.bundled
         pyver = (b.python if b and b.python else "3.12")
@@ -487,11 +492,11 @@ _THIN_REQUIREMENTS_TEMPLATE = """\
 ttnn>=0.77                 # engine (PyPI today; bundles the tt-metal runtime). Until tt-metal-models
                            # lands you pin ttnn directly; after, tt-metal-models pulls the exact ttnn.
 #
-# For the vLLM serve path (serve.kind: vllm — the default), the venv also needs the Tenstorrent vLLM
-# fork (VLLM_TARGET_DEVICE=empty build — NOT stock PyPI vllm) + the plugin. These are a FORK, so pin
-# them from wherever the team publishes them (not embedded in a thin bundle):
-# vllm==<empty-target-fork-build>     # TODO: pin the TT vLLM fork (not stock PyPI vllm)
-# vllm_tt_plugin==<X>                 # TODO: pin the TT vLLM plugin
+# Do NOT add `vllm` here. The TT vLLM is the locally built empty-target build (VLLM_TARGET_DEVICE=
+# empty), NOT the CUDA `vllm` on PyPI — and per tenstorrent/vllm-tt-plugin, declaring `vllm` as a
+# resolvable dep silently uninstalls the TT build and pulls the PyPI wheel. So the vLLM fork + the
+# `vllm-tt-plugin` are shipped as BUNDLED WHEELS (installed by path, base before plugin), not pins:
+# pass --vllm-wheel + --plugin-wheel to `tt-model package-thin`.
 #
 # <your-model>-ops==<Z>    # optional: your generic_op custom-op wheel (ship it in custom_ops/)
 """
@@ -506,7 +511,9 @@ def stage_thin_package(
     vllm_metadata: dict,
     tt_kernel_version: str,
     requirements: Optional[Path] = None,
-    wheels_dir: Optional[Path] = None,
+    vllm_wheel: Optional[Path] = None,
+    plugin_wheel: Optional[Path] = None,
+    extra_wheels: Optional[List[Path]] = None,
     weights: Optional[WeightsRef] = None,
     device_count: int = 1,
     mesh: Optional[Mesh] = None,
@@ -517,13 +524,16 @@ def stage_thin_package(
 ) -> Manifest:
     """Materialize a v6 "thin" bundle (issue #29) and return its manifest.
 
-    Ships: ``model.py`` (the runner), a ``requirements.txt`` of pip pins (ttnn / TTTv2 / models
-    wheel), an optional ``custom_ops/`` dir of bundled generic_op wheels, the ``vllm_metadata.json``
-    (EXTRA_MODELS_DIR contract), and generated ``install.sh``/``run.sh``. NO embedded ttnn wheel,
-    NO metal tree — the venv is built from the pins at install. Weights stay a pointer.
+    Ships: ``model.py`` (the runner), a ``requirements.txt`` of index pins (ttnn / tt-metal-models),
+    the ``vllm_metadata.json`` (EXTRA_MODELS_DIR contract), generated ``install.sh``/``run.sh``, and
+    — in ``wheels/`` — the **bundled wheels installed by path**: the Tenstorrent vLLM fork
+    (``--vllm-wheel``, the empty-target build), the ``vllm-tt-plugin`` (``--plugin-wheel``), and any
+    ``generic_op`` custom-op wheels (``extra_wheels``). vLLM is shipped, never pinned: it's the
+    empty-target build, not PyPI vllm (see tenstorrent/vllm-tt-plugin). NO embedded ttnn wheel, NO
+    metal tree — ttnn/tt-metal-models resolve from the index at install. Weights stay a pointer.
 
-    NOTE (draft): this reflects the #29 plan; it becomes fully functional once TTTv2 and the models
-    wheel are published so the requirements can pin real versions.
+    NOTE (draft): reflects the #29 plan; fully functional once tt-metal-models publishes so the
+    ttnn/tt-metal-models pins are real.
     """
     staged.mkdir(parents=True, exist_ok=True)
 
@@ -532,18 +542,23 @@ def stage_thin_package(
     model_dest = staged / Path(model_py).name
     shutil.copy2(model_py, model_dest)
 
-    # requirements.txt: the author's pins, or the #29 template with TODO lines for the lab to fill.
+    # requirements.txt: the author's index pins, or the #29 template with TODO lines to fill.
     if requirements is not None:
         shutil.copy2(requirements, staged / REQUIREMENTS)
     else:
         (staged / REQUIREMENTS).write_text(_THIN_REQUIREMENTS_TEMPLATE)
 
-    # Optional bundled wheels (e.g. the model's generic_op custom-op wheel) -> custom_ops/.
-    deps_wheels_dir: Optional[str] = None
-    if wheels_dir is not None:
-        dest_wheels = staged / CUSTOM_OPS_DIR
-        shutil.copytree(wheels_dir, dest_wheels, ignore=shutil.ignore_patterns("__pycache__"))
-        deps_wheels_dir = CUSTOM_OPS_DIR
+    # Bundled wheels -> wheels/, installed BY PATH in this order: the TT vLLM fork FIRST, then the
+    # plugin (the plugin must not precede its base), then any generic_op custom-op wheels. These are
+    # the things not on a pinnable index; ttnn/tt-metal-models still come from requirements.txt.
+    deps_wheels: List[str] = []
+    ordered = [w for w in (vllm_wheel, plugin_wheel, *(extra_wheels or [])) if w is not None]
+    if ordered:
+        wheels_root = staged / WHEELS_DIR
+        wheels_root.mkdir(exist_ok=True)
+        for w in ordered:
+            shutil.copy2(w, wheels_root / Path(w).name)
+            deps_wheels.append(f"{WHEELS_DIR}/{Path(w).name}")
 
     # vllm_metadata.json in the per-model subfolder under vllm_models/ (EXTRA_MODELS_DIR contract).
     safe_key = name.replace("/", "__")
@@ -554,7 +569,8 @@ def stage_thin_package(
     deps = Deps(
         python=python_version,
         requirements=REQUIREMENTS,
-        wheels_dir=deps_wheels_dir,
+        wheels=deps_wheels,
+        wheels_dir=(WHEELS_DIR if deps_wheels else None),
         model_dir=".",
     )
     entrypoint = Entrypoint(
