@@ -79,6 +79,15 @@ def test_thin_install_sh_find_links_when_wheels_shipped(tmp_path):
     assert '--find-links "$HERE/custom_ops"' in inst  # bundled generic_op wheel is discoverable
 
 
+def test_thin_scripts_are_owner_rw_only_not_executable(tmp_path):
+    # Least privilege (Cycode SAST): the generated scripts are run via `bash <script>`, so they need
+    # no execute bit and no group/other access — mode 0o600.
+    staged, _ = _stage_thin(tmp_path)
+    for s in ("install.sh", "run.sh"):
+        mode = (staged / s).stat().st_mode & 0o777
+        assert mode == 0o600, f"{s} is {oct(mode)}, expected 0o600"
+
+
 def test_thin_run_sh_pythonpath_is_bundle_root_not_metal(tmp_path):
     staged, _ = _stage_thin(tmp_path)
     run = (staged / "run.sh").read_text()

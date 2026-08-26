@@ -578,7 +578,10 @@ def stage_thin_package(
     (staged / INSTALL_SCRIPT).write_text(render_install_sh(manifest))
     (staged / RUN_SCRIPT).write_text(render_run_sh(manifest))
     for s in (INSTALL_SCRIPT, RUN_SCRIPT):
-        (staged / s).chmod(0o700)
+        # Owner read/write only (0o600), NO execute bit: these scripts are always invoked as
+        # `bash <script>` (runtime.install_self_contained / _serve_self_contained / the docs), so
+        # they never need to be executable — least privilege (Cycode SAST: permissive file assignment).
+        (staged / s).chmod(0o600)
 
     (staged / "tt_kernel_manifest.json").write_text(manifest.to_json())
     return manifest
