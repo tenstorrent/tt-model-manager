@@ -39,6 +39,46 @@ platform. There is **no embedded `ttnn` wheel and no `metal/` tree**.
 hermetic caches under the folder) and launches vLLM — `PYTHONPATH=$HERE` so `model.py` imports.
 `tt-model pull` / `serve` route a thin bundle through the same install/serve path as a v5 fat one.
 
+> **On `run.sh`:** the serving launcher is a generated `run.sh`, and `tt-model serve` runs
+> `bash <bundle>/run.sh`. It's a shell wrapper (not Python in `serve`) on purpose: `LD_PRELOAD` of
+> `_ttnncpp.so` must be set **before** the interpreter starts, so it can't be done from inside
+> tt-model's own process. `run.sh` also makes the bundle runnable without tt-model (`bash run.sh`);
+> `tt-model serve` is the managed wrapper. The author doesn't write it — `package`/`package-thin`
+> generate it; the author writes `model.py`.
+
+## Serving front end — LLM today, other model types later (NOT in this draft)
+
+The engine + bundle + install are **modality-agnostic** and shared. The one modality-specific layer
+is the **serving front end**, which in v6 today is **vLLM only** (`run.sh` launches vLLM's OpenAI
+server; the `vllm_metadata.json` / `EXTRA_MODELS_DIR` registration is LLM-specific).
+
+Supporting diffusion / other model types is a **future extension** — a `serve.kind` on the manifest
+that `render_run_sh` dispatches on (e.g. `vllm` today; a `custom` kind where `run.sh` launches
+`model.py`'s own server). That needs a new serving contract + a `model.py` runner protocol + a
+different API surface, so it is **deliberately out of scope for this draft** (tracked in #29) — not a
+drop-in. The shape it would take:
+
+```mermaid
+flowchart TB
+  subgraph shared1["SHARED — same v6 bundle for every model type"]
+    w["Pointer to weights"] --- man["Manifest (serve.kind + config)"] --- mp["model.py"] --- venv["uv venv: ttnn + tt-metal-models + generic_op"]
+  end
+  shared1 --> fork{{"manifest: serve.kind ?"}}
+  fork -->|"vllm  (implemented)"| llm
+  fork -->|"diffusion | custom  (planned)"| other
+  subgraph llm["LLM"]
+    l1["run.sh → vLLM OpenAI server"] --> l2["vllm_metadata.json (EXTRA_MODELS_DIR)"] --> l3["model.py = generator adapter"] --> l4["POST /v1/chat/completions"]
+  end
+  subgraph other["Diffusion / other — NOT in this draft"]
+    o1["run.sh → model.py's own server"] --> o2["model.py brings the API"] --> o3["model.py = pipeline (UNet/VAE)"] --> o4["POST /v1/images/generations"]
+  end
+  llm --> eng["SHARED ENGINE — ttnn + generic_op on the TT card (+ SFPI, firmware)"]
+  other --> eng
+```
+
+The **diffusion model code** itself would live in `tt-metal-models`, not tt-model — the engine
+already runs it; only the serving layer is the gap.
+
 ## Box prerequisites
 A TT **card**, its **firmware/driver**, and **SFPI** (SFPI is a separate, externally-managed box
 dependency — provisioned by tt-cli, or installed by the user on a bare box; it is **not** in `ttnn`
