@@ -478,9 +478,14 @@ CUSTOM_OPS_DIR = "custom_ops"
 _THIN_REQUIREMENTS_TEMPLATE = """\
 # v6 thin bundle — per-model venv dependency pins (see issue #29).
 # SFPI + firmware are EXTERNAL box deps (installer-managed) and are NOT listed here.
-ttnn>=0.77                 # engine (team-provided / PyPI); bundles the tt-metal runtime
-# tt-transformers==<X>     # TTTv2 framework wheel — TODO: pin once published upstream (#29 M0)
-# tt-metal-models==<Y>     # the tiny "models wheel" — TODO: pin once published upstream (#29 M0)
+#
+# The models tree (incl. tt_transformers) is packaged as `tt-metal-models`, which pins ttnn
+# exactly (tt-metal-models==X => ttnn==X). In progress upstream: tenstorrent/tt-metal#54340
+# (pip/apt/dnf). Once published, this ONE pin pulls the matching ttnn transitively:
+# tt-metal-models==<X>     # TODO: pin once published (#29 M0 / tt-metal#54340)
+#
+ttnn>=0.77                 # engine (PyPI today; bundles the tt-metal runtime). Until tt-metal-models
+                           # lands you pin ttnn directly; after, tt-metal-models pulls the exact ttnn.
 # <your-model>-ops==<Z>    # optional: your generic_op custom-op wheel (ship it in custom_ops/)
 """
 

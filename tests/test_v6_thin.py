@@ -54,8 +54,8 @@ def test_thin_default_requirements_template_has_todo_pins(tmp_path):
     staged, _ = _stage_thin(tmp_path)
     req = (staged / "requirements.txt").read_text()
     assert "ttnn>=0.77" in req                       # engine resolves from PyPI today
-    assert "tt-transformers" in req and "TTTv2" in req  # TODO pin (upstream #29 M0)
-    assert "models wheel" in req                     # TODO pin (upstream #29 M0)
+    assert "tt-metal-models" in req                  # the models wheel (incl. tt_transformers)
+    assert "tt-metal#54340" in req                   # tracks the upstream packaging PR (#29 M0)
     assert "SFPI" in req and "NOT listed" in req     # SFPI is an external box dep
 
 
