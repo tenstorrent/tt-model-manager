@@ -62,7 +62,7 @@ def test_thin_default_requirements_template_has_todo_pins(tmp_path):
     req = (staged / "requirements.txt").read_text()
     assert "ttnn>=0.77" in req                       # engine resolves from PyPI today
     assert "tt-metal-models" in req                  # the models wheel (incl. tt_transformers)
-    assert "tt-metal#54340" in req                   # tracks the upstream packaging PR (#29 M0)
+    assert "tt-metal#54478" in req                   # tracks the upstream packaging PR (#29 M0)
     assert "SFPI" in req and "NOT listed" in req     # SFPI is an external box dep
     # vLLM must NOT be a pin here — it's the empty-target build done by install.sh; the plugin ships
     # as a bundled wheel. A resolvable `vllm` pin would clobber the empty build with the CUDA wheel.

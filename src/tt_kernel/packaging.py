@@ -527,9 +527,9 @@ _THIN_REQUIREMENTS_TEMPLATE = """\
 # SFPI + firmware are EXTERNAL box deps (installer-managed) and are NOT listed here.
 #
 # The models tree (incl. tt_transformers) is packaged as `tt-metal-models`, which pins ttnn
-# exactly (tt-metal-models==X => ttnn==X). In progress upstream: tenstorrent/tt-metal#54340
+# exactly (tt-metal-models==X => ttnn==X). In progress upstream: tenstorrent/tt-metal#54478
 # (pip/apt/dnf). Once published, this ONE pin pulls the matching ttnn transitively:
-# tt-metal-models==<X>     # TODO: pin once published (#29 M0 / tt-metal#54340)
+# tt-metal-models==<X>     # TODO: pin once published (#29 M0 / tt-metal#54478)
 #
 ttnn>=0.77                 # engine (PyPI today; bundles the tt-metal runtime). Until tt-metal-models
                            # lands you pin ttnn directly; after, tt-metal-models pulls the exact ttnn.

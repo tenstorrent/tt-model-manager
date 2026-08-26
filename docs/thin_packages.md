@@ -4,7 +4,7 @@
 
 > **Status: draft / scaffold.** This reflects the plan in **issue #29**. It becomes fully installable
 > once the **models wheel** is published. That work is in progress upstream as **`tt-metal-models`**
-> — [tenstorrent/tt-metal#54340](https://github.com/tenstorrent/tt-metal/pull/54340) — which packages
+> — [tenstorrent/tt-metal#54478](https://github.com/tenstorrent/tt-metal/pull/54478) — which packages
 > the whole `models/` tree (**including `tt_transformers`**) for pip/apt/dnf and **pins `ttnn` exactly**
 > (`tt-metal-models==X` ⇒ `ttnn==X`). So a thin bundle pins **one** dep (`tt-metal-models`) and the
 > matching `ttnn` comes transitively — it likely subsumes a separate "TTTv2" wheel. Until it lands,
@@ -141,7 +141,7 @@ The key discipline: **pin what actually worked** — `pip freeze` in your workin
 2. **Write `requirements.txt`** with the versions your box ran — **ttnn / tt-metal-models only**:
    ```
    # tt-metal-models==<X>       # the models tree (incl. tt_transformers); pins ttnn==<X> exactly
-   #                            # (upstream tt-metal#54340) — pulls the matching ttnn transitively
+   #                            # (upstream tt-metal#54478) — pulls the matching ttnn transitively
    ttnn==0.77.0                 # engine (PyPI today; pin directly until tt-metal-models lands)
    ```
    **Do NOT put `vllm` in `requirements.txt`.** vLLM is installed by `install.sh` as stock upstream
@@ -179,7 +179,7 @@ wheel + the entrypoint (`--arch-name`/`--main-class`) + a weights repo id. Every
 
 ## Testing it in the lab (today)
 1. `tt-model package-thin ... --out /tmp/thin`
-2. Edit `/tmp/thin/requirements.txt` — pin the real `ttnn` now, and `tt-metal-models` once tt-metal#54340 publishes.
+2. Edit `/tmp/thin/requirements.txt` — pin the real `ttnn` now, and `tt-metal-models` once tt-metal#54478 publishes.
 3. `bash /tmp/thin/install.sh` — builds the venv (ttnn → empty-target vLLM → plugin). Needs SFPI on
    the box; the default vLLM step builds from source (needs a C/C++ toolchain + network for
    `common.txt`). Pass `--vllm-wheel` at package time to install a prebuilt empty-target wheel instead.
