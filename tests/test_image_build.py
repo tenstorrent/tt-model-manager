@@ -498,3 +498,32 @@ def test_the_dockerfile_sets_CMD_and_keeps_the_entrypoint():
 
 def test_the_script_is_copied_executable():
     assert "--chmod=0755 serve-default.sh" in DOCKERFILE
+
+
+def test_the_plugin_accepts_exactly_one_source():
+    """path / {repo, ref} / version are mutually exclusive; the error names all three so
+    an author who tried a local checkout learns it is supported."""
+    rt = json.loads(json.dumps(BASE))["runtime"]
+
+    del rt["plugin"]
+    with pytest.raises(Exception, match="requires runtime.plugin"):
+        _mani(runtime=rt).validate_semantics()
+
+    rt["plugin"] = {"path": "/p", "version": "1.0"}
+    with pytest.raises(Exception, match="exactly one of"):
+        _mani(runtime=rt).validate_semantics()
+
+
+def test_the_missing_plugin_error_documents_the_local_path_option():
+    rt = json.loads(json.dumps(BASE))["runtime"]
+    del rt["plugin"]
+    try:
+        _mani(runtime=rt).validate_semantics()
+    except Exception as e:
+        msg = str(e)
+    assert "path:" in msg and "must be PUSHED" in msg
+
+
+def test_the_dockerfile_copies_the_plugin_context_unconditionally():
+    """It is an empty dir when unused, so the COPY is always valid."""
+    assert "COPY plugin-src /ctx/plugin-src" in DOCKERFILE

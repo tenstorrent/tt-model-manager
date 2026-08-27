@@ -102,6 +102,55 @@ def scm_version(metal: Path) -> str:
 # NOT excluded: tests/ — tools/scaleout/fabric_manager #includes headers out of
 # tests/tt_metal/test_utils, so the default build needs the tree present. It still never
 # reaches the runtime image: that stage COPYs named directories only.
+PLUGIN_CONTEXT_EXCLUDES = (
+    ".git", "__pycache__", ".venv", "venv", "build", "dist", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache",
+)
+
+
+def _copy_plugin_tree(src: Path, dest: Path) -> None:
+    """Stage a local plugin checkout, shipping what git considers part of the project.
+
+    A hardcoded exclude list is not enough: a working plugin checkout accumulates runtime
+    artifacts that dwarf the source — this was found against a real one carrying a 30 GB
+    ``model_cache/`` beside 928 KB of ``src/``. The project already declares what is not
+    part of it, in .gitignore, so ask git rather than guessing:
+
+        git ls-files --cached --others --exclude-standard
+
+    That is tracked files plus untracked-but-not-ignored ones, so uncommitted work still
+    ships (the hermetic default) while ignored artifacts never do. A non-git directory
+    falls back to the exclude list.
+    """
+    listed = subprocess.run(
+        ["git", "-C", str(src), "ls-files", "--cached", "--others", "--exclude-standard"],
+        capture_output=True, text=True,
+    )
+    if listed.returncode != 0:
+        def _ignore(dirpath, names):
+            return {n for n in names
+                    if n in PLUGIN_CONTEXT_EXCLUDES or n.endswith((".pyc", ".egg-info"))}
+
+        shutil.copytree(src, dest, symlinks=True, ignore=_ignore)
+        return
+
+    dest.mkdir(parents=True, exist_ok=True)
+    for rel in listed.stdout.splitlines():
+        if not rel:
+            continue
+        parts = Path(rel).parts
+        # git handles project-specific ignores; this list handles what is never wanted,
+        # including in a repo that simply forgot to gitignore its __pycache__.
+        if any(p in PLUGIN_CONTEXT_EXCLUDES for p in parts) or rel.endswith(".pyc"):
+            continue
+        f = src / rel
+        if not f.is_file():  # a deleted-but-tracked path
+            continue
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, target)
+
+
 METAL_CONTEXT_EXCLUDES = (
     ".git", ".cpmcache", "python_env", "generated", "built", "models", "docs",
     "tech_reports", "tt-train", "model_tracer", ".github", "infra", "jobs",
@@ -139,6 +188,13 @@ class MetalSource:
     scm_version: str
     git_repo: Optional[str] = None  # git mode only
     git_ref: Optional[str] = None
+    # Local mode: WHERE the sha came from, recorded so a reader can orient themselves
+    # — not because anything resolves it. The image ships the tree, which is what lets
+    # a local branch or fork be a first-class input rather than a compromise. `pushed`
+    # simply says whether the commit happens to exist on a remote too.
+    remote: Optional[str] = None
+    branch: Optional[str] = None
+    pushed: Optional[bool] = None  # is HEAD reachable from any remote branch?
 
 
 def resolve_metal_source(m: ContainerManifest, scratch: Path) -> MetalSource:
@@ -165,11 +221,19 @@ def resolve_metal_source(m: ContainerManifest, scratch: Path) -> MetalSource:
         # hermetic input.
         filtered = scratch / "metalsrc"
         _copy_metal_tree(metal, filtered)
+        # `git branch -r --contains HEAD` is empty when the commit exists only here,
+        # which is the NORMAL case for this tool: community developers package from
+        # local branches and forks, and the image carries the tree, so nothing ever
+        # fetches this sha. Recorded as a fact about the build, not as a problem.
+        on_remote = _git(metal, "branch", "-r", "--contains", "HEAD")
         return MetalSource(
             mode="local",
             context=filtered,
             origin=metal,
             sha=_git(metal, "rev-parse", "HEAD"),
+            remote=_git(metal, "remote", "get-url", "origin"),
+            branch=_git(metal, "rev-parse", "--abbrev-ref", "HEAD"),
+            pushed=bool(on_remote),
             # tt-metal's OWN describe invocation (cmake/version.cmake), so the stub tag
             # the Dockerfile creates reproduces the exact PROJECT_VERSION.
             describe=_git(metal, "describe", "--abbrev=10", "--first-parent",
@@ -321,6 +385,27 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
         if isinstance(entry, dict) and entry.get("repo") and entry.get("ref"):
             entry["sha"] = resolve_git_ref(entry["repo"], entry["ref"])
 
+    # -- a LOCAL plugin checkout, staged like the metal tree ---------------------------
+    # v5 shipped the author's own plugin wheel; v5.1 could only clone a pushed ref, so an
+    # author iterating on the plugin could not package what they were actually running.
+    # The directory is always created (possibly empty) because the Dockerfile COPYs it
+    # unconditionally and a missing path would fail the build for every other model.
+    plugin_ctx = ctx / "plugin-src"
+    plugin_entry = m.runtime.get("plugin") or {}
+    plugin_path = plugin_entry.get("path") if isinstance(plugin_entry, dict) else None
+    if plugin_path:
+        src = Path(plugin_path).expanduser()
+        if not (src / "pyproject.toml").is_file() and not (src / "setup.py").is_file():
+            raise BuildError(
+                f"runtime.plugin.path: {src} does not look like a python package "
+                "(no pyproject.toml or setup.py)"
+            )
+        _copy_plugin_tree(src, plugin_ctx)
+        plugin_entry["sha"] = _git(src, "rev-parse", "HEAD") or "unknown"
+        plugin_entry["dirty"] = bool(_git(src, "status", "--porcelain"))
+    else:
+        plugin_ctx.mkdir(parents=True, exist_ok=True)
+
     # -- code/ ----------------------------------------------------------------------
     code_dir = ctx / "code"
     if metal.mode == "local":
@@ -365,13 +450,24 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
         "tt_metal": {
             "sha": metal.sha, "describe": metal.describe, "dirty": metal.dirty,
             "scm_version": metal.scm_version, "mode": metal.mode,
+            # where the sha lives, so a consumer can actually find it
+            "remote": metal.remote or metal.git_repo,
+            "branch": metal.branch,
+            "pushed": metal.pushed,
         },
         "code_sha256": _sha256_tree(code_dir),
     }
     for key in ("vllm", "plugin"):
         entry = m.runtime.get(key)
         if isinstance(entry, dict) and entry.get("sha"):
-            built[key] = {"repo": entry["repo"], "sha": entry["sha"]}
+            built[key] = {"sha": entry["sha"]}
+            if entry.get("repo"):
+                built[key]["repo"] = entry["repo"]
+            if entry.get("path"):
+                # Recorded, and flagged when uncommitted — the same honesty the metal
+                # tree gets, so "pinned" never overstates what was actually shipped.
+                built[key]["path"] = str(Path(entry["path"]).expanduser())
+                built[key]["dirty"] = bool(entry.get("dirty"))
 
     # -- docker build args ---------------------------------------------------------------
     # EXTRA_MODELS_DIR is the directory the plugin SCANS for per-model

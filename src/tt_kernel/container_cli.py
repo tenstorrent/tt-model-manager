@@ -72,10 +72,23 @@ def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> 
     metal = staged.metal
     console.note(
         f"tt-metal {(metal.sha or '?')[:9]}"
+        + (f" ({metal.branch})" if metal.branch else "")
         + (" (dirty tree — packaged as-is)" if metal.dirty else "")
         + f" · {metal.mode} source",
         marker="•",
     )
+    if metal.mode == "local" and metal.pushed is False:
+        # Informational, NOT a warning. The target user is a community developer on a
+        # local branch or fork; the image carries the whole tree, so nothing ever has
+        # to resolve this sha. Saying "push the branch to make provenance verifiable"
+        # implied a requirement that does not exist and made a normal situation read
+        # like a defect.
+        console.note(
+            "this commit is on no remote — that is fine, and expected on a local "
+            "branch or fork: the image ships the tree itself, so nothing needs to "
+            "fetch it. The sha is recorded for reference only.",
+            marker="○", style="muted",
+        )
     for key in ("vllm", "plugin"):
         pinned = staged.built.get(key)
         if isinstance(pinned, dict):

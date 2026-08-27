@@ -56,6 +56,11 @@ if TYPE_CHECKING:
     from .container_manifest import ContainerManifest
 
 
+#: Where `package` stages a local plugin checkout inside the build context, and where
+#: the Dockerfile puts it in the builder stage.
+PLUGIN_CTX_DIR = "/ctx/plugin-src"
+
+
 class LauncherError(ValueError):
     """A launch configuration that must not proceed. The message is user-facing."""
 
@@ -117,17 +122,27 @@ class VllmPluginLauncher:
                 "load-bearing, not cosmetic."
             )
         plugin = rt.get("plugin") or {}
-        has_git = bool(plugin.get("repo") and plugin.get("ref"))
-        has_pypi = bool(plugin.get("version"))
-        if not has_git and not has_pypi:
+        sources = {
+            "path": bool(plugin.get("path")),
+            "{repo, ref}": bool(plugin.get("repo") and plugin.get("ref")),
+            "version": bool(plugin.get("version")),
+        }
+        chosen = [k for k, v in sources.items() if v]
+        if not chosen:
             raise ContainerManifestError(
-                "kind vllm-plugin requires runtime.plugin as {repo, ref} — pin the SHA the "
-                "model was VALIDATED with, not a branch — or {version: \"X.Y.Z\"} for a "
-                "PyPI release that already registers this model."
+                "kind vllm-plugin requires runtime.plugin. The normal choice is your own\n"
+                "checkout, packaged as-is — uncommitted work included, nothing fetched:\n"
+                "  plugin: {path: /path/to/vllm-tt-plugin}\n"
+                "Alternatives:\n"
+                "  {repo, ref}                      — cloned during the build; the ref must "
+                "be PUSHED, or the build cannot fetch it\n"
+                '  {version: "X.Y.Z"}               — a PyPI release that already registers '
+                "this model"
             )
-        if has_git and has_pypi:
+        if len(chosen) > 1:
             raise ContainerManifestError(
-                "runtime.plugin: give {repo, ref} or {version}, not both"
+                f"runtime.plugin: give exactly one of path / {{repo, ref}} / version, "
+                f"got {' and '.join(chosen)}"
             )
         emd = rt.get("extra_models_dir")
         if emd and not any(
@@ -180,6 +195,14 @@ class VllmPluginLauncher:
             lines.append(
                 f'uv pip install --python "$VENV/bin/python" '
                 f"vllm-tt-plugin=={plugin['version']}"
+            )
+        elif plugin.get("path"):
+            # The author's own checkout, staged into the build context by `package` —
+            # the same hermetic treatment source.tt_metal gets, so plugin changes that
+            # are not committed (or not pushed) still ship. Non-editable, so nothing
+            # from /ctx has to survive into the runtime image.
+            lines.append(
+                f'uv pip install --python "$VENV/bin/python" {PLUGIN_CTX_DIR}'
             )
         else:
             ref = plugin.get("sha") or plugin["ref"]

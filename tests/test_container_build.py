@@ -570,3 +570,214 @@ def test_the_default_serve_script_lands_in_the_build_context(tmp_path, monkeypat
     assert script.startswith("#!/bin/bash")
     assert "exec vllm serve" in script
     assert "/dev/tenstorrent" in script
+
+
+# ------------------------------------------------------------------ local plugin checkout
+#
+# v5 shipped the author's own plugin WHEEL, so the plugin got the same hermetic treatment
+# as tt-metal. v5.1 could only clone a pushed ref, which meant an author iterating on the
+# plugin could not package what they were actually running — and a local-only commit
+# failed the build outright, an hour in.
+
+
+def _fake_plugin(root: Path, *, commit: bool = True) -> Path:
+    d = root / "vllm-tt-plugin"
+    (d / "src" / "vllm_tt_plugin").mkdir(parents=True)
+    (d / "src" / "vllm_tt_plugin" / "__init__.py").write_text("x = 1\n")
+    (d / "pyproject.toml").write_text("[project]\nname='vllm-tt-plugin'\nversion='0.1.0'\n")
+    (d / "__pycache__").mkdir()
+    (d / "__pycache__" / "x.pyc").write_text("c")
+    if commit:
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        subprocess.run(["git", "init", "-q", str(d)], check=True)
+        subprocess.run(["git", "-C", str(d), "add", "-A"], check=True, env=env)
+        subprocess.run(["git", "-C", str(d), "commit", "-qm", "i"], check=True, env=env)
+    return d
+
+
+def _with_local_plugin(tmp_path, metal, plugin, **over):
+    rt = json.loads(json.dumps(BASE))["runtime"]
+    rt["plugin"] = {"path": str(plugin)}
+    return _manifest_file(tmp_path, metal, runtime=rt, **over)
+
+
+def test_a_local_plugin_checkout_is_staged_into_the_build_context(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    metal, plugin = _fake_metal(tmp_path), _fake_plugin(tmp_path)
+    staged = build.stage(_with_local_plugin(tmp_path, metal, plugin),
+                         out_root=tmp_path / "out")
+    ctx = staged.ctx / "plugin-src"
+    assert (ctx / "pyproject.toml").is_file()
+    assert (ctx / "src" / "vllm_tt_plugin" / "__init__.py").is_file()
+    assert not (ctx / "__pycache__").exists()   # build detritus dropped
+    assert not (ctx / ".git").exists()
+
+
+def test_the_install_line_uses_the_staged_tree_not_a_clone(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    metal, plugin = _fake_metal(tmp_path), _fake_plugin(tmp_path)
+    build.stage(_with_local_plugin(tmp_path, metal, plugin), out_root=tmp_path / "out")
+    from tt_kernel.container_manifest import load_container_manifest
+    from tt_kernel.launchers import launcher_for
+
+    m = load_container_manifest(_with_local_plugin(tmp_path, metal, plugin))
+    lines = "\n".join(launcher_for(m.kind).install_lines(m))
+    assert "/ctx/plugin-src" in lines
+    assert "git clone" not in lines
+
+
+def test_the_local_plugin_sha_and_dirty_flag_are_recorded(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    metal, plugin = _fake_metal(tmp_path), _fake_plugin(tmp_path)
+    staged = build.stage(_with_local_plugin(tmp_path, metal, plugin),
+                         out_root=tmp_path / "out")
+    rec = staged.built["plugin"]
+    assert len(rec["sha"]) == 40 and rec["dirty"] is False
+    assert rec["path"] == str(plugin)
+
+
+def test_an_uncommitted_plugin_is_packaged_but_flagged_dirty(tmp_path, monkeypatch):
+    """The point of the hermetic default — but never claimed as pinned."""
+    _no_network(monkeypatch)
+    metal, plugin = _fake_metal(tmp_path), _fake_plugin(tmp_path)
+    (plugin / "src" / "vllm_tt_plugin" / "__init__.py").write_text("x = 2  # local\n")
+    staged = build.stage(_with_local_plugin(tmp_path, metal, plugin),
+                         out_root=tmp_path / "out")
+    assert staged.built["plugin"]["dirty"] is True
+
+
+def test_a_path_that_is_not_a_python_package_is_refused(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    nope = tmp_path / "nope"
+    nope.mkdir()
+    with pytest.raises(BuildError, match="does not look like a python package"):
+        build.stage(_with_local_plugin(tmp_path, metal, nope), out_root=tmp_path / "out")
+
+
+def test_the_context_dir_exists_even_without_a_local_plugin(tmp_path, monkeypatch):
+    """The Dockerfile COPYs it unconditionally; a missing dir would break every other
+    model's build."""
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    assert (staged.ctx / "plugin-src").is_dir()
+    assert not any((staged.ctx / "plugin-src").iterdir())
+
+
+def test_a_local_plugin_ships_what_git_considers_the_project(tmp_path, monkeypatch):
+    """A hardcoded exclude list is not enough: a real plugin checkout was carrying a 30 GB
+    gitignored model_cache/ beside 928 KB of src/. The project already declares what is
+    not part of it."""
+    _no_network(monkeypatch)
+    metal, plugin = _fake_metal(tmp_path), _fake_plugin(tmp_path)
+    (plugin / ".gitignore").write_text("model_cache/\n")
+    junk = plugin / "model_cache"
+    junk.mkdir()
+    (junk / "huge.bin").write_text("x" * 1000)
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "-C", str(plugin), "add", "-A"], check=True, env=env)
+    subprocess.run(["git", "-C", str(plugin), "commit", "-qm", "ignore"], check=True, env=env)
+
+    staged = build.stage(_with_local_plugin(tmp_path, metal, plugin),
+                         out_root=tmp_path / "out")
+    ctx = staged.ctx / "plugin-src"
+    assert (ctx / "pyproject.toml").is_file()
+    assert not (ctx / "model_cache").exists(), "gitignored artifacts must not be staged"
+
+
+def test_uncommitted_edits_to_tracked_files_still_ship(tmp_path, monkeypatch):
+    """The hermetic default: package what you validated, not what you remembered to commit."""
+    _no_network(monkeypatch)
+    metal, plugin = _fake_metal(tmp_path), _fake_plugin(tmp_path)
+    (plugin / "src" / "vllm_tt_plugin" / "__init__.py").write_text("x = 99  # uncommitted\n")
+    staged = build.stage(_with_local_plugin(tmp_path, metal, plugin),
+                         out_root=tmp_path / "out")
+    got = (staged.ctx / "plugin-src" / "src" / "vllm_tt_plugin" / "__init__.py").read_text()
+    assert "uncommitted" in got
+    assert staged.built["plugin"]["dirty"] is True
+
+
+def test_a_non_git_plugin_directory_still_works(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    plugin = _fake_plugin(tmp_path, commit=False)
+    staged = build.stage(_with_local_plugin(tmp_path, metal, plugin),
+                         out_root=tmp_path / "out")
+    assert (staged.ctx / "plugin-src" / "pyproject.toml").is_file()
+
+
+# ------------------------------------------------------------------ fork provenance
+#
+# Local mode records the LOCAL checkout's HEAD, which is exactly right for a fork — but a
+# 40-character sha with no remote is unfindable, and on a personal fork guessing the
+# upstream repo does not help. The plugin always recorded its repo; tt-metal did not.
+
+
+def test_the_remote_and_branch_are_recorded_for_a_local_checkout(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    subprocess.run(["git", "-C", str(metal), "remote", "add", "origin",
+                    "https://github.com/someone/tt-metal.git"], check=True)
+    subprocess.run(["git", "-C", str(metal), "checkout", "-qb", "my/fork-branch"], check=True)
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    rec = staged.built["tt_metal"]
+    assert rec["remote"] == "https://github.com/someone/tt-metal.git"
+    assert rec["branch"] == "my/fork-branch"
+
+
+def test_an_unpushed_commit_is_recorded_as_not_pushed(tmp_path, monkeypatch):
+    """Packaging local work stays allowed — it is the hermetic default — but a manifest
+    saying "built from <sha>" must not imply anyone can obtain that commit."""
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    assert staged.built["tt_metal"]["pushed"] is False
+
+
+def test_a_commit_reachable_from_a_remote_branch_is_recorded_as_pushed(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    # a bare repo to push into, so `git branch -r --contains HEAD` finds it
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    subprocess.run(["git", "-C", str(metal), "remote", "add", "origin", str(bare)], check=True)
+    subprocess.run(["git", "-C", str(metal), "push", "-q", "origin", "HEAD:main"], check=True)
+    subprocess.run(["git", "-C", str(metal), "fetch", "-q", "origin"], check=True)
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    assert staged.built["tt_metal"]["pushed"] is True
+
+
+def test_the_fork_sha_is_the_local_head_not_an_upstream_one(tmp_path, monkeypatch):
+    """Nothing assumes upstream tt-metal: the recorded sha is whatever the author's
+    checkout is on, which is the whole point of the hermetic default."""
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    head = subprocess.run(["git", "-C", str(metal), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    assert staged.built["tt_metal"]["sha"] == head
+
+
+def test_an_unpushed_commit_is_reported_as_normal_not_as_a_defect(tmp_path, monkeypatch,
+                                                                  capsys):
+    """The target user is a community developer on a local branch or fork. The image ships
+    the tree, so nothing ever resolves this sha — presenting it as something to fix made a
+    normal situation read like a problem."""
+    from tt_kernel import container_cli
+
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    monkeypatch.setattr(container_cli, "run_build", lambda *a, **k: None)
+    monkeypatch.setattr(container_cli, "finalize", lambda *a, **k: tmp_path / "out")
+    try:
+        container_cli.package_container(str(_manifest_file(tmp_path, metal)),
+                                        out_root=str(tmp_path / "out"))
+    except Exception:
+        pass
+    out = " ".join(capsys.readouterr().out.split())
+    assert "that is fine" in out
+    assert "push the branch" not in out          # no imperative to fix a non-problem
+    assert "⚠" not in out                        # informational, not a warning

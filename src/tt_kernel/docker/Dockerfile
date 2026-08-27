@@ -105,7 +105,10 @@ RUN SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TTNN="${SCM_VERSION}" \
 
 # The serving stack — generated per kind (see tt_kernel/launchers.py). tt-smi rides along
 # so `tt-model stop` can reset the mesh from a throwaway container without a host tt-smi.
+# plugin-src is the author's local plugin checkout when runtime.plugin.path is set, and
+# an empty directory otherwise — `package` always creates it so this COPY cannot fail.
 COPY install_engine.sh requirements.lock* /ctx/
+COPY plugin-src /ctx/plugin-src
 RUN bash /ctx/install_engine.sh \
     && uv pip install --python "$VENV/bin/python" tt-smi
 

@@ -37,9 +37,18 @@ runtime:
   # The plugin monkeypatches vLLM internals, so this pin is load-bearing, not cosmetic.
   vllm: {version: "0.24.0"}
 
-  # Pin the SHA you VALIDATED with — never a branch. A branch moves, and a plugin that
-  # moved under a validated model is exactly the bug this whole path exists to prevent.
-  plugin: {repo: https://github.com/tenstorrent/vllm-tt-plugin, ref: bc4af2d5}
+  # THE DEFAULT: your own checkout, staged into the image the same way source.tt_metal
+  # is. Uncommitted work ships, nothing is fetched, and what you serve is what you
+  # validated. This is the normal case — community developers work on local branches
+  # and forks, and the image carries the tree, so nothing has to resolve anywhere.
+  plugin: {path: /path/to/vllm-tt-plugin}
+
+  # Alternatives, when a local checkout is not the right input:
+  #   plugin: {repo: https://github.com/tenstorrent/vllm-tt-plugin, ref: <sha>}
+  #       cloned during the build — for CI, or to pin a sha someone else can fetch.
+  #       The ref must be PUSHED or the build cannot get it.
+  #   plugin: {version: "0.1.0"}
+  #       a PyPI release that already registers this model.
 
   # The directory the plugin SCANS for per-model vllm_metadata.json files (it looks at
   # the CHILDREN of this dir). Layouts differ between models, so state it outright.
