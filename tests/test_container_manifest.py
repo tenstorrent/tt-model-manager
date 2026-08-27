@@ -500,3 +500,46 @@ def test_a_hand_edited_package_with_no_profiles_fails_loudly_not_with_an_IndexEr
     spec = ContainerSpec(image=ImageRef(tag="t:1"))
     with pytest.raises(ValueError, match="declares no serve profiles"):
         spec.resolve_profile()
+
+
+# ------------------------------------------------------------------ the example is the docs
+#
+# examples/container-example.yaml is the ONLY reference for what a manifest may contain.
+# It had silently fallen behind — omitting serve.env and serve.additional_config, both of
+# which a real model needs — so a reader would have concluded they do not exist.
+
+
+def _example_text() -> str:
+    from pathlib import Path
+
+    return (Path(__file__).parent.parent / "examples" / "container-example.yaml").read_text()
+
+
+def test_the_example_mentions_every_manifest_field():
+    from tt_kernel.container_manifest import ContainerManifest, ImageSettings, Source
+    from tt_kernel.manifest import ServeProfile, ServeSettings
+
+    text = _example_text()
+    fields = set()
+    for model in (ContainerManifest, Source, ImageSettings, ServeSettings, ServeProfile):
+        fields |= set(model.model_fields)
+    # aliased / internal names that never appear verbatim in a manifest
+    fields -= {"schema_version"}
+    missing = sorted(f for f in fields if f not in text)
+    assert not missing, f"example does not mention: {missing}"
+
+
+def test_the_example_mentions_every_runtime_key():
+    from tt_kernel.launchers import KINDS
+
+    text = _example_text()
+    keys = {k for launcher in KINDS.values() for k in launcher.RUNTIME_KEYS}
+    missing = sorted(k for k in keys if k not in text)
+    assert not missing, f"example does not mention runtime keys: {missing}"
+
+
+def test_the_example_mentions_every_kind():
+    from tt_kernel.launchers import KINDS
+
+    text = _example_text()
+    assert not [k for k in KINDS if k not in text]

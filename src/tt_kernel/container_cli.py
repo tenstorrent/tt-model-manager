@@ -220,7 +220,7 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
     if not no_weights and manifest.weights:
         try:
             with console.step("weights → host HF cache") as st:
-                path = _download_weights(manifest.weights.repo_id)
+                path = _download_weights(manifest.weights)
                 st.detail(str(path))
         except Exception as e:  # noqa: BLE001
             console.note(
@@ -233,10 +233,21 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
     console.note(f"next:  tt-model serve {repo_id}", marker="→")
 
 
-def _download_weights(weights_repo: str) -> Path:
+def _download_weights(ref) -> Path:
+    """Fetch the weights into the HOST HF cache, honouring whatever the author pinned.
+
+    A revision is the difference between "the weights that were validated" and "whatever
+    the default branch points at today", so it has to reach snapshot_download rather than
+    just being recorded in the manifest.
+    """
     from huggingface_hub import snapshot_download
 
-    return Path(snapshot_download(repo_id=weights_repo))
+    return Path(snapshot_download(
+        repo_id=ref.repo_id,
+        revision=ref.revision,
+        allow_patterns=ref.allow_patterns,
+        ignore_patterns=ref.ignore_patterns,
+    ))
 
 
 # ----------------------------------------------------------------------------- serve

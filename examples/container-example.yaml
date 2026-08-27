@@ -8,7 +8,11 @@ schema: "5.1"
 
 repo: you/my-model              # the HF repo `push` publishes to
 name: my-model
-weights: org/Weights-7B         # a POINTER: downloaded to the HOST HF cache, never baked
+# A POINTER: downloaded to the HOST HF cache at pull time, never baked into the image.
+# A bare id follows the repo's default branch, so a consumer may get different weights
+# from the ones you validated — pin a revision to prevent that:
+#   weights: {repo: org/Weights-7B, revision: <sha>, ignore_patterns: ["*.pt"]}
+weights: org/Weights-7B
 # The serving stack inside the image:
 #   vllm-plugin  stock vLLM from PyPI + the standalone tenstorrent/vllm-tt-plugin.
 #                Upstream vLLM's platform-plugin API means a hardware backend no longer
@@ -20,6 +24,8 @@ arch: blackhole                 # fixed by the build; every profile shares it
 
 image:
   registry: hf                  # default: OCI blobs ride inside the HF repo under image/.
+  # repository: my-model        # only for a real registry: the name under it. Defaults
+                                # to `name` above.
                                 # Set to e.g. ghcr.io/tenstorrent to publish the image to a
                                 # real registry instead — the repo then carries a pointer and
                                 # plain `docker pull` works for people without tt-model.
@@ -34,8 +40,16 @@ source:
   python: "3.12"
 
 runtime:
-  # The plugin monkeypatches vLLM internals, so this pin is load-bearing, not cosmetic.
+  # vLLM itself — a DIFFERENT package from the plugin below. The plugin monkeypatches
+  # vLLM internals, so whichever form you choose is load-bearing, not cosmetic.
+  #   {version}  a released vLLM, built from sdist in the image with
+  #              VLLM_TARGET_DEVICE=empty (the published wheel is the CUDA build)
+  #   {wheel}    the empty-target wheel YOU built — fastest, and exactly the binary you
+  #              validated against. This is what v5 shipped via --vllm-wheel.
+  #   {path}     a local vLLM source tree, built in the image
   vllm: {version: "0.24.0"}
+  # vllm: {wheel: /path/to/dist/vllm-*.whl}
+  # vllm: {path: /path/to/vllm}
 
   # THE DEFAULT: your own checkout, staged into the image the same way source.tt_metal
   # is. Uncommitted work ships, nothing is fetched, and what you serve is what you
@@ -58,6 +72,15 @@ runtime:
   # extension: models/autoports/my_model/vllm_ext  # optional: a pip-installable ext
   lock: requirements.lock                           # optional but strongly recommended
 
+  # Extra local wheels installed alongside the engine, last, so they win over anything
+  # resolved above. (v5 called this --extra-wheel.)
+  # wheels:
+  #   - /path/to/my-private-lib-1.0-py3-none-any.whl
+
+  # Extra pip resolution overrides, on top of the numpy<2 / opencv pair tt-model always
+  # applies. Only needed when a dependency conflict is specific to your model.
+  # overrides: ["some-package<2"]
+
 serve:                          # defaults every profile inherits
   port: 8000
   block_size: 64                # required — the TT backend rejects vLLM's default
@@ -67,6 +90,23 @@ serve:                          # defaults every profile inherits
   capabilities:
     tool_parser: hermes         # e.g. hermes | llama3_json | mistral | qwen3_coder
     reasoning_parser: deepseek_r1
+
+  # Structured launcher config, rendered into --additional-config as JSON. The `tt` block
+  # is the Tenstorrent backend's own settings.
+  additional_config:
+    tt:
+      sample_on_device_mode: all
+      trace_region_size: 50331648
+      fabric_config: FABRIC_1D_RING
+
+  # Environment for the server process, on top of what the image bakes in. MESH_DEVICE is
+  # NOT listed here — it is derived from mesh_device above.
+  env:
+    ARCH_NAME: blackhole
+    TT_METAL_OPERATION_TIMEOUT_SECONDS: "120.0"
+
+  # kind: vllm-fork only — the readiness runner's --server-timeout.
+  # server_timeout: 900
 
   # Anything else you would type after `vllm serve`. Prefer a named field above when one
   # exists; these are passed through verbatim and cannot be validated.
@@ -79,6 +119,7 @@ serve:                          # defaults every profile inherits
 # hardware — e.g. max_num_seqs 1 for one interactive user at full speed vs 32 for a fleet.
 serve_profiles:                 # ONE image serves ALL of these; pick at `serve` time
   - name: p150x2
+    description: One interactive user at full speed.   # shown by `tt-model profiles`
     hardware: p150x2
     mesh_device: P150x2         # the plugin's closed enum, validated at load
     max_num_seqs: 8
@@ -89,6 +130,19 @@ serve_profiles:                 # ONE image serves ALL of these; pick at `serve`
     max_num_seqs: 32
     max_model_len: 131072
 default_profile: p150x4
+
+# ---------------------------------------------------------------------------------
+# kind: vllm-fork — the OLDER arrangement: the tenstorrent/vllm fork with the plugin
+# in-tree, both installed editable, launched through tt-metal's readiness runner. Use it
+# for a model whose serving recipe is that runner. Its runtime block looks like:
+#
+#   kind: vllm-fork
+#   runtime:
+#     vllm: {repo: https://github.com/tenstorrent/vllm, ref: <sha>}   # plugin is in-tree
+#     model_dir: models/autoports/my_model   # the runner launches by --model-dir;
+#                                            # must be covered by source.code
+#     lock: requirements.lock
+# ---------------------------------------------------------------------------------
 
 verify:                         # build-time assertions run INSIDE the finished image
   - "import models.autoports.my_model.tt as m; assert m"

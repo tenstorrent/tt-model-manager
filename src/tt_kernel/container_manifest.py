@@ -168,6 +168,24 @@ class Source(BaseModel):
         return v
 
 
+class WeightsSpec(BaseModel):
+    """The weights, as a POINTER. Never baked into the image.
+
+    ``revision`` matters more than it looks: without it a consumer downloads whatever the
+    repo's default branch points at TODAY, which may not be what the author validated —
+    the one input to a "fully pinned" package that was left floating. ``allow_patterns`` /
+    ``ignore_patterns`` are passed straight to ``snapshot_download`` for repos carrying
+    several formats where only one is wanted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    repo: str
+    revision: Optional[str] = None
+    allow_patterns: Optional[List[str]] = None
+    ignore_patterns: Optional[List[str]] = None
+
+
 class ImageSettings(BaseModel):
     """Where the built image is published. Defaults to riding inside the HF repo."""
 
@@ -199,7 +217,9 @@ class ContainerManifest(BaseModel):
     schema_version: str = Field(alias="schema", default=SCHEMA_VERSION)
     repo: str  # the HF repo this publishes to, e.g. you/my-model
     name: str
-    weights: str  # HF weights id — downloaded to the HOST HF cache, never baked in
+    # An HF id, or a WeightsSpec to pin a revision / select files. Downloaded to the
+    # HOST HF cache at pull time; never baked into the image.
+    weights: Union[str, WeightsSpec]
     kind: str = "vllm-plugin"  # launcher flavour; see tt_kernel.launchers.KINDS
     arch: str  # blackhole | wormhole_b0 — fixed by the build
 
@@ -234,6 +254,21 @@ class ContainerManifest(BaseModel):
         thing by construction rather than by two code paths agreeing.
         """
         return self.serve_profiles or [ServeProfile(name=DEFAULT_PROFILE_NAME)]
+
+    @property
+    def weights_repo(self) -> str:
+        return self.weights if isinstance(self.weights, str) else self.weights.repo
+
+    @property
+    def weights_ref(self) -> WeightsRef:
+        if isinstance(self.weights, str):
+            return WeightsRef(repo=self.weights)
+        return WeightsRef(
+            repo=self.weights.repo,
+            revision=self.weights.revision,
+            allow_patterns=self.weights.allow_patterns,
+            ignore_patterns=self.weights.ignore_patterns,
+        )
 
     def profile_names(self) -> List[str]:
         return [p.name for p in self.effective_profiles()]
@@ -279,9 +314,9 @@ class ContainerManifest(BaseModel):
             raise ContainerManifestError(
                 f"repo must be a namespaced HF id (org/name), got {self.repo!r}"
             )
-        if "/" not in self.weights:
+        if "/" not in self.weights_repo:
             raise ContainerManifestError(
-                f"weights must be a namespaced HF id (org/name), got {self.weights!r}"
+                f"weights must be a namespaced HF id (org/name), got {self.weights_repo!r}"
             )
 
         names = self.profile_names()
@@ -384,7 +419,7 @@ class ContainerManifest(BaseModel):
                 or datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 hostname=hostname if hostname is not None else socket.gethostname(),
             ),
-            weights=WeightsRef(repo=self.weights),
+            weights=self.weights_ref,
             container=ContainerSpec(
                 image=ImageRef(
                     registry=self.image.registry,

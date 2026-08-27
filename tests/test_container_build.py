@@ -781,3 +781,121 @@ def test_an_unpushed_commit_is_reported_as_normal_not_as_a_defect(tmp_path, monk
     assert "that is fine" in out
     assert "push the branch" not in out          # no imperative to fix a non-problem
     assert "⚠" not in out                        # informational, not a warning
+
+def _rt(**over):
+    rt = json.loads(json.dumps(BASE))["runtime"]
+    rt.update(over)
+    return rt
+
+
+def test_a_local_vllm_wheel_is_staged_and_installed(tmp_path, monkeypatch):
+    """v5's --vllm-wheel: the binary the author actually ran, not a rebuild that may
+    resolve differently."""
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    wheel = tmp_path / "vllm-0.24.0+empty-py3-none-any.whl"
+    wheel.write_text("wheel")
+    staged = build.stage(
+        _manifest_file(tmp_path, metal, runtime=_rt(vllm={"wheel": str(wheel)})),
+        out_root=tmp_path / "out")
+    assert (staged.ctx / "wheels" / wheel.name).is_file()
+    assert staged.built["vllm"] == {"wheel": wheel.name}
+
+    from tt_kernel.container_manifest import load_container_manifest
+    from tt_kernel.launchers import launcher_for
+    m = load_container_manifest(
+        _manifest_file(tmp_path, metal, runtime=_rt(vllm={"wheel": str(wheel)})))
+    lines = "\n".join(launcher_for(m.kind).install_lines(m))
+    assert "/ctx/wheels/vllm-*.whl" in lines
+    assert "--no-binary vllm" not in lines      # no sdist rebuild
+
+
+def test_a_local_vllm_source_tree_is_staged(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    vllm = tmp_path / "vllm"
+    vllm.mkdir()
+    (vllm / "pyproject.toml").write_text("[project]\nname='vllm'\nversion='0.24.0'\n")
+    staged = build.stage(
+        _manifest_file(tmp_path, metal, runtime=_rt(vllm={"path": str(vllm)})),
+        out_root=tmp_path / "out")
+    assert (staged.ctx / "vllm-src" / "pyproject.toml").is_file()
+
+
+def test_extra_wheels_are_staged(tmp_path, monkeypatch):
+    """v5's --extra-wheel."""
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    extra = tmp_path / "mylib-1.0-py3-none-any.whl"
+    extra.write_text("w")
+    staged = build.stage(
+        _manifest_file(tmp_path, metal, runtime=_rt(wheels=[str(extra)])),
+        out_root=tmp_path / "out")
+    assert (staged.ctx / "wheels" / extra.name).is_file()
+
+
+def test_an_extra_wheel_named_like_vllm_is_refused(tmp_path, monkeypatch):
+    """The Dockerfile installs /ctx/wheels/vllm-*.whl, so such a name would be silently
+    picked up as the engine."""
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    bad = tmp_path / "vllm-plugin-extras-1.0.whl"
+    bad.write_text("w")
+    with pytest.raises(BuildError, match="runtime.vllm.wheel for that"):
+        build.stage(_manifest_file(tmp_path, metal, runtime=_rt(wheels=[str(bad)])),
+                    out_root=tmp_path / "out")
+
+
+def test_a_missing_extra_wheel_is_an_error(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    with pytest.raises(BuildError, match="does not exist"):
+        build.stage(_manifest_file(tmp_path, metal, runtime=_rt(wheels=["/nope.whl"])),
+                    out_root=tmp_path / "out")
+
+
+def test_the_wheel_and_vllm_context_dirs_always_exist(tmp_path, monkeypatch):
+    """The Dockerfile COPYs them unconditionally."""
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    assert (staged.ctx / "wheels").is_dir() and (staged.ctx / "vllm-src").is_dir()
+
+
+def test_a_pinned_weights_revision_reaches_snapshot_download(tmp_path, monkeypatch):
+    """Recording a revision achieves nothing unless pull actually requests it — the gap
+    that let an author's weights and a consumer's differ silently."""
+    from tt_kernel import container_cli
+
+    seen = {}
+    monkeypatch.setattr(container_cli, "snapshot_download", None, raising=False)
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "snapshot_download",
+                        lambda **k: seen.update(k) or "/w")
+    from tt_kernel.manifest import WeightsRef
+    container_cli._download_weights(
+        WeightsRef(repo="org/M", revision="abc123", ignore_patterns=["*.pt"]))
+    assert seen["revision"] == "abc123"
+    assert seen["ignore_patterns"] == ["*.pt"]
+
+
+def test_a_globbed_vllm_wheel_path_resolves(tmp_path, monkeypatch):
+    """Wheel names carry version and platform tags, so authors write dist/vllm-*.whl."""
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "vllm-0.24.0+empty-cp312-cp312-linux_x86_64.whl").write_text("w")
+    staged = build.stage(
+        _manifest_file(tmp_path, metal, runtime=_rt(vllm={"wheel": str(dist / "vllm-*.whl")})),
+        out_root=tmp_path / "out")
+    assert (staged.ctx / "wheels" / "vllm-0.24.0+empty-cp312-cp312-linux_x86_64.whl").is_file()
+
+
+def test_a_wheel_pattern_matching_nothing_is_an_error(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    with pytest.raises(BuildError, match="no wheel matches"):
+        build.stage(_manifest_file(tmp_path, metal,
+                                   runtime=_rt(vllm={"wheel": str(tmp_path / "vllm-*.whl")})),
+                    out_root=tmp_path / "out")

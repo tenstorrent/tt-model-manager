@@ -406,6 +406,58 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
     else:
         plugin_ctx.mkdir(parents=True, exist_ok=True)
 
+    # -- a LOCAL vLLM source tree or wheel, and any extra wheels -----------------------
+    # v5 shipped the author's own vLLM wheel (--vllm-wheel) and extra wheels
+    # (--extra-wheel); both directories are always created because the Dockerfile COPYs
+    # them unconditionally.
+    vllm_ctx = ctx / "vllm-src"
+    wheels_ctx = ctx / "wheels"
+    wheels_ctx.mkdir(parents=True, exist_ok=True)
+    vllm_entry = m.runtime.get("vllm") or {}
+
+    if isinstance(vllm_entry, dict) and vllm_entry.get("path"):
+        src = Path(vllm_entry["path"]).expanduser()
+        if not (src / "setup.py").is_file() and not (src / "pyproject.toml").is_file():
+            raise BuildError(
+                f"runtime.vllm.path: {src} does not look like a python package "
+                "(no pyproject.toml or setup.py)"
+            )
+        _copy_plugin_tree(src, vllm_ctx)
+        vllm_entry["sha"] = _git(src, "rev-parse", "HEAD") or "unknown"
+        vllm_entry["dirty"] = bool(_git(src, "status", "--porcelain"))
+    else:
+        vllm_ctx.mkdir(parents=True, exist_ok=True)
+
+    if isinstance(vllm_entry, dict) and vllm_entry.get("wheel"):
+        # A wheel filename carries the version and platform tags, so authors reach for a
+        # glob (`dist/vllm-*.whl`). Path().glob() rejects an absolute pattern, so split it.
+        pat = Path(vllm_entry["wheel"]).expanduser()
+        if any(ch in pat.name for ch in "*?["):
+            found = sorted(pat.parent.glob(pat.name))
+        else:
+            found = [pat] if pat.is_file() else []
+        if not found:
+            raise BuildError(f"runtime.vllm.wheel: no wheel matches {vllm_entry['wheel']}")
+        # The Dockerfile installs /ctx/wheels/vllm-*.whl, so the name must survive.
+        for w in found:
+            if not w.name.startswith("vllm-"):
+                raise BuildError(
+                    f"runtime.vllm.wheel: {w.name} must be a vllm wheel (vllm-*.whl)"
+                )
+            shutil.copy2(w, wheels_ctx / w.name)
+        vllm_entry["wheel_name"] = found[0].name
+
+    for extra in (m.runtime.get("wheels") or []):
+        w = Path(extra).expanduser()
+        if not w.is_file():
+            raise BuildError(f"runtime.wheels: {w} does not exist")
+        if w.name.startswith("vllm-"):
+            raise BuildError(
+                f"runtime.wheels: {w.name} would be picked up as the vLLM wheel; use "
+                "runtime.vllm.wheel for that"
+            )
+        shutil.copy2(w, wheels_ctx / w.name)
+
     # -- code/ ----------------------------------------------------------------------
     code_dir = ctx / "code"
     if metal.mode == "local":
@@ -459,6 +511,9 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
     }
     for key in ("vllm", "plugin"):
         entry = m.runtime.get(key)
+        if isinstance(entry, dict) and entry.get("wheel_name"):
+            built[key] = {"wheel": entry["wheel_name"]}
+            continue
         if isinstance(entry, dict) and entry.get("sha"):
             built[key] = {"sha": entry["sha"]}
             if entry.get("repo"):
@@ -497,7 +552,7 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
         "TT_MODEL_KIND": m.kind,
         "MODEL_NAME": m.name,
         "MODEL_REPO": m.repo,
-        "MODEL_WEIGHTS": m.weights,
+        "MODEL_WEIGHTS": m.weights_repo,
         "MODEL_ARCH": m.arch,
         "MODEL_PROFILES": ",".join(m.profile_names()),
     }
@@ -778,7 +833,9 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object],
         "",
         "## What is inside",
         "",
-        f"- **weights**: [`{m.weights}`](https://huggingface.co/{m.weights}) — "
+        f"- **weights**: [`{m.weights_repo}`](https://huggingface.co/{m.weights_repo})"
+        + (f" at `{m.weights_ref.revision}`" if m.weights_ref.revision else "")
+        + " — "
         "downloaded to *your* HF cache at pull time, never baked into the image",
         f"- **arch**: {m.arch}",
         f"- **serving stack**: `{m.kind}`",

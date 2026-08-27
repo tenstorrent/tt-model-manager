@@ -59,6 +59,12 @@ if TYPE_CHECKING:
 #: Where `package` stages a local plugin checkout inside the build context, and where
 #: the Dockerfile puts it in the builder stage.
 PLUGIN_CTX_DIR = "/ctx/plugin-src"
+#: A local vLLM source tree, staged the same way.
+VLLM_CTX_DIR = "/ctx/vllm-src"
+#: The author's own vLLM wheel (v5 shipped one via --vllm-wheel).
+VLLM_CTX_WHEEL = "/ctx/wheels/vllm-*.whl"
+#: Extra local wheels to install alongside the engine (v5: --extra-wheel).
+WHEELS_CTX_DIR = "/ctx/wheels"
 
 
 class LauncherError(ValueError):
@@ -89,7 +95,8 @@ class VllmPluginLauncher:
     name = "vllm-plugin"
 
     #: keys the manifest's ``runtime:`` block may contain for this kind
-    RUNTIME_KEYS = ("vllm", "plugin", "extension", "extra_models_dir", "lock", "overrides")
+    RUNTIME_KEYS = ("vllm", "plugin", "extension", "extra_models_dir", "lock",
+                    "overrides", "wheels")
 
     #: the log line whose appearance means the OpenAI server is accepting requests
     READY_LINE = "Application startup complete"
@@ -113,13 +120,23 @@ class VllmPluginLauncher:
             raise ContainerManifestError(
                 "runtime.vllm.repo describes the tenstorrent/vllm fork — that is kind "
                 "vllm-fork, not vllm-plugin. Either set kind: vllm-fork, or give "
-                'runtime.vllm.version for a released vLLM.'
+                "runtime.vllm.version / .wheel / .path."
             )
-        if not vllm.get("version"):
+        vllm_sources = [k for k in ("version", "wheel", "path") if vllm.get(k)]
+        if not vllm_sources:
             raise ContainerManifestError(
-                'kind vllm-plugin requires runtime.vllm.version (a released vLLM, e.g. '
-                '"0.24.0"). The plugin monkeypatches vLLM internals, so this pin is '
+                "kind vllm-plugin requires runtime.vllm as one of:\n"
+                '  {version: "0.24.0"}   a released vLLM, built from sdist in the image\n'
+                "  {wheel: /path/*.whl}  the empty-target wheel YOU built — fastest, and\n"
+                "                        exactly the binary you validated against\n"
+                "  {path: /path/to/vllm} a local vLLM source tree, built in the image\n"
+                "The plugin monkeypatches vLLM internals, so whichever you choose is "
                 "load-bearing, not cosmetic."
+            )
+        if len(vllm_sources) > 1:
+            raise ContainerManifestError(
+                "runtime.vllm: give exactly one of version / wheel / path, got "
+                + " and ".join(vllm_sources)
             )
         plugin = rt.get("plugin") or {}
         sources = {
@@ -163,10 +180,30 @@ class VllmPluginLauncher:
 
     def install_lines(self, m: "ContainerManifest") -> List[str]:
         rt = m.runtime
-        version = rt["vllm"]["version"]
+        vllm = rt["vllm"]
         plugin = rt.get("plugin") or {}
         lines: List[str] = []
 
+        # A wheel or a local tree the author staged: install it directly. A wheel is what
+        # v5 shipped (`--vllm-wheel`) and is both the fastest route and the most faithful
+        # — it is the binary the author actually ran, not a rebuild that may resolve
+        # differently. Neither needs the sdist build or the override file below.
+        if vllm.get("wheel"):
+            return (
+                [f'uv pip install --python "$VENV/bin/python" {VLLM_CTX_WHEEL} '
+                 f"--extra-index-url {self.PYTORCH_CPU_INDEX} "
+                 f"--index-strategy unsafe-best-match"]
+                + self._post_engine_lines(m, plugin)
+            )
+        if vllm.get("path"):
+            return (
+                [f'VLLM_TARGET_DEVICE=empty uv pip install --python "$VENV/bin/python" '
+                 f"{VLLM_CTX_DIR} --extra-index-url {self.PYTORCH_CPU_INDEX} "
+                 f"--index-strategy unsafe-best-match"]
+                + self._post_engine_lines(m, plugin)
+            )
+
+        version = vllm["version"]
         if rt.get("lock"):
             # The lock IS the dependency set: vLLM's own requirements are already in it,
             # so vLLM installs --no-deps and nothing resolves at build time.
@@ -187,6 +224,12 @@ class VllmPluginLauncher:
                 f"--no-binary vllm vllm=={version} --override /tmp/tt-overrides.txt "
                 f"--extra-index-url {self.PYTORCH_CPU_INDEX} --index-strategy unsafe-best-match",
             ]
+        return lines + self._post_engine_lines(m, plugin)
+
+    def _post_engine_lines(self, m: "ContainerManifest", plugin: Dict) -> List[str]:
+        """Everything after vLLM itself is installed, whichever route it came by."""
+        rt = m.runtime
+        lines: List[str] = []
         # transformers imports torchaudio if it is merely INSTALLED, and the wheel that
         # rides along with CPU torch is unloadable — the validated recipe removes it.
         lines.append('uv pip uninstall --python "$VENV/bin/python" torchaudio || true')
@@ -215,6 +258,13 @@ class VllmPluginLauncher:
         if rt.get("extension"):
             lines.append(
                 f'uv pip install --python "$VENV/bin/python" /opt/tt-metal/{rt["extension"]}'
+            )
+        if rt.get("wheels"):
+            # Extra local wheels the author needs alongside the engine — v5's
+            # `--extra-wheel`. Staged into the context by `package`; installed last so
+            # they can override anything resolved above.
+            lines.append(
+                f'uv pip install --python "$VENV/bin/python" {WHEELS_CTX_DIR}/*.whl'
             )
         return lines
 

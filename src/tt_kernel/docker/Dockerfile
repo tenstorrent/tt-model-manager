@@ -109,6 +109,10 @@ RUN SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TTNN="${SCM_VERSION}" \
 # an empty directory otherwise — `package` always creates it so this COPY cannot fail.
 COPY install_engine.sh requirements.lock* /ctx/
 COPY plugin-src /ctx/plugin-src
+# A local vLLM source tree and any local wheels (the author's own vLLM build, plus
+# extras). Both are empty directories unless the manifest asks for them.
+COPY vllm-src /ctx/vllm-src
+COPY wheels /ctx/wheels
 RUN bash /ctx/install_engine.sh \
     && uv pip install --python "$VENV/bin/python" tt-smi
 
