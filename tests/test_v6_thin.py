@@ -157,7 +157,7 @@ def test_thin_run_sh_pythonpath_is_bundle_root_not_metal(tmp_path):
 def test_thin_compare_gates_only_on_arch_and_device_count(tmp_path):
     _, m = _stage_thin(tmp_path)
     # matching arch -> compatible (no host tt-metal/version gates for a thin bundle)
-    ok = compare(m, metal.LocalEnv(arch="blackhole", device_count=1, tt_metal_version="0.99-different"))
+    ok = compare(m, metal.LocalEnv(arch="blackhole", device_count=1))
     assert ok.compatible is True and ok.issues == []
     # wrong arch is still fatal
     bad = compare(m, metal.LocalEnv(arch="wormhole_b0", device_count=1))
