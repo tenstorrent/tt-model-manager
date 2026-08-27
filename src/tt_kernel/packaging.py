@@ -374,12 +374,25 @@ def stage_package(
     extra_arts = [_copy_wheel(w) for w in (extra_wheels or [])]
 
     # Embed the author's modified metal-community tree (skip caches/venvs/artifacts).
+    # symlinks=True: a built tree routinely carries dangling links (tt-metal has
+    # third_party/umd/compile_commands.json -> build/compile_commands.json, and capnproto
+    # ships ekam-rules links into sources it does not vendor). Following them raises
+    # FileNotFoundError and aborts the whole package, so copy links as links.
+    # .cpmcache: CMake's build-time source cache, 3.7GB on a normal tt-metal checkout.
+    # It is only needed to *build* metal; a bundle that already ships compiled wheels
+    # never reads it, and including it roughly doubles the bundle for nothing.
     shutil.copytree(
         metal_dir,
         staged / METAL_DIR,
+        symlinks=True,
         ignore=shutil.ignore_patterns(
             "__pycache__", "*.pyc", ".git", "venv", ".venv", "model_cache",
-            "generated", "*.log", ".pytest_cache", "dist", "build_*",
+            "generated", "*.log", ".pytest_cache", "dist", "build_*", ".cpmcache",
+            # tt-metal's venv is named python_env (build_metal.sh creates it), which the
+            # generic "venv"/".venv" patterns miss. It is ~4GB and embedding it defeats the
+            # point of shipping wheels. tt_cache is the TT_CACHE_PATH weight/kernel cache,
+            # another ~2GB of regenerable data that "model_cache" does not match.
+            "python_env", "tt_cache",
         ),
     )
 
