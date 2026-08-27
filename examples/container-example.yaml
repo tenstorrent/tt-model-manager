@@ -9,8 +9,13 @@ schema: "5.1"
 repo: you/my-model              # the HF repo `push` publishes to
 name: my-model
 weights: org/Weights-7B         # a POINTER: downloaded to the HOST HF cache, never baked
-kind: vllm                      # the tenstorrent/vllm fork + its in-tree plugin
-                                # (the only stack tt-model serves today)
+# The serving stack inside the image:
+#   vllm-plugin  stock vLLM from PyPI + the standalone tenstorrent/vllm-tt-plugin.
+#                Upstream vLLM's platform-plugin API means a hardware backend no longer
+#                needs a fork; this is where Tenstorrent is heading.
+#   vllm-fork    the tenstorrent/vllm fork, plugin in-tree, both installed editable.
+#                The older arrangement, and what `tt-model install` provisions on a host.
+kind: vllm-plugin
 arch: blackhole                 # fixed by the build; every profile shares it
 
 image:
@@ -23,17 +28,26 @@ source:
   tt_metal: /path/to/your/tt-metal   # or {repo: ..., ref: ...} to clone in CI
   code:                              # EXACTLY what ships. An allowlist, never a denylist.
     - models/common                  # the readiness runner lives here
-    - models/autoports/my_model      # must COVER runtime.model_dir below, or the
-                                     # launcher looks for a dir that never entered the image
+    - models/autoports/my_model      # must COVER runtime.extra_models_dir below, or the
+                                     # plugin scans a dir that never entered the image
   ubuntu: "22.04"
   python: "3.12"
 
 runtime:
-  # The fork, pinned to the sha you VALIDATED with — not a branch name.
-  vllm: {repo: https://github.com/tenstorrent/vllm, ref: bf98d556}
-  model_dir: models/autoports/my_model   # the readiness runner launches by --model-dir
-  extension: models/autoports/my_model/vllm_ext   # optional
-  lock: requirements.lock                          # optional but recommended
+  # The plugin monkeypatches vLLM internals, so this pin is load-bearing, not cosmetic.
+  vllm: {version: "0.24.0"}
+
+  # Pin the SHA you VALIDATED with — never a branch. A branch moves, and a plugin that
+  # moved under a validated model is exactly the bug this whole path exists to prevent.
+  plugin: {repo: https://github.com/tenstorrent/vllm-tt-plugin, ref: bc4af2d5}
+
+  # The directory the plugin SCANS for per-model vllm_metadata.json files (it looks at
+  # the CHILDREN of this dir). Layouts differ between models, so state it outright.
+  # Must be covered by source.code above.
+  extra_models_dir: models/autoports/my_model/vllm_bundle
+
+  # extension: models/autoports/my_model/vllm_ext  # optional: a pip-installable ext
+  lock: requirements.lock                           # optional but strongly recommended
 
 serve:                          # defaults every profile inherits
   port: 8000

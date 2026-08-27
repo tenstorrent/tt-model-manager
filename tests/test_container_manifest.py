@@ -26,7 +26,7 @@ BASE = {
     "repo": "you/my-model",
     "name": "my-model",
     "weights": "org/Weights-7B",
-    "kind": "vllm",
+    "kind": "vllm-plugin",
     "arch": "blackhole",
     "source": {
         "tt_metal": "/tmp/tt-metal",
@@ -35,8 +35,8 @@ BASE = {
         "python": "3.12",
     },
     "runtime": {
-        "vllm": {"repo": "https://github.com/tenstorrent/vllm", "ref": "bf98d556"},
-        "model_dir": "models/common",
+        "vllm": {"version": "0.24.0"},
+        "plugin": {"repo": "https://github.com/tenstorrent/vllm-tt-plugin", "ref": "bc4af2d5"},
     },
     "serve": {"port": 8000, "block_size": 64},
     "serve_profiles": [
@@ -48,6 +48,16 @@ BASE = {
             "max_model_len": 131072,
         }
     ],
+}
+
+
+# The other kind, as an override: `_mani(**FORK)`.
+FORK = {
+    "kind": "vllm-fork",
+    "runtime": {
+        "vllm": {"repo": "https://github.com/tenstorrent/vllm", "ref": "bf98d556"},
+        "model_dir": "models/common",
+    },
 }
 
 
@@ -119,12 +129,16 @@ def test_unknown_kind_is_refused():
         _mani(kind="tensorrt").validate_semantics()
 
 
-def test_the_stock_vllm_shape_gets_a_specific_diagnosis():
-    """An author who writes runtime.vllm.version described a real stack we do not serve
-    yet; say that, rather than "missing repo/ref"."""
-    with pytest.raises(ContainerManifestError, match="stock vLLM from PyPI"):
-        _mani(runtime={"vllm": {"version": "0.24.0"}, "model_dir": "models/common"}
-              ).validate_semantics()
+def test_a_fork_runtime_under_the_plugin_kind_names_the_right_kind():
+    """The two stacks are easy to mix up; each diagnosis must name the other kind."""
+    with pytest.raises(ContainerManifestError, match="that is kind vllm-fork"):
+        _mani(runtime={"vllm": {"repo": "https://x/y", "ref": "main"}}).validate_semantics()
+
+
+def test_a_stock_runtime_under_the_fork_kind_names_the_right_kind():
+    with pytest.raises(ContainerManifestError, match="that is kind vllm-plugin"):
+        _mani(kind="vllm-fork", runtime={"vllm": {"version": "0.24.0"},
+                                         "model_dir": "models/common"}).validate_semantics()
 
 
 def test_unnamespaced_repo_is_refused():

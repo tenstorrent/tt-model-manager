@@ -16,7 +16,7 @@ import pytest
 from tt_kernel.container_manifest import ContainerManifest
 from tt_kernel.launchers import launcher_for
 
-from test_container_manifest import BASE
+from test_container_manifest import BASE, FORK
 
 DOCKER_DIR = Path(__file__).parent.parent / "src" / "tt_kernel" / "docker"
 DOCKERFILE = (DOCKER_DIR / "Dockerfile").read_text()
@@ -32,11 +32,13 @@ def _mani(**over) -> ContainerManifest:
 
 
 def _install(**over) -> str:
-    return "\n".join(launcher_for("vllm").install_lines(_mani(**over)))
+    m = _mani(**over)
+    return "\n".join(launcher_for(m.kind).install_lines(m))
 
 
 def _verify(**over) -> str:
-    return "\n".join(launcher_for("vllm").verify_lines(_mani(**over)))
+    m = _mani(**over)
+    return "\n".join(launcher_for(m.kind).verify_lines(m))
 
 
 def _verify_payloads(**over) -> str:
@@ -48,7 +50,8 @@ def _verify_payloads(**over) -> str:
     import shlex
 
     out = []
-    for line in launcher_for("vllm").verify_lines(_mani(**over)):
+    m = _mani(**over)
+    for line in launcher_for(m.kind).verify_lines(m):
         argv = shlex.split(line)
         assert argv[1] == "-c", argv
         out.append(argv[2])
@@ -58,8 +61,37 @@ def _verify_payloads(**over) -> str:
 # ------------------------------------------------------------------ install_engine.sh
 
 
-def test_the_fork_is_cloned_and_checked_out_at_the_pinned_ref():
+def test_the_plugin_is_cloned_at_the_pinned_sha_and_installed_non_editable():
+    """Non-editable: the clone need not survive into the runtime image."""
     s = _install()
+    assert "git clone https://github.com/tenstorrent/vllm-tt-plugin /tmp/vllm-tt-plugin" in s
+    assert "checkout bc4af2d5" in s
+    assert "rm -rf /tmp/vllm-tt-plugin" in s
+
+
+def test_the_numpy_opencv_conflict_is_resolved_by_an_override():
+    """ttnn pins numpy<2; recent vLLM's opencv wants numpy>=2. pip cannot express the
+    resolution; uv's --override can."""
+    s = _install()
+    assert "numpy>=1.24.4,<2" in s and "opencv-python-headless==4.11.0.86" in s
+    assert "--override /tmp/tt-overrides.txt" in s
+
+
+def test_torchaudio_is_removed_after_the_vllm_install():
+    """transformers imports it if it is merely INSTALLED, and the wheel riding along with
+    CPU torch is unloadable."""
+    assert "uv pip uninstall" in _install() and "torchaudio" in _install()
+
+
+def test_a_pypi_plugin_release_skips_the_clone():
+    rt = json.loads(json.dumps(BASE))["runtime"]
+    rt["plugin"] = {"version": "1.2.3"}
+    s = _install(runtime=rt)
+    assert "vllm-tt-plugin==1.2.3" in s and "git clone" not in s
+
+
+def test_the_fork_is_cloned_and_checked_out_at_the_pinned_ref():
+    s = _install(**FORK)
     assert "git clone https://github.com/tenstorrent/vllm /opt/vllm" in s
     assert "checkout bf98d556" in s
 
@@ -67,7 +99,7 @@ def test_the_fork_is_cloned_and_checked_out_at_the_pinned_ref():
 def test_a_resolved_sha_wins_over_the_authored_ref():
     """`package` rewrites ref -> sha; the build must use the resolved one."""
     rt = json.loads(json.dumps(BASE))["runtime"]
-    rt["vllm"]["sha"] = "deadbeef"
+    rt["plugin"]["sha"] = "deadbeef"
     assert "checkout deadbeef" in _install(runtime=rt)
 
 
@@ -79,14 +111,14 @@ def test_vllm_builds_with_the_empty_device_target_and_the_cpu_torch_index():
 
 
 def test_the_fork_and_its_in_tree_plugin_are_both_installed_editable():
-    s = _install()
+    s = _install(**FORK)
     assert "-e /opt/vllm " in s or "-e /opt/vllm\n" in s
     assert "-e /opt/vllm/plugins/vllm-tt-plugin" in s
 
 
 def test_git_metadata_is_dropped_but_the_checkout_survives():
     """Editable installs mean /opt/vllm must exist in the runtime image, .git need not."""
-    assert "rm -rf /opt/vllm/.git" in _install()
+    assert "rm -rf /opt/vllm/.git" in _install(**FORK)
 
 
 def test_a_lock_file_makes_the_install_no_deps():
@@ -111,7 +143,7 @@ def test_the_model_extension_is_installed_from_the_staged_tree():
 def test_repo_and_ref_are_shell_quoted():
     """These come from a YAML file an author wrote; they end up in a shell script."""
     rt = json.loads(json.dumps(BASE))["runtime"]
-    rt["vllm"]["ref"] = "a b; rm -rf /"
+    rt["plugin"]["ref"] = "a b; rm -rf /"
     assert "'a b; rm -rf /'" in _install(runtime=rt)
 
 
@@ -121,7 +153,8 @@ def test_repo_and_ref_are_shell_quoted():
 def test_verify_checks_the_imports_that_matter():
     s = _verify_payloads()
     assert "import ttnn, vllm, vllm_tt_plugin" in s
-    assert "models.common.readiness_check.run_vllm_server" in s
+    s_fork = _verify_payloads(**FORK)
+    assert "models.common.readiness_check.run_vllm_server" in s_fork
 
 
 def test_verify_asserts_cpu_torch():
@@ -131,17 +164,22 @@ def test_verify_asserts_cpu_torch():
 
 def test_verify_asserts_vllm_resolves_to_the_fork():
     """If vLLM resolves anywhere else, the editable install silently lost."""
-    assert "startswith('/opt/vllm')" in _verify_payloads()
+    assert "startswith('/opt/vllm')" in _verify_payloads(**FORK)
 
 
-def test_verify_checks_extra_models_dir_registers_something_when_an_extension_ships():
+def test_the_plugin_kind_asserts_vllm_did_NOT_resolve_into_the_tree():
+    """Installed non-editable, so a tree-resolved vLLM means something went wrong."""
+    assert "'/tt-metal/' not in vllm.__file__" in _verify_payloads()
+
+
+def test_verify_checks_extra_models_dir_registers_something():
     """A vllm_metadata.json in the wrong place registers ZERO architectures, silently."""
     rt = json.loads(json.dumps(BASE))["runtime"]
-    rt["extension"] = "models/common/vllm_ext"
+    rt["extra_models_dir"] = "models/common"
     assert "registers no models" in _verify_payloads(runtime=rt)
 
 
-def test_no_extra_models_check_without_an_extension():
+def test_no_extra_models_check_when_the_model_uses_the_builtin_registry():
     assert "registers no models" not in _verify_payloads()
 
 

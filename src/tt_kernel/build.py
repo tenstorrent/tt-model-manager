@@ -329,7 +329,19 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
             built[key] = {"repo": entry["repo"], "sha": entry["sha"]}
 
     # -- docker build args ---------------------------------------------------------------
+    # EXTRA_MODELS_DIR is the directory the plugin SCANS for per-model
+    # vllm_metadata.json files. A model may state it outright (extra_models_dir) — the
+    # layouts in the wild differ — or leave it to be derived from a pip-installed
+    # extension. Registering zero architectures is a silent failure, so verify.sh checks
+    # the directory actually contains something.
     ext = m.runtime.get("extension")
+    emd = m.runtime.get("extra_models_dir")
+    if emd:
+        extra_models_dir = f"/opt/tt-metal/{emd}"
+    elif ext:
+        extra_models_dir = f"/opt/tt-metal/{ext}/extra_models"
+    else:
+        extra_models_dir = ""
     build_args = {
         "BASE_IMAGE": BASE_IMAGE_DEFAULT.format(ubuntu=m.source.ubuntu),
         "UBUNTU_VERSION": m.source.ubuntu,
@@ -337,10 +349,10 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
         "METAL_MODE": metal.mode,
         "SCM_VERSION": metal.scm_version,
         "METAL_DESCRIBE": metal.describe or "v0.0.0",
-        "EXTRA_MODELS_DIR": f"/opt/tt-metal/{ext}/extra_models" if ext else "",
-        # suppress builtin registration ONLY when the model ships its own extension —
+        "EXTRA_MODELS_DIR": extra_models_dir,
+        # suppress builtin registration ONLY when the model brings its own registration —
         # "0" for a builtin-registry model would register zero architectures
-        "TT_VLLM_BUILTIN_MODELS": "0" if ext else "",
+        "TT_VLLM_BUILTIN_MODELS": "0" if extra_models_dir else "",
         "TT_MODEL_KIND": m.kind,
         "MODEL_NAME": m.name,
         "MODEL_REPO": m.repo,

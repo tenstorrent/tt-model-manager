@@ -103,9 +103,9 @@ def test_runtime_refs_are_pinned_to_shas(tmp_path, monkeypatch):
     monkeypatch.setattr(build, "resolve_git_ref", lambda repo, ref: "a" * 40)
     metal = _fake_metal(tmp_path)
     staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
-    assert staged.manifest.runtime["vllm"]["sha"] == "a" * 40
-    assert staged.built["vllm"] == {
-        "repo": "https://github.com/tenstorrent/vllm", "sha": "a" * 40}
+    assert staged.manifest.runtime["plugin"]["sha"] == "a" * 40
+    assert staged.built["plugin"] == {
+        "repo": "https://github.com/tenstorrent/vllm-tt-plugin", "sha": "a" * 40}
 
 
 def test_a_full_sha_needs_no_remote_lookup():

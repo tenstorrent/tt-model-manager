@@ -19,7 +19,7 @@ from tt_kernel.container_manifest import ContainerManifest, ContainerManifestErr
 from tt_kernel.launchers import LauncherError, launcher_for
 from tt_kernel.manifest import Manifest
 
-from test_container_manifest import BASE
+from test_container_manifest import BASE, FORK
 
 
 def _wire(**over) -> Manifest:
@@ -94,7 +94,7 @@ def test_the_container_is_named_per_model_and_profile():
 def test_the_image_is_the_last_thing_before_the_command():
     argv = _run_argv(_wire())
     assert "tt-model/my-model:abc123" in argv
-    assert argv.index("tt-model/my-model:abc123") < argv.index("python")
+    assert argv.index("tt-model/my-model:abc123") < argv.index("vllm")
 
 
 def test_hf_token_is_passed_by_NAME_never_by_value(monkeypatch):
@@ -150,10 +150,29 @@ def test_a_registry_hosted_image_runs_and_pulls_by_reference():
 # ------------------------------------------------------------------ launcher argv
 
 
-def test_vllm_serve_argv_golden():
+def test_plugin_serve_argv_golden():
     m = _wire()
     p = m.container.resolve_profile()
-    assert launcher_for("vllm").serve_argv(m, p) == [
+    assert launcher_for("vllm-plugin").serve_argv(m, p) == [
+        "vllm", "serve", "org/Weights-7B",
+        "--max-model-len", "131072",
+        "--max-num-seqs", "32",
+        "--block-size", "64",
+        "--port", "8000",
+    ]
+
+
+def test_the_plugin_kind_hands_the_mesh_over_in_the_environment():
+    m = _wire()
+    env = launcher_for("vllm-plugin").serve_env(m, m.container.resolve_profile())
+    assert env["MESH_DEVICE"] == "P150x4"
+    assert env["HF_MODEL"] == "org/Weights-7B"
+
+
+def test_fork_serve_argv_golden():
+    m = _wire(**FORK)
+    p = m.container.resolve_profile()
+    assert launcher_for("vllm-fork").serve_argv(m, p) == [
         "python", "-m", "models.common.readiness_check.run_vllm_server",
         "--stages", "serve",
         "--model-dir", "models/common",
@@ -166,26 +185,19 @@ def test_vllm_serve_argv_golden():
     ]
 
 
-def test_the_mesh_is_forwarded_as_a_grid_not_as_MESH_DEVICE():
+def test_the_fork_forwards_the_mesh_as_a_grid_not_as_MESH_DEVICE():
     """The readiness runner takes --mesh-device; it does not read a MESH_DEVICE env var."""
-    m = _wire()
+    m = _wire(**FORK)
     p = m.container.resolve_profile()
-    assert "MESH_DEVICE" not in launcher_for("vllm").serve_env(m, p)
-    assert "(1, 4)" in launcher_for("vllm").serve_argv(m, p)
+    assert "MESH_DEVICE" not in launcher_for("vllm-fork").serve_env(m, p)
+    assert "(1, 4)" in launcher_for("vllm-fork").serve_argv(m, p)
 
 
-def test_serve_env_carries_the_model_id():
-    """tt_transformers-style adapters read HF_MODEL from env, not from vLLM's --model."""
-    m = _wire()
-    env = launcher_for("vllm").serve_env(m, m.container.resolve_profile())
-    assert env["HF_MODEL"] == "org/Weights-7B"
-
-
-def test_extra_server_args_are_joined_into_one_string():
-    """This runner takes --additional-server-args as ONE string, not loose argv."""
-    m = _wire(serve={"port": 8000, "block_size": 64,
-                     "args": ["--trust-remote-code", ["--seed", "0"]]})
-    argv = launcher_for("vllm").serve_argv(m, m.container.resolve_profile())
+def test_the_fork_joins_extra_server_args_into_one_string():
+    """That runner takes --additional-server-args as ONE string, not loose argv."""
+    m = _wire(**FORK, serve={"port": 8000, "block_size": 64,
+                             "args": ["--trust-remote-code", ["--seed", "0"]]})
+    argv = launcher_for("vllm-fork").serve_argv(m, m.container.resolve_profile())
     assert argv[argv.index("--additional-server-args") + 1] == "--trust-remote-code --seed 0"
 
 
@@ -193,29 +205,36 @@ def test_tool_parser_is_emitted_with_enable_auto_tool_choice():
     """vLLM hard-errors on --tool-call-parser without --enable-auto-tool-choice."""
     m = _wire(serve={"port": 8000, "block_size": 64,
                      "capabilities": {"tool_parser": "hermes"}})
-    argv = launcher_for("vllm").serve_argv(m, m.container.resolve_profile())
-    joined = argv[argv.index("--additional-server-args") + 1]
-    assert joined == "--enable-auto-tool-choice --tool-call-parser hermes"
+    argv = launcher_for("vllm-plugin").serve_argv(m, m.container.resolve_profile())
+    i = argv.index("--enable-auto-tool-choice")
+    assert argv[i + 1:i + 3] == ["--tool-call-parser", "hermes"]
 
 
 def test_reasoning_parser_keeps_its_underscore():
     """typer normalises '_'->'-'; '--reasoning_parser' is the spelling that survives."""
     m = _wire(serve={"port": 8000, "block_size": 64,
                      "capabilities": {"reasoning_parser": "deepseek_r1"}})
-    argv = launcher_for("vllm").serve_argv(m, m.container.resolve_profile())
-    assert "--reasoning_parser deepseek_r1" in argv[argv.index("--additional-server-args") + 1]
+    argv = launcher_for("vllm-plugin").serve_argv(m, m.container.resolve_profile())
+    assert argv[argv.index("--reasoning_parser") + 1] == "deepseek_r1"
 
 
-def test_tt_additional_config_becomes_tt_config():
+def test_the_plugin_kind_passes_additional_config_as_json():
     m = _wire(serve={"port": 8000, "block_size": 64,
                      "additional_config": {"tt": {"k": 1}}})
-    argv = launcher_for("vllm").serve_argv(m, m.container.resolve_profile())
+    argv = launcher_for("vllm-plugin").serve_argv(m, m.container.resolve_profile())
+    assert json.loads(argv[argv.index("--additional-config") + 1]) == {"tt": {"k": 1}}
+
+
+def test_the_fork_lifts_the_tt_block_into_tt_config():
+    m = _wire(**FORK, serve={"port": 8000, "block_size": 64,
+                             "additional_config": {"tt": {"k": 1}}})
+    argv = launcher_for("vllm-fork").serve_argv(m, m.container.resolve_profile())
     assert json.loads(argv[argv.index("--tt-config") + 1]) == {"k": 1}
 
 
 def test_server_timeout_is_passed_when_set():
-    m = _wire(serve={"port": 8000, "block_size": 64, "server_timeout": 900})
-    argv = launcher_for("vllm").serve_argv(m, m.container.resolve_profile())
+    m = _wire(**FORK, serve={"port": 8000, "block_size": 64, "server_timeout": 900})
+    argv = launcher_for("vllm-fork").serve_argv(m, m.container.resolve_profile())
     assert argv[argv.index("--server-timeout") + 1] == "900"
 
 
@@ -227,26 +246,33 @@ def test_an_unknown_kind_is_refused():
         launcher_for("tensorrt")
 
 
-def test_vllm_is_the_only_kind_and_it_means_the_fork():
-    """`kind: vllm` must mean what runtime.kind="vllm" has always meant in this repo:
-    the tenstorrent/vllm fork. One word, one meaning."""
+def test_neither_kind_is_called_plain_vllm():
+    """runtime.kind="vllm" already means the fork in a v4 manifest; reusing the bare word
+    here would give one field two meanings depending on which schema you read."""
     from tt_kernel.launchers import KINDS
 
-    assert sorted(KINDS) == ["vllm"]
+    assert sorted(KINDS) == ["vllm-fork", "vllm-plugin"]
 
 
-def test_the_fork_requires_repo_and_ref():
+def test_the_plugin_kind_requires_a_plugin_source():
     raw = json.loads(json.dumps(BASE))
-    raw["runtime"] = {"vllm": {"repo": "https://github.com/tenstorrent/vllm"},
-                      "model_dir": "models/common"}
-    with pytest.raises(ContainerManifestError, match=r"requires runtime.vllm"):
+    del raw["runtime"]["plugin"]
+    with pytest.raises(ContainerManifestError, match="requires runtime.plugin"):
         ContainerManifest.model_validate(raw).validate_semantics()
 
 
-def test_a_runtime_plugin_block_is_refused():
+def test_the_fork_kind_refuses_a_runtime_plugin_block():
     raw = json.loads(json.dumps(BASE))
+    raw.update(json.loads(json.dumps(FORK)))
     raw["runtime"]["plugin"] = {"repo": "x", "ref": "y"}
     with pytest.raises(ContainerManifestError, match="takes no runtime.plugin"):
+        ContainerManifest.model_validate(raw).validate_semantics()
+
+
+def test_extra_models_dir_must_be_covered_by_the_code_allowlist():
+    raw = json.loads(json.dumps(BASE))
+    raw["runtime"]["extra_models_dir"] = "models/not_shipped"
+    with pytest.raises(ContainerManifestError, match="not covered by source.code"):
         ContainerManifest.model_validate(raw).validate_semantics()
 
 
@@ -260,6 +286,7 @@ def test_an_unknown_runtime_key_is_refused():
 def test_model_dir_must_be_covered_by_the_code_allowlist():
     """Otherwise the launcher looks for a directory that never entered the image."""
     raw = json.loads(json.dumps(BASE))
+    raw.update(json.loads(json.dumps(FORK)))
     raw["runtime"]["model_dir"] = "models/not_shipped"
     with pytest.raises(ContainerManifestError, match="not covered by source.code"):
         ContainerManifest.model_validate(raw).validate_semantics()

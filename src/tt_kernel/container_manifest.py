@@ -200,7 +200,7 @@ class ContainerManifest(BaseModel):
     repo: str  # the HF repo this publishes to, e.g. you/my-model
     name: str
     weights: str  # HF weights id — downloaded to the HOST HF cache, never baked in
-    kind: str = "vllm"  # launcher flavour; see KINDS
+    kind: str = "vllm-plugin"  # launcher flavour; see tt_kernel.launchers.KINDS
     arch: str  # blackhole | wormhole_b0 — fixed by the build
 
     source: Source
