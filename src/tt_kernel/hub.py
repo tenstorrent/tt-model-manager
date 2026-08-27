@@ -382,6 +382,25 @@ class _ActivityTqdm:
     def __iter__(self):
         return iter(())
 
+    # huggingface_hub's multi-file snapshot_download goes through tqdm.contrib.concurrent
+    # .thread_map, whose ensure_lock() calls tqdm_class.get_lock() (and set_lock() when a
+    # lock is supplied) on the CLASS, before any instance exists. Those are part of the
+    # tqdm surface after all, so a stand-in that omits them dies with
+    # "type object '_ActivityTqdm' has no attribute 'get_lock'" on every parallel pull.
+    _lock = None
+
+    @classmethod
+    def get_lock(cls):
+        if cls._lock is None:
+            from threading import RLock
+
+            cls._lock = RLock()
+        return cls._lock
+
+    @classmethod
+    def set_lock(cls, lock):
+        cls._lock = lock
+
     @classmethod
     def _render(cls):
         done = sum(n for n, _ in cls._live.values())
