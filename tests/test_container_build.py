@@ -558,3 +558,15 @@ def test_nothing_skipped_means_an_empty_report(tmp_path, monkeypatch):
     metal = _fake_metal(tmp_path)
     staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
     assert staged.code_skipped == []
+
+
+def test_the_default_serve_script_lands_in_the_build_context(tmp_path, monkeypatch):
+    """It becomes the image's CMD, so a bare `docker run` is configured correctly rather
+    than silently misconfigured."""
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    script = (staged.ctx / "serve-default.sh").read_text()
+    assert script.startswith("#!/bin/bash")
+    assert "exec vllm serve" in script
+    assert "/dev/tenstorrent" in script

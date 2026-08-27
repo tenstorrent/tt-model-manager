@@ -212,6 +212,10 @@ COPY --from=builder --chown=tt:tt /opt/tt-metal/tools /opt/tt-metal/tools
 COPY --from=builder --chown=tt:tt /opt/tt-metal/setup.py /opt/tt-metal/pyproject.toml /opt/tt-metal/
 COPY --chown=tt:tt code/ /opt/tt-metal/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+# The default profile's env + launch command, generated per model. Gives the image a
+# CMD, so `docker run <image>` with the right host flags serves correctly instead of
+# starting a misconfigured server — and refuses with the required flags when it cannot.
+COPY --chmod=0755 serve-default.sh /usr/local/bin/serve-default.sh
 
 ENV VENV=/opt/tt-venv
 ENV VIRTUAL_ENV=/opt/tt-venv
@@ -277,3 +281,5 @@ LABEL org.tenstorrent.tt-model="${MODEL_NAME}" \
       org.tenstorrent.tt-model.profiles="${MODEL_PROFILES}"
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# Overridden by any command given to `docker run`; tt-model always passes one.
+CMD ["/usr/local/bin/serve-default.sh"]

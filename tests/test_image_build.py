@@ -273,8 +273,12 @@ def test_the_verification_run_is_in_the_runtime_stage_after_the_user_switch():
     assert DOCKERFILE.index("USER tt") < DOCKERFILE.index("bash /ctx/verify.sh")
 
 
-def test_the_entrypoint_is_the_last_word():
-    assert DOCKERFILE.rstrip().endswith('ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]')
+def test_the_entrypoint_and_cmd_close_the_file():
+    """ENTRYPOINT was the last word until the image gained a default CMD; the pair is now
+    the tail, and their ORDER matters — CMD is the argv that ENTRYPOINT execs."""
+    tail = [ln for ln in DOCKERFILE.rstrip().splitlines() if ln and not ln.startswith("#")]
+    assert tail[-2] == 'ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]'
+    assert tail[-1] == 'CMD ["/usr/local/bin/serve-default.sh"]' 
 
 
 def test_the_dockerfile_never_mentions_a_specific_serving_stack():
@@ -422,3 +426,75 @@ def test_extra_models_verification_resolves_the_class_not_just_the_file():
     assert "sys.path.append" in s          # mirrors the plugin: append, never insert(0)
     assert "main_class" in s
     assert "registers no models" in s      # the weaker check still holds too
+
+
+# ------------------------------------------------------------------ the default CMD
+#
+# The image had no default command: ENTRYPOINT simply exec'd its arguments, and the
+# correct invocation lived only in the manifest, on the host, inside tt-model. A Docker
+# image invites `docker run`, and run that way the server started MISCONFIGURED — no
+# mesh, no tt additional-config, no builtin-registry suppression — and emitted nonsense
+# with no error anywhere.
+
+
+def _default_serve(**over) -> str:
+    from tt_kernel.build import render_default_serve
+
+    m = _mani(**over)
+    return render_default_serve(m, launcher_for(m.kind))
+
+
+def test_the_default_command_carries_the_serve_env():
+    """These are what `tt-model serve` passes with --env; without them the server runs
+    misconfigured rather than failing."""
+    s = _default_serve()
+    assert "export MESH_DEVICE=" in s
+    assert "export HF_MODEL=" in s
+
+
+def test_the_default_command_is_the_launcher_argv():
+    s = _default_serve()
+    assert "exec vllm serve" in s
+    assert "--block-size" in s and "--max-num-seqs" in s
+
+
+def test_the_default_command_is_a_valid_shell_program():
+    import subprocess
+    import sys
+
+    r = subprocess.run(["bash", "-n"], input=_default_serve(), text=True,
+                       capture_output=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_values_are_shell_quoted():
+    """additional-config is JSON with spaces and braces; unquoted it would be mangled."""
+    s = _default_serve(serve={"port": 8000, "block_size": 64,
+                              "additional_config": {"tt": {"a b": "c d"}}})
+    assert "'{\"tt\": {\"a b\": \"c d\"}}'" in s
+
+
+def test_it_refuses_when_the_devices_are_absent_and_names_the_flags():
+    """`docker run <image>` with no --device is the exact mistake this guards."""
+    s = _default_serve()
+    assert "if [ ! -e /dev/tenstorrent ]" in s
+    assert "tt-model serve" in s
+    assert "--device /dev/tenstorrent" in s
+    assert "/dev/hugepages-1G" in s
+    assert "exit 1" in s
+
+
+def test_the_refusal_runs_before_anything_else():
+    s = _default_serve()
+    assert s.index("/dev/tenstorrent") < s.index("exec vllm")
+
+
+def test_the_dockerfile_sets_CMD_and_keeps_the_entrypoint():
+    assert 'CMD ["/usr/local/bin/serve-default.sh"]' in DOCKERFILE
+    assert 'ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]' in DOCKERFILE
+    # ENTRYPOINT execs "$@", so CMD flows through it and the server is still PID 1
+    assert DOCKERFILE.index("ENTRYPOINT") < DOCKERFILE.index("CMD [")
+
+
+def test_the_script_is_copied_executable():
+    assert "--chmod=0755 serve-default.sh" in DOCKERFILE
