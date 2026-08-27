@@ -52,9 +52,6 @@ SCHEMA_VERSION = CONTAINER_SCHEMA
 # serve profiles: every profile of one manifest shares the arch.
 ARCHES = ("blackhole", "wormhole_b0")
 
-# Launcher flavours. "vllm" is stock vLLM + the standalone TT plugin; "vllm-legacy" is
-# the tt-metal fork with the plugin in-tree (a different entry point and argv shape).
-KINDS = ("vllm", "vllm-legacy")
 
 # The profile synthesized for a manifest that declares none. A model with one
 # configuration — the v5 idiom, where the repo name carries the target
@@ -270,8 +267,14 @@ class ContainerManifest(BaseModel):
             )
         if self.arch not in ARCHES:
             raise ContainerManifestError(f"arch must be one of {ARCHES}, got {self.arch!r}")
-        if self.kind not in KINDS:
-            raise ContainerManifestError(f"kind must be one of {KINDS}, got {self.kind!r}")
+        from .launchers import KINDS, LauncherError, launcher_for
+
+        try:
+            launcher = launcher_for(self.kind)
+        except LauncherError:
+            raise ContainerManifestError(
+                f"kind must be one of {tuple(sorted(KINDS))}, got {self.kind!r}"
+            ) from None
         if "/" not in self.repo:
             raise ContainerManifestError(
                 f"repo must be a namespaced HF id (org/name), got {self.repo!r}"
@@ -319,6 +322,8 @@ class ContainerManifest(BaseModel):
                     f"mesh ({rows * cols} chips) but hardware {merged.hardware!r} "
                     f"implies {chips}"
                 )
+
+        launcher.validate(self)
 
     def validate_sources_exist(self, root: Optional[Path] = None) -> None:
         """Every ``source.code`` entry must exist — a missing one is an ERROR, never a

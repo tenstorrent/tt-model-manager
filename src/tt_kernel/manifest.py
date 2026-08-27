@@ -374,7 +374,7 @@ class ContainerSpec(BaseModel):
     """
 
     image: ImageRef
-    kind: str = "vllm"  # launcher flavour: "vllm" (stock + plugin) | "vllm-legacy" (fork)
+    kind: str = "vllm"
     runtime: Dict[str, object] = Field(default_factory=dict)  # shape is kind-specific
     serve: ServeSettings = Field(default_factory=ServeSettings)
     serve_profiles: List[ServeProfile] = Field(default_factory=list)

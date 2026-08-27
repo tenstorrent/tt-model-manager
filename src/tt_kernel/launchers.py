@@ -1,0 +1,204 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+"""How a container package is launched — one class per ``kind``.
+
+A *kind* is the serving stack inside the image and the command that starts it. It is the
+only stack-specific knowledge in the container path: the Dockerfile is kind-agnostic and
+everything that varies arrives through the hooks below, so adding a kind is a new class
+here plus a registration in :data:`KINDS` — no change to the manifest schema, the image
+build, or any command.
+
+**There is one kind today: ``vllm``, the ``tenstorrent/vllm`` fork with its in-tree
+plugin.** That is deliberately the same thing this repo has always meant by ``vllm``:
+``provision.py`` clones ``tenstorrent/vllm@dev``, ``toolchain.py`` requires
+"tenstorrent/vllm@dev + plugin", and a v4 manifest's ``runtime.kind = "vllm"`` describes
+the plugin as the package "the fork ships alongside it". Reusing the word for anything
+else would give one field two meanings.
+
+A second stack — stock ``vllm==X.Y.Z`` from PyPI plus the standalone public
+``tenstorrent/vllm-tt-plugin`` — is a real and different way to serve, and it is what a
+model built against a released vLLM would want. It is NOT supported here yet: nothing in
+``install``/``doctor``/v4/v5 provisions it, so shipping it would mean the container path
+alone understood a stack the rest of the tool could not. When a model needs it, it is a
+new class in this module (``vllm-stock``) plus a row in :data:`KINDS`.
+
+Two different inputs on purpose:
+
+* ``validate`` runs at AUTHORING time against the YAML the author wrote, because that is
+  where a bad ``runtime:`` block should be caught — before a multi-hour build, not after.
+* ``serve_argv`` / ``serve_env`` / ``ready_probe`` run at CONSUME time against the
+  published manifest, which is all a consumer has.
+
+Argv composition is pure and total: no environment, no filesystem, no clock. That is what
+lets ``serve --print`` be the test surface for every flag we claim to pass.
+
+The build-side hooks (installing the stack into the image, the build-time verification
+RUN) land with the Dockerfile; this module is the serve side.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING, Dict, List
+
+from .manifest import Manifest, ServeProfile
+
+if TYPE_CHECKING:
+    from .container_manifest import ContainerManifest
+
+
+class LauncherError(ValueError):
+    """A launch configuration that must not proceed. The message is user-facing."""
+
+
+def _weights_id(m: Manifest) -> str:
+    if m.weights is None:
+        raise LauncherError("a container package must reference weights by HF repo id")
+    return m.weights.repo_id
+
+
+class VllmLauncher:
+    """``kind: vllm`` — the ``tenstorrent/vllm`` fork with its in-tree plugin.
+
+    Launched through tt-metal's readiness runner rather than ``vllm serve``: models on
+    this stack expect that runner's flag names (``--tt-config``,
+    ``--additional-server-args``, ``--server-timeout``), and it resolves the plugin's
+    config flag against the installed vLLM, forwards an explicit mesh grid, and hands off
+    to a stock ``vllm.entrypoints.openai.api_server``.
+
+    Both the fork and its in-tree plugin install *editable* (the fork's own documented
+    install), so the fork checkout must survive into the runtime image — about 200 MB.
+    """
+
+    name = "vllm"
+
+    #: keys the manifest's ``runtime:`` block may contain for this kind
+    RUNTIME_KEYS = ("vllm", "extension", "lock", "model_dir")
+
+    #: the log line whose appearance means the OpenAI server is accepting requests
+    READY_LINE = "Server ready at"
+
+    def validate(self, m: "ContainerManifest") -> None:
+        from .container_manifest import ContainerManifestError
+
+        rt = m.runtime
+        vllm = rt.get("vllm") or {}
+
+        if vllm.get("version") and not vllm.get("repo"):
+            # The stock-vLLM shape. Say so precisely instead of "missing repo/ref": an
+            # author who wrote this was describing a real stack, just not one we serve.
+            raise ContainerManifestError(
+                "runtime.vllm.version describes stock vLLM from PyPI, which tt-model does "
+                "not serve yet — the only supported stack is the tenstorrent/vllm fork. "
+                "Give runtime.vllm.{repo, ref} instead, pinning the sha the model was "
+                "VALIDATED with."
+            )
+        if not (vllm.get("repo") and vllm.get("ref")):
+            raise ContainerManifestError(
+                "kind vllm requires runtime.vllm.{repo, ref} — the tenstorrent/vllm fork, "
+                "pinned to the sha the model was VALIDATED with (the plugin is in-tree)"
+            )
+        if rt.get("plugin"):
+            raise ContainerManifestError(
+                "kind vllm takes no runtime.plugin: the plugin comes from the fork's own "
+                "plugins/vllm-tt-plugin"
+            )
+
+        model_dir = rt.get("model_dir")
+        if not model_dir:
+            raise ContainerManifestError(
+                "kind vllm requires runtime.model_dir (the model's directory in the "
+                "tt-metal tree, e.g. models/autoports/<name>) — the readiness runner "
+                "launches by --model-dir"
+            )
+        # The launcher resolves model_dir INSIDE the image, so it must be covered by the
+        # allowlist that decides what gets into the image at all.
+        covered = any(
+            model_dir == c or model_dir.startswith(c.rstrip("/") + "/") for c in m.source.code
+        )
+        if not covered:
+            raise ContainerManifestError(
+                f"runtime.model_dir {model_dir!r} is not covered by source.code — the "
+                "launcher would not find the model inside the image"
+            )
+
+        for key in rt:
+            if key not in self.RUNTIME_KEYS:
+                raise ContainerManifestError(
+                    f"kind vllm does not understand runtime.{key}; expected one of "
+                    + ", ".join(self.RUNTIME_KEYS)
+                )
+
+    def serve_argv(self, m: Manifest, profile: ServeProfile) -> List[str]:
+        from .container_manifest import parse_mesh_device
+
+        rows, cols = parse_mesh_device(profile.mesh_device or "")
+        model_dir = (m.container.runtime if m.container else {}).get("model_dir")
+        if not model_dir:
+            raise LauncherError("kind vllm requires runtime.model_dir")
+        argv = [
+            "python", "-m", "models.common.readiness_check.run_vllm_server",
+            "--stages", "serve",
+            "--model-dir", str(model_dir),
+            "--hf-model", _weights_id(m),
+            "--mesh-device", f"({rows}, {cols})",
+            "--max-num-seqs", str(profile.max_num_seqs),
+        ]
+        if profile.max_model_len is not None:
+            argv += ["--max-model-len", str(profile.max_model_len)]
+        argv += ["--block-size", str(profile.block_size)]
+        if profile.server_timeout is not None:
+            argv += ["--server-timeout", str(profile.server_timeout)]
+        argv += ["--port", str(profile.port or 8000)]
+        tt_cfg = profile.additional_config.get("tt")
+        if tt_cfg:
+            argv += ["--tt-config", json.dumps(tt_cfg)]
+        # This runner takes extra server flags as ONE joined string, not as loose argv.
+        extra = profile.flat_args() + _capability_argv(profile)
+        if extra:
+            argv += ["--additional-server-args", " ".join(extra)]
+        return argv
+
+    def serve_env(self, m: Manifest, profile: ServeProfile) -> Dict[str, str]:
+        # The mesh goes through --mesh-device here, NOT through a MESH_DEVICE env var.
+        # tt_transformers-style adapters read the model id from HF_MODEL, not from
+        # vLLM's --model.
+        env = {"HF_MODEL": _weights_id(m)}
+        env.update(profile.env)
+        return env
+
+    def ready_probe(self, m: Manifest) -> str:
+        return self.READY_LINE
+
+
+def _capability_argv(profile: ServeProfile) -> List[str]:
+    """Render the tool/reasoning parsers, matching the v4 path's rules exactly.
+
+    ``--tool-call-parser`` is emitted WITH ``--enable-auto-tool-choice`` because vLLM
+    hard-errors on the former without the latter, and ``--reasoning_parser`` keeps its
+    underscore: typer normalises '_'->'-' so '--tool_parser' would become the nonexistent
+    '--tool-parser', while '--reasoning_parser' normalises to the valid spelling.
+    See ``bundles._compose_launch_vllm``.
+    """
+    cap = profile.capabilities
+    if cap is None:
+        return []
+    argv: List[str] = []
+    if cap.tool_parser:
+        argv += ["--enable-auto-tool-choice", "--tool-call-parser", cap.tool_parser]
+    if cap.reasoning_parser:
+        argv += ["--reasoning_parser", cap.reasoning_parser]
+    return argv
+
+
+KINDS: Dict[str, object] = {VllmLauncher.name: VllmLauncher()}
+
+
+def launcher_for(kind: str):
+    try:
+        return KINDS[kind]
+    except KeyError:
+        raise LauncherError(
+            f"unsupported kind {kind!r}; supported: " + ", ".join(sorted(KINDS))
+        ) from None

@@ -1,0 +1,265 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+"""Compose and drive ``docker`` invocations for a container (v5.1) package.
+
+Everything here is either pure argv composition — unit-testable, and asserted through
+``serve --print`` — or a thin subprocess wrapper. Nothing in this module imports ttnn,
+reads a manifest file, or touches the Hub.
+
+The docker flags are not folklore; each one is load-bearing:
+
+- ``--device /dev/tenstorrent`` — the boards.
+- ``--ipc host`` — shared memory with the host.
+- the hugepages mount, **verbatim**: umd matches ``/proc/mounts`` against
+  ``^(nodev|hugetlbfs) (/dev/hugepages-1G) hugetlbfs …$``, so binding a subdirectory or
+  a different dst silently fails that regex and device-open fails minutes later.
+- the HF cache mounted **read-write** at ``HF_HOME``: model classes call
+  ``snapshot_download`` at load time, and ``--trust-remote-code`` writes to
+  ``HF_MODULES_CACHE``. Weights are the only thing that ever touches the host.
+- a per-model host dir at ``TT_METAL_CACHE``: the JIT kernel/trace cache. Persisting it
+  across boots is the difference between a ~6-minute and a ~15-minute start.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+from typing import Dict, List, Optional
+
+from .manifest import Manifest, ServeProfile
+
+#: Docker label applied to every container and used to find ours again.
+LABEL = "org.tenstorrent.tt-model"
+
+# SIGTERM lets the server close the mesh on its way out; SIGKILL does not, and leaves the
+# devices needing a reset before anything can open them again. Boot alone is ~10 minutes,
+# so the grace period is deliberately generous.
+STOP_TIMEOUT_S = 120
+
+# 128 + SIGKILL(9): docker's grace period expired and it hard-killed the server.
+SIGKILL_EXIT_CODE = "137"
+
+
+class ContainerError(RuntimeError):
+    """A docker operation that must not proceed. The message is user-facing."""
+
+
+def _require_container(m: Manifest):
+    if m.container is None:
+        raise ContainerError(
+            f"{m.name} is not a container package (schema {m.schema_version}); "
+            "this path serves v5.1 packages only"
+        )
+    return m.container
+
+
+def image_ref(m: Manifest) -> str:
+    """The image reference to run.
+
+    For an HF-hosted image this is the local tag that ``docker load`` produced. For a
+    package whose image lives in a real registry it is the ``docker pull`` reference, so
+    the same composition works for both without the caller knowing which it got.
+    """
+    image = _require_container(m).image
+    return image.pull_ref or image.tag
+
+
+def container_name(m: Manifest, profile: ServeProfile) -> str:
+    """One running container per (model, profile) — so two profiles of the same model
+    are distinguishable in ``docker ps`` and stoppable independently."""
+    return f"tt-model-{m.name}-{profile.name}"
+
+
+def hf_home() -> Path:
+    return Path(os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface")))
+
+
+def model_cache_dir(m: Manifest) -> Path:
+    """Host-side JIT kernel cache, per model. Survives container removal on purpose."""
+    return Path.home() / ".cache" / "tt-model" / m.name / "cache"
+
+
+def compose_run(
+    m: Manifest,
+    profile: ServeProfile,
+    argv: List[str],
+    env: Dict[str, str],
+    *,
+    detach: bool = True,
+    hf_home_dir: Optional[Path] = None,
+    cache_dir: Optional[Path] = None,
+    include_hf_token: Optional[bool] = None,
+) -> List[str]:
+    """The full ``docker run`` argv for one serve profile.
+
+    Pure: the only environment it reads is ``HF_HOME``/``HF_TOKEN``, and both can be
+    overridden by the caller so tests never depend on the developer's shell.
+    """
+    _require_container(m)
+    port = profile.port or 8000
+    hf = Path(hf_home_dir) if hf_home_dir is not None else hf_home()
+    cache = Path(cache_dir) if cache_dir is not None else model_cache_dir(m)
+    if include_hf_token is None:
+        include_hf_token = bool(os.environ.get("HF_TOKEN"))
+
+    cmd = ["docker", "run"]
+    if detach:
+        cmd += ["--detach"]
+    cmd += [
+        "--name", container_name(m, profile),
+        "--label", f"{LABEL}={m.name}",
+        "--label", f"{LABEL}.profile={profile.name}",
+        "--device", "/dev/tenstorrent",
+        "--ipc", "host",
+        # verbatim src AND dst — umd regex-matches this line in /proc/mounts
+        "--mount", "type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G",
+        "--volume", f"{hf}:/hf",
+        "--env", "HF_HOME=/hf",
+        "--volume", f"{cache}:/cache",
+        "--env", "TT_METAL_CACHE=/cache",
+        "--publish", f"{port}:{port}",
+    ]
+    if include_hf_token:
+        # name only: the value is inherited from the caller's environment rather than
+        # being written into an argv that `--print` would display and `ps` would leak.
+        cmd += ["--env", "HF_TOKEN"]
+    for k, v in sorted(env.items()):
+        cmd += ["--env", f"{k}={v}"]
+    cmd += [image_ref(m)]
+    cmd += argv
+    return cmd
+
+
+def compose_pull(m: Manifest) -> Optional[List[str]]:
+    """``docker pull`` argv for a registry-hosted image, or None for an HF-hosted one
+    (whose bytes arrive with the repo snapshot and are loaded from the OCI layout)."""
+    ref = _require_container(m).image.pull_ref
+    return ["docker", "pull", ref] if ref else None
+
+
+# ------------------------------------------------------------------ thin wrappers
+
+
+def _run(argv: List[str], **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, **kw)
+
+
+def running(name_filter: Optional[str] = None) -> List[Dict[str, str]]:
+    """tt-model containers present on this host (running or exited)."""
+    fmt = "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+    out = _run(
+        ["docker", "ps", "--all", "--filter", f"label={LABEL}", "--format", fmt],
+        capture_output=True, text=True,
+    ).stdout
+    rows = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3 and (not name_filter or name_filter in parts[0]):
+            rows.append({
+                "name": parts[0], "image": parts[1], "status": parts[2],
+                "ports": parts[3] if len(parts) > 3 else "",
+            })
+    return rows
+
+
+def images() -> List[Dict[str, str]]:
+    """Locally loaded tt-model images."""
+    fmt = "{{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}"
+    out = _run(
+        ["docker", "images", "--filter", f"label={LABEL}", "--format", fmt],
+        capture_output=True, text=True,
+    ).stdout
+    rows = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            rows.append({
+                "image": parts[0], "size": parts[1],
+                "created": parts[2] if len(parts) > 2 else "",
+            })
+    return rows
+
+
+def image_present(ref: str) -> bool:
+    return _run(["docker", "image", "inspect", ref], capture_output=True).returncode == 0
+
+
+def stop(name: str, image: Optional[str] = None) -> bool:
+    """SIGTERM-first stop. Returns True when the shutdown was clean.
+
+    ``docker stop`` sends SIGTERM and escalates to SIGKILL after the timeout. A kill means
+    the server never closed the mesh — eth cores are left dirty and the NEXT boot fails —
+    so in that case the mesh is reset with ``tt-smi -r all`` in a throwaway container from
+    the same image. That is why no host tt-smi is needed: the image already has one.
+    """
+    inspect = _run(
+        ["docker", "inspect", "--format", "{{.State.Running}}", name],
+        capture_output=True, text=True,
+    )
+    was_running = inspect.returncode == 0 and inspect.stdout.strip() == "true"
+
+    _run(["docker", "stop", "--timeout", str(STOP_TIMEOUT_S), name],
+         capture_output=True, text=True)
+
+    clean = True
+    if was_running:
+        code = _run(
+            ["docker", "inspect", "--format", "{{.State.ExitCode}}", name],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        clean = code not in (SIGKILL_EXIT_CODE, "")
+    _run(["docker", "rm", name], capture_output=True, text=True)
+
+    if not clean and image:
+        reset_mesh(image)
+    return clean
+
+
+def compose_reset_mesh(image: str) -> List[str]:
+    return [
+        "docker", "run", "--rm",
+        "--device", "/dev/tenstorrent",
+        "--mount", "type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G",
+        "--entrypoint", "tt-smi", image, "-r", "all",
+    ]
+
+
+def reset_mesh(image: str) -> bool:
+    """Run ``tt-smi -r all`` inside a throwaway container from the given image."""
+    return _run(compose_reset_mesh(image), capture_output=True, text=True).returncode == 0
+
+
+def logs(name: str, follow: bool = False) -> int:
+    argv = ["docker", "logs"]
+    if follow:
+        argv.append("--follow")
+    argv.append(name)
+    return _run(argv).returncode
+
+
+def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> bool:
+    """Follow the container's logs until the launcher's ready line appears.
+
+    The generous default timeout is not padding: a cold boot JIT-compiles kernels, which
+    is the ~10-minute cost the mounted TT_METAL_CACHE exists to avoid paying twice.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    proc = subprocess.Popen(
+        ["docker", "logs", "--follow", name],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    assert proc.stdout is not None
+    try:
+        for line in proc.stdout:
+            echo(line.rstrip("\n"))
+            if probe in line:
+                return True
+            if time.monotonic() > deadline:
+                return False
+        return False
+    finally:
+        proc.terminate()

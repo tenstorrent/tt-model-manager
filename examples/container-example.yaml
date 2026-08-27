@@ -9,7 +9,8 @@ schema: "5.1"
 repo: you/my-model              # the HF repo `push` publishes to
 name: my-model
 weights: org/Weights-7B         # a POINTER: downloaded to the HOST HF cache, never baked
-kind: vllm                      # vllm (stock + standalone plugin) | vllm-legacy (fork)
+kind: vllm                      # the tenstorrent/vllm fork + its in-tree plugin
+                                # (the only stack tt-model serves today)
 arch: blackhole                 # fixed by the build; every profile shares it
 
 image:
@@ -21,16 +22,18 @@ image:
 source:
   tt_metal: /path/to/your/tt-metal   # or {repo: ..., ref: ...} to clone in CI
   code:                              # EXACTLY what ships. An allowlist, never a denylist.
-    - models/common
-    - models/autoports/my_model/tt
-    - models/autoports/my_model/vllm_ext
+    - models/common                  # the readiness runner lives here
+    - models/autoports/my_model      # must COVER runtime.model_dir below, or the
+                                     # launcher looks for a dir that never entered the image
   ubuntu: "22.04"
   python: "3.12"
 
 runtime:
-  vllm: {version: "0.24.0"}
-  plugin: {repo: https://github.com/tenstorrent/vllm-tt-plugin, ref: main}
-  extension: models/autoports/my_model/vllm_ext
+  # The fork, pinned to the sha you VALIDATED with — not a branch name.
+  vllm: {repo: https://github.com/tenstorrent/vllm, ref: bf98d556}
+  model_dir: models/autoports/my_model   # the readiness runner launches by --model-dir
+  extension: models/autoports/my_model/vllm_ext   # optional
+  lock: requirements.lock                          # optional but recommended
 
 serve:                          # defaults every profile inherits
   port: 8000

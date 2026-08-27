@@ -34,6 +34,10 @@ BASE = {
         "ubuntu": "22.04",
         "python": "3.12",
     },
+    "runtime": {
+        "vllm": {"repo": "https://github.com/tenstorrent/vllm", "ref": "bf98d556"},
+        "model_dir": "models/common",
+    },
     "serve": {"port": 8000, "block_size": 64},
     "serve_profiles": [
         {
@@ -113,6 +117,14 @@ def test_unknown_arch_is_refused():
 def test_unknown_kind_is_refused():
     with pytest.raises(ContainerManifestError, match="kind must be one of"):
         _mani(kind="tensorrt").validate_semantics()
+
+
+def test_the_stock_vllm_shape_gets_a_specific_diagnosis():
+    """An author who writes runtime.vllm.version described a real stack we do not serve
+    yet; say that, rather than "missing repo/ref"."""
+    with pytest.raises(ContainerManifestError, match="stock vLLM from PyPI"):
+        _mani(runtime={"vllm": {"version": "0.24.0"}, "model_dir": "models/common"}
+              ).validate_semantics()
 
 
 def test_unnamespaced_repo_is_refused():
