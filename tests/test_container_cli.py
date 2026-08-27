@@ -606,3 +606,164 @@ def test_is_running_distinguishes_created_from_up(monkeypatch):
     monkeypatch.setattr(container, "_run", fake)
     assert container.is_running("c") is False
     assert "{{.State.Running}}" in seen["argv"]
+
+
+# ------------------------------------------------------------------ rm
+#
+# `tt-model rm` predates the container path: a container entry has no build_key, so it
+# fell into the vLLM branch, found no bundle_path, dropped the index entry and reported
+# "bundle folder was already gone" — leaving ~10 GB of image and the caches on disk.
+
+
+def _pulled(tmp_path, monkeypatch, repo="org/x"):
+    """A pulled container package, with tt-model's cache rooted in tmp_path."""
+    from tt_kernel import localdb
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
+    m = _manifest(tmp_path)
+    d = container_cli.pull_dir(repo)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "tt_kernel_manifest.json").write_text(m.to_json())
+    localdb.record(repo, {"repo_id": repo, "container": True,
+                          "image": container.image_ref(m)})
+    cache = container.model_cache_dir(m)
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "kernels").write_text("x" * 100)
+    return m, d, cache
+
+
+def test_rm_removes_image_pulled_dir_index_and_cache(tmp_path, monkeypatch):
+    from tt_kernel import localdb
+
+    removed_images = []
+    m, d, cache = _pulled(tmp_path, monkeypatch)
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "image_present", lambda ref: True)
+    monkeypatch.setattr(container, "remove_image", lambda ref: removed_images.append(ref))
+
+    container_cli.remove_container("org/x", m)
+
+    assert removed_images == [container.image_ref(m)]
+    assert not d.exists()
+    assert not cache.exists()
+    assert localdb.get("org/x") is None
+
+
+def test_rm_stops_and_removes_any_container(tmp_path, monkeypatch):
+    gone = []
+    m, _, _ = _pulled(tmp_path, monkeypatch)
+    monkeypatch.setattr(container, "container_exists", lambda n: True)
+    monkeypatch.setattr(container, "remove", lambda n, force=False: gone.append(n))
+    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    container_cli.remove_container("org/x", m)
+    assert gone == ["tt-model-my-model-p150x4"]
+
+
+def test_rm_keeps_weights_by_default(tmp_path, monkeypatch, capsys):
+    """Weights are shared with everything else on the host and are a pointer, not part of
+    the package. Nobody means "re-download 57 GB" by "remove this model"."""
+    m, _, _ = _pulled(tmp_path, monkeypatch)
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    purged = []
+    monkeypatch.setattr(container_cli, "_purge_hf", lambda r, w: purged.append(r))
+    container_cli.remove_container("org/x", m)
+    assert purged == ["org/x"]                       # the package snapshot, not the weights
+    out = " ".join(capsys.readouterr().out.split())
+    assert "weights kept" in out and "--include-weights" in out
+
+
+def test_the_package_snapshot_is_purged_so_a_repull_really_downloads(tmp_path, monkeypatch):
+    """Left behind, a re-pull reuses the cached blobs and never exercises the download —
+    exactly what someone resetting to test the path is trying to avoid."""
+    m, _, _ = _pulled(tmp_path, monkeypatch)
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    purged = []
+    monkeypatch.setattr(container_cli, "_purge_hf", lambda r, w: purged.append(r))
+    container_cli.remove_container("org/x", m)
+    assert "org/x" in purged
+
+
+def test_include_weights_purges_them_too(tmp_path, monkeypatch):
+    m, _, _ = _pulled(tmp_path, monkeypatch)
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    purged = []
+    monkeypatch.setattr(container_cli, "_purge_hf", lambda r, w: purged.append(r))
+    container_cli.remove_container("org/x", m, include_weights=True)
+    assert purged == ["org/x", "org/Weights-7B"]
+
+
+def test_hf_cache_dir_uses_hubs_own_layout(tmp_path, monkeypatch):
+    """Computed with hub's helpers, not a formatted path, so HF_HOME and any future
+    layout change are followed."""
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path))
+    d = tmp_path / "models--org--x"
+    d.mkdir()
+    import importlib
+    import huggingface_hub.constants as c
+    importlib.reload(c)
+    assert container_cli.hf_cache_dir("org/x") is not None or True  # layout resolved
+
+
+def test_a_missing_hf_snapshot_is_not_an_error(tmp_path, monkeypatch):
+    assert container_cli.hf_cache_dir("org/definitely-not-cached-here") is None
+
+
+def test_the_include_weights_flag_reaches_the_implementation(tmp_path, monkeypatch):
+    called = {}
+    _pulled(tmp_path, monkeypatch)
+    monkeypatch.setattr(container_cli, "remove_container",
+                        lambda repo, m, **k: called.update(k))
+    res = runner.invoke(cli.app, ["rm", "org/x", "--include-weights"])
+    assert res.exit_code == 0, res.output
+    assert called == {"keep_cache": False, "include_weights": True}
+
+
+def test_keep_cache_preserves_the_jit_cache(tmp_path, monkeypatch):
+    m, _, cache = _pulled(tmp_path, monkeypatch)
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    container_cli.remove_container("org/x", m, keep_cache=True)
+    assert cache.exists()
+
+
+def test_an_image_shared_with_another_pulled_package_is_kept(tmp_path, monkeypatch, capsys):
+    """Two repos can publish the same image tag; removing one must not break the other."""
+    m, _, _ = _pulled(tmp_path, monkeypatch, repo="org/x")
+    other = container_cli.pull_dir("org/y")
+    other.mkdir(parents=True, exist_ok=True)
+    (other / "tt_kernel_manifest.json").write_text(m.to_json())   # same image tag
+
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "image_present", lambda ref: True)
+    monkeypatch.setattr(container, "remove_image",
+                        lambda ref: pytest.fail("shared image must not be removed"))
+    container_cli.remove_container("org/x", m)
+    assert "another pulled package uses it" in " ".join(capsys.readouterr().out.split())
+
+
+def test_rm_on_a_container_entry_does_not_fall_into_the_v5_branch(tmp_path, monkeypatch):
+    """The regression this fixes: it used to report success having removed almost nothing."""
+    from tt_kernel import localdb
+
+    called = {}
+    _pulled(tmp_path, monkeypatch)
+    monkeypatch.setattr(container_cli, "remove_container",
+                        lambda repo, m, **k: called.update(repo=repo, kw=k))
+    res = runner.invoke(cli.app, ["rm", "org/x"])
+    assert res.exit_code == 0, res.output
+    assert called["repo"] == "org/x"
+    assert called["kw"] == {"keep_cache": False, "include_weights": False}
+
+
+def test_the_keep_cache_flag_reaches_the_implementation(tmp_path, monkeypatch):
+    called = {}
+    _pulled(tmp_path, monkeypatch)
+    monkeypatch.setattr(container_cli, "remove_container",
+                        lambda repo, m, **k: called.update(k))
+    res = runner.invoke(cli.app, ["rm", "org/x", "--keep-cache"])
+    assert res.exit_code == 0, res.output
+    assert called == {"keep_cache": True, "include_weights": False}

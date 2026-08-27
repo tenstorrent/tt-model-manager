@@ -15,6 +15,7 @@ looks like the rest of the tool. The modules underneath (``build``, ``container`
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 from pathlib import Path
 from typing import List, Optional
@@ -469,6 +470,127 @@ def logs_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     raise ContainerCliError(
         f"no running container for {manifest.name}. Start it:  tt-model serve {what}"
     )
+
+
+# --------------------------------------------------------------------------------- rm
+
+
+def hf_cache_dir(repo_id: str) -> Optional[Path]:
+    """Where huggingface_hub keeps this repo's snapshot, or None if it cannot be located.
+
+    Computed with hub's own helpers rather than by string-formatting a path, so it follows
+    HF_HOME / HF_HUB_CACHE and any future layout change.
+    """
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+        from huggingface_hub.file_download import repo_folder_name
+    except ImportError:  # pragma: no cover - hub is a hard dependency
+        return None
+    d = Path(HF_HUB_CACHE) / repo_folder_name(repo_id=repo_id, repo_type="model")
+    return d if d.is_dir() else None
+
+
+def _purge_hf(repo_id: str, what: str) -> None:
+    d = hf_cache_dir(repo_id)
+    if d is None:
+        return
+    size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+    with console.step(f"removing the cached {what} ({console.fmt_bytes(size)})"):
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = False,
+                     include_weights: bool = False) -> None:
+    """Undo a pull: containers, image, pulled manifest, index entry, JIT cache.
+
+    ``tt-model rm`` predates this path and could only remove a kernel-cache subtree or a
+    vLLM bundle folder, so for a container package it removed the index entry, reported
+    "bundle folder was already gone", and left ~10 GB of image plus the caches behind.
+
+    The package's own snapshot in the HF cache goes too — otherwise a later pull reuses
+    those blobs and never exercises the download, which is exactly what someone resetting
+    to test the path is trying to avoid.
+
+    Weights are kept unless ``include_weights``: they are shared with everything else on
+    the host and are a POINTER rather than part of the package, so re-downloading tens of
+    gigabytes is not what "remove this model" usually means.
+    """
+    spec = manifest.container
+    assert spec is not None
+    name = manifest.name
+
+    # 1. any containers, running or not
+    stopped = 0
+    for n in spec.profile_names():
+        cname = container.container_name(manifest, spec.resolve_profile(n))
+        if container.container_exists(cname):
+            container.remove(cname, force=True)
+            stopped += 1
+    if stopped:
+        console.note(f"removed {stopped} container(s)", marker="•")
+
+    # 2. the image — only when no OTHER pulled package still points at the same tag
+    ref = container.image_ref(manifest)
+    if spec.image.is_hub_hosted and container.image_present(ref):
+        others = [
+            other for other in _other_pulled_repos(repo_id)
+            if other == ref
+        ]
+        if others:
+            console.note(f"image {ref} kept — another pulled package uses it", marker="○")
+        else:
+            with console.step(f"removing image {ref}"):
+                container.remove_image(ref)
+
+    # 3. tt-model's own state for this package
+    shutil.rmtree(pull_dir(repo_id), ignore_errors=True)
+    localdb.remove(repo_id)
+
+    # 4. the JIT kernel cache — the expensive thing to rebuild, so it is opt-out
+    cache = container.model_cache_dir(manifest)
+    if keep_cache:
+        console.note(f"kernel cache kept at {cache}", marker="○")
+    elif cache.exists():
+        shutil.rmtree(cache.parent, ignore_errors=True)
+        console.note("kernel cache removed — the next boot recompiles (~10 min)",
+                     marker="•")
+
+    # 5. the package's own blobs in the HF cache, so a re-pull really downloads
+    _purge_hf(repo_id, "package snapshot")
+
+    # 6. weights, only when asked
+    if manifest.weights:
+        if include_weights:
+            _purge_hf(manifest.weights.repo_id, f"weights {manifest.weights.repo_id}")
+        else:
+            console.note(
+                f"weights kept ({manifest.weights.repo_id}) — shared with other models, "
+                "and not part of this package. --include-weights removes them too",
+                marker="○",
+            )
+
+    console.milestone(f"removed {repo_id}")
+
+
+def _other_pulled_repos(exclude: str) -> List[str]:
+    """Image refs of every OTHER pulled container package, so a shared tag is not pulled
+    out from under one of them."""
+    refs: List[str] = []
+    root = pull_dir("x").parent
+    if not root.is_dir():
+        return refs
+    for d in root.iterdir():
+        mpath = d / MANIFEST_NAME
+        if not mpath.is_file():
+            continue
+        try:
+            m = Manifest.from_json(mpath.read_text())
+        except ValueError:
+            continue
+        if m.container is None or d.name == exclude.replace("/", "__"):
+            continue
+        refs.append(container.image_ref(m))
+    return refs
 
 
 # ------------------------------------------------------------------------------ list

@@ -349,6 +349,10 @@ def remove(name: str, *, force: bool = False) -> bool:
     return _run(argv, capture_output=True, text=True).returncode == 0
 
 
+def remove_image(ref: str) -> bool:
+    return _run(["docker", "image", "rm", ref], capture_output=True, text=True).returncode == 0
+
+
 def image_present(ref: str) -> bool:
     return _run(["docker", "image", "inspect", ref], capture_output=True).returncode == 0
 

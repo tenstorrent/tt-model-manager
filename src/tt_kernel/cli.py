@@ -3044,15 +3044,48 @@ def unpublish(
 def rm(
     repo_id: str = typer.Argument(..., help="Installed bundle as namespace/name."),
     cache_dir: Optional[str] = typer.Option(None, help="Override the tt-metal cache root."),
+    keep_cache: bool = typer.Option(
+        False, "--keep-cache", help="For a container package: keep the JIT kernel cache, "
+        "so a later pull of the same model boots fast instead of recompiling (~10 min)."
+    ),
+    include_weights: bool = typer.Option(
+        False, "--include-weights", help="For a container package: ALSO delete the model "
+        "weights from the HF cache. They are shared with anything else that uses them and "
+        "can be tens of gigabytes to re-download, so this is off by default."
+    ),
 ) -> None:
     """Remove a locally installed bundle and its index entry.
 
-    For a dispatch bundle this removes the kernel-cache subtree; for a vLLM bundle it
-    removes the model folder from bundles_dir (EXTRA_MODELS_DIR).
+    For a container (v5.1) package this removes the containers, the docker image, the
+    pulled manifest, the kernel cache and the package's own snapshot in the HF cache. For a dispatch bundle it removes the
+    kernel-cache subtree; for a vLLM bundle, the model folder from bundles_dir.
+
+    Weights are kept unless ``--include-weights``: they are shared with everything else on
+    the host and are a pointer rather than part of the package.
     """
     entry = localdb.get(repo_id)
     if not entry:
         raise _err(f"{repo_id} is not recorded as installed.")
+
+    # --- container (v5.1) ---------------------------------------------------------
+    # Checked FIRST: a container entry has no build_key, so it would otherwise fall into
+    # the vLLM branch below, find no bundle_path, drop the index entry and report success
+    # while leaving ~10 GB of image and the caches on disk.
+    if entry.get("container"):
+        from . import container_cli
+
+        cmani = container_cli.load_pulled(repo_id)
+        if cmani is None:
+            localdb.remove(repo_id)
+            console.note("index entry removed; the pulled manifest was already gone",
+                         marker="○")
+            return
+        try:
+            container_cli.remove_container(repo_id, cmani, keep_cache=keep_cache,
+                                           include_weights=include_weights)
+        except (container_cli.ContainerCliError, container.ContainerError) as e:
+            raise _err(str(e))
+        return
 
     # vLLM bundle: no cache subtree — remove the installed model folder instead.
     if (entry.get("backend") == "vllm") or entry.get("build_key") is None:
