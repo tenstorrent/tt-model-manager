@@ -33,14 +33,18 @@ Two different inputs on purpose:
 Argv composition is pure and total: no environment, no filesystem, no clock. That is what
 lets ``serve --print`` be the test surface for every flag we claim to pass.
 
-The build-side hooks (installing the stack into the image, the build-time verification
-RUN) land with the Dockerfile; this module is the serve side.
+``install_lines`` and ``verify_lines`` are the BUILD side: they render the two generated
+scripts (``install_engine.sh``, ``verify.sh``) that the Dockerfile runs, which is why the
+Dockerfile itself never mentions vLLM and never changes per kind.
 """
 
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Dict, List
+import re
+import shlex
+from pathlib import Path
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from .manifest import Manifest, ServeProfile
 
@@ -78,6 +82,13 @@ class VllmLauncher:
 
     #: the log line whose appearance means the OpenAI server is accepting requests
     READY_LINE = "Server ready at"
+
+    #: where the fork checkout lives in both build stages
+    FORK_DIR = "/opt/vllm"
+
+    #: vLLM's PyPI metadata is generated on a CUDA machine; without the CPU index a plain
+    #: install resolves the CUDA dependency set (~4 GB of nvidia-* wheels, no device here)
+    PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 
     def validate(self, m: "ContainerManifest") -> None:
         from .container_manifest import ContainerManifestError
@@ -130,6 +141,81 @@ class VllmLauncher:
                     + ", ".join(self.RUNTIME_KEYS)
                 )
 
+    # ---- image build ---------------------------------------------------------------
+
+    def install_lines(self, m: "ContainerManifest") -> List[str]:
+        """Shell lines that install the serving stack into the image's venv, after
+        tt-metal itself is built and installed."""
+        rt = m.runtime
+        vllm = rt["vllm"]
+        ref = vllm.get("sha") or vllm["ref"]
+        lines: List[str] = [
+            f"git clone {shlex.quote(vllm['repo'])} {self.FORK_DIR}"
+            f" && git -C {self.FORK_DIR} checkout {shlex.quote(ref)}",
+        ]
+        if rt.get("lock"):
+            # The lock IS the dependency set, so nothing resolves at build time and two
+            # builds a week apart produce the same environment.
+            lines.append(
+                'uv pip install --python "$VENV/bin/python" -r /ctx/requirements.lock '
+                f"--extra-index-url {self.PYTORCH_CPU_INDEX} --index-strategy unsafe-best-match"
+            )
+            deps = "--no-deps "
+        else:
+            deps = ""
+        lines += [
+            # Editable, matching the fork's own documented install; the checkout is COPY'd
+            # into the runtime stage so the .pth files stay valid.
+            f'VLLM_TARGET_DEVICE=empty uv pip install --python "$VENV/bin/python" {deps}'
+            f"-e {self.FORK_DIR} --extra-index-url {self.PYTORCH_CPU_INDEX} "
+            f"--index-strategy unsafe-best-match",
+            f'uv pip install --python "$VENV/bin/python" -e {self.FORK_DIR}/plugins/vllm-tt-plugin',
+            # The editable installs bake build-stage paths; drop VCS metadata only.
+            f"rm -rf {self.FORK_DIR}/.git",
+        ]
+        if rt.get("extension"):
+            # The model's own vLLM extension ships inside code/, so install it from the
+            # staged tree already present in the image.
+            lines.append(
+                f'uv pip install --python "$VENV/bin/python" /opt/tt-metal/{rt["extension"]}'
+            )
+        return lines
+
+    def verify_lines(self, m: "ContainerManifest") -> List[str]:
+        """Assertions run INSIDE the finished image. These are what make the prune and
+        the code/ allowlist safe: an under-shipped image fails here, on the author's
+        machine, not on a consumer's first boot."""
+        checks = [
+            "import ttnn, vllm, vllm_tt_plugin",
+            "import torch; assert torch.__version__.endswith('+cpu'), torch.__version__",
+            f"import vllm; assert vllm.__file__.startswith('{self.FORK_DIR}'), vllm.__file__",
+            "import models.common.readiness_check.run_vllm_server",
+        ]
+        # torch is a TRANSITIVE dependency of vLLM here (tt-metal installs none), so
+        # nothing makes it agree with what ttnn was built against unless we check.
+        pin = metal_torch_pin(_local_metal_tree(m))
+        if pin:
+            checks.append(
+                f"import torch; v = torch.__version__.split('+')[0]; "
+                f"assert v == {pin!r}, "
+                f"f'torch {{v}} was resolved by vLLM but tt-metal pins {pin}; "
+                f"ttnn extension modules were built against {pin} — pin it via "
+                f"runtime.lock, or align runtime.vllm.ref'"
+            )
+        if m.runtime.get("extension"):
+            checks.append(
+                "import os; md = os.environ['EXTRA_MODELS_DIR']; "
+                "entries = [e for e in os.listdir(md) "
+                "if os.path.exists(os.path.join(md, e, 'vllm_metadata.json'))]; "
+                "assert entries, f'EXTRA_MODELS_DIR {md} registers no models'"
+            )
+        lines = [f'"$VENV/bin/python" -c {shlex.quote("; ".join(checks))}']
+        # the model author's own assertions, from the manifest's verify: list
+        lines += [f'"$VENV/bin/python" -c {shlex.quote(v)}' for v in m.verify]
+        return lines
+
+    # ---- serve -----------------------------------------------------------------------
+
     def serve_argv(self, m: Manifest, profile: ServeProfile) -> List[str]:
         from .container_manifest import parse_mesh_device
 
@@ -170,6 +256,48 @@ class VllmLauncher:
 
     def ready_probe(self, m: Manifest) -> str:
         return self.READY_LINE
+
+
+# tt-metal declares the torch it expects in its dev requirements, e.g.
+#   --extra-index-url https://download.pytorch.org/whl/cpu
+#   torch==2.11.0 ; platform_machine == 'x86_64'
+_TORCH_PIN_RE = re.compile(
+    r"^torch==(?P<version>[^\s;#]+)\s*(;.*platform_machine\s*==\s*'x86_64')?\s*$"
+)
+
+METAL_TORCH_REQUIREMENTS = "tt_metal/python_env/requirements-dev.txt"
+
+
+def _local_metal_tree(m: "ContainerManifest") -> Optional[Path]:
+    """The author's tt-metal checkout, or None when the manifest names a git source."""
+    src = m.source.tt_metal
+    return Path(src) if isinstance(src, str) else None
+
+
+def metal_torch_pin(metal_tree: Optional[Path]) -> Optional[str]:
+    """The torch version tt-metal declares it wants, or None if it cannot be read.
+
+    tt-metal's ``setup.py`` has no ``install_requires``, so installing it brings NO
+    torch: torch arrives only as a transitive dependency of vLLM. Nothing therefore
+    forces the two to agree, and a vLLM release that resolves a different torch than
+    ttnn's extension modules were built against breaks at import or, worse, at device
+    open. Reading the pin lets the image assert the agreement at BUILD time.
+
+    Returns None for a git-mode source (no local tree yet) or an unreadable/changed
+    requirements file — the check is then skipped rather than guessed at.
+    """
+    if metal_tree is None:
+        return None
+    req = Path(metal_tree) / METAL_TORCH_REQUIREMENTS
+    try:
+        text = req.read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        m = _TORCH_PIN_RE.match(line.strip())
+        if m:
+            return m.group("version")
+    return None
 
 
 def _capability_argv(profile: ServeProfile) -> List[str]:

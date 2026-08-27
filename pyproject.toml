@@ -34,7 +34,7 @@ tt-kernel = "tt_kernel.cli:main"  # legacy alias (deprecated)
 where = ["src"]
 
 [tool.setuptools.package-data]
-tt_kernel = ["py.typed"]
+tt_kernel = ["py.typed", "docker/Dockerfile", "docker/entrypoint.sh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
