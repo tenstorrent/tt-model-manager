@@ -324,6 +324,31 @@ def images() -> List[Dict[str, str]]:
     return rows
 
 
+def container_exists(name: str) -> bool:
+    """Does a container with this exact name exist, in ANY state?
+
+    ``docker run`` creates the container before it binds ports, so a failed start (a busy
+    port, most commonly) leaves one behind in ``Created`` — holding the name and blocking
+    every retry.
+    """
+    return _run(["docker", "container", "inspect", name],
+               capture_output=True).returncode == 0
+
+
+def is_running(name: str) -> bool:
+    """Is it actually running? Asked via inspect rather than by matching `docker ps`
+    status text, because "Created" and "Exited (1)" both mean "not running" and only the
+    state field says so unambiguously."""
+    r = _run(["docker", "inspect", "--format", "{{.State.Running}}", name],
+             capture_output=True, text=True)
+    return r.returncode == 0 and r.stdout.strip() == "true"
+
+
+def remove(name: str, *, force: bool = False) -> bool:
+    argv = ["docker", "rm"] + (["--force"] if force else []) + [name]
+    return _run(argv, capture_output=True, text=True).returncode == 0
+
+
 def image_present(ref: str) -> bool:
     return _run(["docker", "image", "inspect", ref], capture_output=True).returncode == 0
 

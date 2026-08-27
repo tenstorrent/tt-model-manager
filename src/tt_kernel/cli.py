@@ -2738,6 +2738,7 @@ def serve(
             container_cli.serve_container(
                 cmani, profile_name=profile, print_only=print_only,
                 follow=follow, extra_args=extra_args, source=src, port=port,
+                target=repo_id,
             )
         except (container_cli.ContainerCliError, container.ContainerError) as e:
             raise _err(str(e))
@@ -2834,7 +2835,8 @@ def logs(
 
     try:
         code = container_cli.logs_container(_require_container(target),
-                                            profile_name=profile, follow=follow)
+                                            profile_name=profile, follow=follow,
+                                            target=target)
     except (container_cli.ContainerCliError, container.ContainerError) as e:
         raise _err(str(e))
     if code != 0:

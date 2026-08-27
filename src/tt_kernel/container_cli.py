@@ -284,11 +284,15 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     print_only: bool = False, follow: bool = False,
                     extra_args: Optional[List[str]] = None,
                     source: Optional[Path] = None,
-                    port: Optional[int] = None) -> None:
+                    port: Optional[int] = None,
+                    target: Optional[str] = None) -> None:
     """Run one serve profile.
 
     ``source`` is the staged/pulled dir the manifest came from, used to reload the image
     from ``image/`` if docker no longer has it. ``port`` overrides the profile's port.
+    ``target`` is the argument the user actually typed, so hints can be copy-pasted —
+    ``manifest.name`` is NOT a valid target and telling someone to use it sends them in a
+    circle.
     """
     spec = manifest.container
     assert spec is not None
@@ -356,19 +360,30 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         return
 
     name = container.container_name(manifest, profile)
-    existing = container.running(name)
-    if existing:
+    what = target or manifest.name
+    if container.is_running(name):
         raise ContainerCliError(
-            f"{name} already exists ({existing[0]['status']}). "
-            f"Stop it first:  tt-model stop {manifest.name}"
+            f"{name} is already running. Stop it first:  tt-model stop {what}"
         )
+    if container.container_exists(name):
+        # Not running, but holding the name — `docker run` creates the container before
+        # it binds ports, so a failed start (a busy port, usually) leaves one in
+        # "Created". Refusing here would make the obvious retry impossible.
+        with console.step(f"removing a stopped {name}"):
+            container.remove(name, force=True)
 
     # As the host user, so the daemon does not create them as root: see
     # container.ensure_mount_sources.
     container.ensure_mount_sources(manifest)
 
-    with console.step(f"starting {name}"):
-        container.run_checked(run_argv)
+    try:
+        with console.step(f"starting {name}"):
+            container.run_checked(run_argv)
+    except container.ContainerError:
+        # Leave no half-created container behind to block the next attempt.
+        if container.container_exists(name):
+            container.remove(name, force=True)
+        raise
 
     port = profile.port or 8000
     console.milestone(f"{name} started")
@@ -379,12 +394,12 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                                      echo=console.raw)
         if not ready:
             raise ContainerCliError(
-                f"the server did not report ready. Logs:  tt-model logs {manifest.name} -f"
+                f"the server did not report ready. Logs:  tt-model logs {what} -f"
             )
         console.milestone(f"ready at http://127.0.0.1:{port}")
     else:
         console.note(f"endpoint (once ready):  http://127.0.0.1:{port}", marker="→")
-        console.note(f"follow the boot:        tt-model logs {manifest.name} -f", marker="→")
+        console.note(f"follow the boot:        tt-model logs {what} -f", marker="→")
 
 
 # ------------------------------------------------------------------------ stop / logs
@@ -419,15 +434,16 @@ def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) ->
 
 
 def logs_container(manifest: Manifest, *, profile_name: Optional[str] = None,
-                   follow: bool = False) -> int:
+                   follow: bool = False, target: Optional[str] = None) -> int:
     spec = manifest.container
     assert spec is not None
     for n in ([profile_name] if profile_name else spec.profile_names()):
         name = container.container_name(manifest, spec.resolve_profile(n))
         if container.running(name):
             return container.logs(name, follow=follow)
+    what = target or manifest.name
     raise ContainerCliError(
-        f"no running container for {manifest.name}. Start it:  tt-model serve {manifest.name}"
+        f"no running container for {manifest.name}. Start it:  tt-model serve {what}"
     )
 
 

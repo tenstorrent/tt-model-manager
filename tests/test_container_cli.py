@@ -136,10 +136,12 @@ def test_serve_print_emits_the_docker_run_without_running_it(tmp_path, monkeypat
     assert not ran
 
 
-def test_serve_refuses_when_the_container_already_exists(tmp_path, monkeypatch):
-    monkeypatch.setattr(container, "running",
-                        lambda name=None: [{"name": name, "status": "Up 3 minutes"}])
-    with pytest.raises(container_cli.ContainerCliError, match="already exists"):
+def test_serve_refuses_when_the_container_is_already_running(tmp_path, monkeypatch):
+    """Superseded the old "already exists" check: a container merely EXISTING (Created,
+    Exited) must not block a retry — only a running one should. See the leftover-container
+    section below."""
+    monkeypatch.setattr(container, "is_running", lambda n: True)
+    with pytest.raises(container_cli.ContainerCliError, match="already running"):
         container_cli.serve_container(_manifest(tmp_path))
 
 
@@ -529,3 +531,78 @@ def test_an_unrelated_yaml_is_not_claimed(tmp_path):
 
 def test_a_repo_id_is_not_treated_as_a_path():
     assert container_cli.authored_manifest_hint("org/name") is None
+
+
+# ------------------------------------------------------------------ leftover containers
+#
+# `docker run` creates the container BEFORE it binds ports, so a failed start — a busy
+# port, most often — leaves one in "Created" holding the name. Refusing on that made the
+# obvious retry impossible, and the refusal pointed at `tt-model stop <manifest.name>`,
+# which is not a valid target.
+
+
+def test_a_stopped_leftover_is_cleared_so_the_retry_works(tmp_path, monkeypatch):
+    ran, removed = [], []
+    monkeypatch.setattr(container, "is_running", lambda n: False)
+    monkeypatch.setattr(container, "container_exists", lambda n: not removed)
+    monkeypatch.setattr(container, "remove", lambda n, force=False: removed.append(n))
+    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    container_cli.serve_container(_manifest(tmp_path))
+    assert removed and ran
+
+
+def test_a_running_container_is_still_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(container, "is_running", lambda n: True)
+    with pytest.raises(container_cli.ContainerCliError, match="already running"):
+        container_cli.serve_container(_manifest(tmp_path))
+
+
+def test_the_refusal_names_a_TARGET_that_actually_works(tmp_path, monkeypatch):
+    """It used to print `tt-model stop <manifest.name>`, which is neither a path nor a
+    pulled repo id — following it produced "is not a pulled container package"."""
+    monkeypatch.setattr(container, "is_running", lambda n: True)
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_manifest(tmp_path), target="/path/to/manifest.json")
+    assert "tt-model stop /path/to/manifest.json" in str(e.value)
+
+
+def test_a_failed_start_removes_the_half_created_container(tmp_path, monkeypatch):
+    """Otherwise the next attempt fails on the name instead of the real cause."""
+    removed = []
+    monkeypatch.setattr(container, "is_running", lambda n: False)
+    monkeypatch.setattr(container, "container_exists", lambda n: True)
+    monkeypatch.setattr(container, "remove", lambda n, force=False: removed.append(n))
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+
+    def boom(argv):
+        raise container.ContainerError("failed to bind host port 0.0.0.0:7000/tcp")
+
+    monkeypatch.setattr(container, "run_checked", boom)
+    with pytest.raises(container.ContainerError, match="bind host port"):
+        container_cli.serve_container(_manifest(tmp_path))
+    assert removed, "a failed start must not leave the name held"
+
+
+def test_logs_points_at_a_usable_target(tmp_path, monkeypatch):
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.logs_container(_manifest(tmp_path), target="org/x")
+    assert "tt-model serve org/x" in str(e.value)
+
+
+def test_is_running_distinguishes_created_from_up(monkeypatch):
+    """"Created" and "Exited (1)" both mean not running; only the state field says so."""
+    seen = {}
+
+    class R:
+        def __init__(self, out, rc=0):
+            self.stdout, self.returncode = out, rc
+
+    def fake(argv, **kw):
+        seen["argv"] = argv
+        return R("false\n")
+
+    monkeypatch.setattr(container, "_run", fake)
+    assert container.is_running("c") is False
+    assert "{{.State.Running}}" in seen["argv"]
