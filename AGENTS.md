@@ -13,23 +13,31 @@ supplement, and the invariants below are binding for everyone.
 tt-model exists to ship *self-contained* model packages over HuggingFace. A change that
 violates one of these is wrong even if tests pass:
 
-1. **tt-model is the standalone path.** The full flow — `package → push → pull → install →
-   serve` — MUST work with tt-model alone (only a TT card + firmware). Never add a dependency
-   on `tt-cli`; tt-cli is an *optional* wrapper that calls tt-model, not the reverse.
-   Host provisioning is `tt-model install` and lives in `provision.py`. It is the ONLY
-   module that installs the surrounding platform: `doctor`, `toolchain`, `instances`, and
-   the compatibility gates stay strictly declarative — they discover, probe, and report.
-   That separation is what makes a `doctor` verdict trustworthy, so keep it.
+1. **tt-model is the standalone path.** The full flow — `package → pull → serve` — MUST work
+   with tt-model alone; the box needs only a TT card + firmware (plus SFPI, an
+   externally-managed box dep). Never add a dependency on `tt-cli`; tt-cli is an *optional*
+   wrapper that calls tt-model, not the reverse. **There is no host provisioning.** Every
+   bundle builds its OWN per-model venv (v5 from embedded wheels, v6 from pip pins), so
+   tt-model never installs a shared platform and never relies on a pre-installed tt-metal/vLLM
+   on the box. The compatibility check stays strictly declarative — it discovers the target
+   arch/machine and reports a verdict; it does not provision.
 2. **Distribution is HuggingFace, not GitHub Releases.** Bundles are HF `model` repos; large
    binaries go to git-LFS via `hub.upload_folder`. Do not add Release-based or ad-hoc download flows.
 3. **Weights are a pointer, never embedded** (`WeightsRef` = HF repo id). Do not stage weights
    into a bundle.
-4. **Self-contained ("fat") packages ship the author's built artifacts** — their `ttnn` wheel
-   (custom kernels compiled in), base vLLM, plugin — plus their modified metal tree. The engine
-   is what's on the box, not a stock pin.
-5. **Manifest back-compat.** `manifest.py` must keep reading every version in
-   `SUPPORTED_SCHEMAS` (v3/v4/v5). Add fields as optional; bump `SCHEMA_VERSION` only for a new
-   authored schema and keep the old readers + a round-trip test.
+4. **Two bundle schemas, both self-contained.** A **v5 "fat"** bundle (schema `5`, the
+   `bundled` block, authored with `tt-model package`) ships the author's built artifacts —
+   their `ttnn` wheel (custom kernels compiled in), an empty-target vLLM wheel, the plugin
+   wheel — plus their modified `tt-metal-community` tree, installed into a fresh venv by
+   `install.sh`. A **v6 "thin"** bundle (schema `6`, the `deps` block, authored with
+   `tt-model package-thin`) builds the venv from pip pins (`ttnn` / `tt-metal-models`) plus
+   bundled wheels (the `vllm-tt-plugin` + any `generic_op` wheel) plus an empty-target vLLM
+   build step — no embedded `ttnn` wheel, no `metal/` tree. Either way the engine that serves
+   is the one the bundle builds, never a shared box install.
+5. **Manifest support is v5 + v6 only.** `manifest.py`'s `SUPPORTED_SCHEMAS` is
+   `{"5", "6"}`; a bundle with any other `schema_version` is refused ("re-publish the bundle
+   with a current tt-model"). Add fields as optional and keep a round-trip test; bump
+   `SCHEMA_VERSION` only for a genuinely new authored schema.
 6. **The serving contract is the plugin's `EXTRA_MODELS_DIR`**: per-model *subfolder* with
    `vllm_metadata.json` (`arch` + `main_class`). Keep `run.sh`/`stage_package` aligned with it.
 
@@ -58,10 +66,12 @@ violates one of these is wrong even if tests pass:
    a link to the tracking issue if one applies.
 
 ## Reuse, don't reinvent
-`hub.py` (HF push/pull), `runtime.py` (`download_weights`, `pip_install_wheels`,
-`install_self_contained`), `bundles.py` (EXTRA_MODELS_DIR materialization + metadata render),
-`packaging.py` (staging), `provision.py` (host setup). Prefer extending these over new
-parallel code paths.
+`hub.py` (HF push/pull + catalog listing), `runtime.py` (`download_weights`,
+`install_self_contained`), `packaging.py` (`stage_package`, `render_install_sh`,
+`render_run_sh` — the running-folder layout + the EXTRA_MODELS_DIR / `vllm_metadata.json`
+render), `manifest.py` (the v5/v6 schema + `compare()`, the compatibility verdict),
+`metal.py`/`device.py` (arch/machine detection), `localdb.py` (installed-bundle bookkeeping).
+Prefer extending these over new parallel code paths.
 
 **All terminal output goes through `console.py`.** No new `typer.secho`, no scattered
 `print`. See [docs/cli_output.md](docs/cli_output.md) for the vocabulary and the rules that
@@ -69,9 +79,10 @@ are easy to get wrong — chiefly: capture subprocess noise and surface it only 
 never gate a failure on `show_detail()`, and keep `--print`/`--json` on `console.raw()` so
 Rich cannot wrap a pasteable command or a JSON document.
 
-**Scripts in `scripts/` are shims.** `install.sh` and `make_test_cache.sh` exist for the
-bootstrap case only and forward to the CLI. Logic added there cannot reuse tt-model's own
-detection and drifts from the CLI silently; `tests/test_install_script.py` enforces this.
+**The bundle's own `install.sh`/`run.sh` are generated, not hand-maintained.** They are
+rendered from the manifest by `render_install_sh`/`render_run_sh` in `packaging.py`. Change the
+rendered script there (with a test), never by editing a staged bundle — a bundle in the wild
+carries whatever it was published with.
 
 ## Don't
 - Don't vendor `torch`/`vllm`/`transformers` — they are pip deps.
