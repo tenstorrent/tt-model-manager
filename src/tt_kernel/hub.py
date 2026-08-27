@@ -344,6 +344,11 @@ class _ActivityTqdm:
     label = "Working"
     _live = {}  # id -> (n, total), so concurrent file bars can be summed
 
+    # `_lock` is deliberately NOT defined at class level: tqdm.contrib.concurrent's
+    # ensure_lock() treats a pre-existing one as the caller's and restores it, but does
+    # `del tqdm_class._lock` when it created it. Letting get_lock() install it keeps that
+    # bookkeeping correct.
+
     def __init__(self, *args, **kwargs):
         from . import console
 
@@ -353,12 +358,36 @@ class _ActivityTqdm:
         self.desc = kwargs.get("desc") or ""
         self.unit = kwargs.get("unit", "")
         self._key = id(self)
+        # tqdm's primary form is an iterable WRAPPER — tqdm(iterable) — and
+        # tqdm.contrib.concurrent._executor_map relies on it:
+        #     list(tqdm_class(ex.map(fn, *iterables), **kwargs))
+        # so consuming the wrapped iterator is what actually performs the work.
+        # Returning an empty iterator here made snapshot_download download NOTHING while
+        # reporting success. huggingface_hub's own direct uses pass no iterable.
+        self._iterable = args[0] if args else kwargs.get("iterable")
         # Only byte-denominated bars are worth aggregating; a "Fetching 5 files" bar has a
         # different unit and would corrupt the byte total.
         self._bytes = self.unit in ("B", "iB")
         if self._bytes:
             _ActivityTqdm._live[self._key] = (self.n, self.total or 0)
             self._render()
+
+    # -- the class-level lock protocol tqdm.contrib.concurrent requires ------------
+    # huggingface_hub routes multi-file downloads through thread_map, whose ensure_lock()
+    # calls get_lock()/set_lock() on the CLASS. Without them snapshot_download died with
+    # "type object '_ActivityTqdm' has no attribute 'get_lock'". Delegating to the real
+    # tqdm's lock keeps whatever cross-process semantics it intends.
+    @classmethod
+    def get_lock(cls):
+        if not hasattr(cls, "_lock"):
+            from tqdm import tqdm as _real_tqdm
+
+            cls._lock = _real_tqdm.get_lock()
+        return cls._lock
+
+    @classmethod
+    def set_lock(cls, lock):
+        cls._lock = lock
 
     # -- the tqdm surface huggingface_hub touches ---------------------------------
     def update(self, n=1):
@@ -400,7 +429,13 @@ class _ActivityTqdm:
         pass  # tqdm.write() is a terminal escape hatch; we own the terminal here
 
     def __iter__(self):
-        return iter(())
+        # See the note in __init__: this must pass the wrapped iterable through, or the
+        # work driven by iterating it never happens.
+        if self._iterable is None:
+            return
+        for obj in self._iterable:
+            yield obj
+            self.update(1)
 
     @classmethod
     def _render(cls):
