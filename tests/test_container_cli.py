@@ -206,3 +206,106 @@ def test_profiles_marks_the_default(tmp_path, monkeypatch, capsys):
     container_cli.list_containers(m)
     out = capsys.readouterr().out
     assert "p150x4" in out and "default" in out and "p150x2" in out
+
+
+# ------------------------------------------------------------------ push
+
+
+def _staged(tmp_path, *, hub_hosted=True, with_layout=True, repo="raahem/qwen") -> Path:
+    """A staged package directory as `package --container` would leave it."""
+    from tt_kernel.container_manifest import ContainerManifest
+
+    raw = json.loads(json.dumps(BASE))
+    if not hub_hosted:
+        raw["image"] = {"registry": "ghcr.io/tenstorrent"}
+    m = ContainerManifest.model_validate(raw)
+    wire = m.to_wire(image_tag="tt-model/my-model:abc123", tt_metal_version="0.72.1",
+                     tt_kernel_version="0.1.0", built={"repo": repo})
+    out = tmp_path / "build" / "my-model"
+    (out / "code").mkdir(parents=True, exist_ok=True)
+    (out / "tt_kernel_manifest.json").write_text(wire.to_json())
+    (out / "README.md").write_text("# card\n")
+    blobs = out / "image" / "blobs" / "sha256"
+    blobs.mkdir(parents=True, exist_ok=True)
+    if with_layout:
+        (out / "image" / "oci-layout").write_text('{"imageLayoutVersion":"1.0.0"}')
+    (blobs / ("aa" * 8)).write_text("layer" * 100)
+    return out
+
+
+def test_a_staged_directory_is_recognised_as_a_container_package(tmp_path):
+    assert container_cli.is_package_dir(_staged(tmp_path)) is not None
+    assert container_cli.is_package_dir(tmp_path) is None
+
+
+def test_push_uploads_the_whole_directory_with_the_large_folder_uploader(tmp_path, monkeypatch):
+    """upload_large_folder, not upload_folder: image/ is multi-GB and must resume."""
+    from tt_kernel import hub
+
+    seen = {}
+    monkeypatch.setattr(hub, "push_large_folder",
+                        lambda repo_id, folder, **k: seen.update(repo=repo_id, folder=folder))
+    out = _staged(tmp_path)
+    container_cli.push_container(str(out), container_cli.is_package_dir(out), "raahem/qwen")
+    assert seen["repo"] == "raahem/qwen"
+    assert Path(seen["folder"]) == out
+
+
+def test_push_refuses_a_directory_whose_image_is_not_an_oci_layout(tmp_path, monkeypatch):
+    out = _staged(tmp_path, with_layout=False)
+    with pytest.raises(container_cli.ContainerCliError, match="not an OCI layout"):
+        container_cli.push_container(str(out), container_cli.is_package_dir(out), "r/x")
+
+
+def test_a_registry_hosted_package_pushes_only_the_pointer(tmp_path, monkeypatch, capsys):
+    from tt_kernel import hub
+
+    monkeypatch.setattr(hub, "push_large_folder", lambda *a, **k: None)
+    out = _staged(tmp_path, hub_hosted=False, with_layout=False)
+    container_cli.push_container(str(out), container_cli.is_package_dir(out), "r/x")
+    assert "carries only a pointer" in capsys.readouterr().out
+
+
+def test_push_takes_the_repo_from_the_manifest(tmp_path, monkeypatch):
+    calls = {}
+    monkeypatch.setattr(container_cli, "push_container",
+                        lambda d, m, r: calls.update(dir=d, repo=r))
+    monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: None)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen"))])
+    assert res.exit_code == 0, res.output
+    assert calls["repo"] == "raahem/qwen"
+
+
+def test_an_explicit_repo_overrides_the_manifest(tmp_path, monkeypatch):
+    calls = {}
+    monkeypatch.setattr(container_cli, "push_container",
+                        lambda d, m, r: calls.update(repo=r))
+    monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: None)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path)), "--repo", "other/name"])
+    assert res.exit_code == 0, res.output
+    assert calls["repo"] == "other/name"
+
+
+def test_visibility_is_still_tri_state_for_a_container_push(tmp_path, monkeypatch):
+    """A push must never publish a private repo by omission — same rule as v4/v5."""
+    seen = {}
+    monkeypatch.setattr(container_cli, "push_container", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_ensure_repo",
+                        lambda repo_id, private, **k: seen.update(private=private))
+    runner.invoke(cli.app, ["push", str(_staged(tmp_path))])
+    assert seen["private"] is None            # said nothing -> change nothing
+    runner.invoke(cli.app, ["push", str(_staged(tmp_path)), "--private"])
+    assert seen["private"] is True
+
+
+def test_publish_is_refused_for_a_container_package(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: None)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path)), "--publish", "--public"])
+    assert res.exit_code != 0
+    assert "not listed there yet" in res.output
+
+
+def test_a_plain_repo_id_still_goes_down_the_v5_path():
+    """The dispatch is on "is this a package directory", so a repo id must not match."""
+    res = runner.invoke(cli.app, ["push", "org/name"])
+    assert "container" not in res.output.lower() or res.exit_code != 0

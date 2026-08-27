@@ -315,6 +315,8 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
     image = f"tt-model/{m.name}:{(metal.sha or 'dev')[:9]}"
     built: Dict[str, object] = {
         "image": image,
+        # the repo the author named in the manifest, so `push <dir>` can default to it
+        "repo": m.repo,
         "tt_model_version": __version__,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "tt_metal": {

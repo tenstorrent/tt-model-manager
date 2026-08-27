@@ -401,3 +401,93 @@ def test_output_is_teed_to_the_log_and_echoed(tmp_path, monkeypatch):
     build.run_build(staged, echo=seen.append)
     assert any("hello" in ln for ln in seen)
     assert "hello" in build.build_log_path("my-model").read_text()
+
+
+# ------------------------------------------------------------------ end to end
+#
+# stage -> build -> finalize, against a fake `docker` that behaves like the real one for
+# the three things we ask of it: build, save (an OCI-layout tar), and run (the env freeze).
+# This is the only test that exercises finalize(), which is what actually produces the
+# directory `push` uploads.
+
+FAKE_DOCKER = r'''
+case "$1" in
+  build) echo "#7 [builder 1/9] RUN ./build_metal.sh"; exit 0 ;;
+  save)
+    d=$(mktemp -d)
+    mkdir -p "$d/blobs/sha256"
+    printf '{"imageLayoutVersion":"1.0.0"}' > "$d/oci-layout"
+    printf '{"manifests":[]}' > "$d/index.json"
+    printf 'layer-bytes' > "$d/blobs/sha256/aaaaaaaaaaaaaaaa"
+    tar -C "$d" -cf - .
+    exit 0 ;;
+  run) echo "torch==2.11.0+cpu"; echo "vllm==0.24.0"; exit 0 ;;
+esac
+exit 1
+'''
+
+
+def test_package_end_to_end_produces_a_publishable_directory(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    _fake_docker(tmp_path, monkeypatch, FAKE_DOCKER)
+    metal = _fake_metal(tmp_path)
+
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    build.run_build(staged)
+    out = build.finalize(staged)
+
+    # the four things a consumer's pull depends on
+    assert (out / "tt_kernel_manifest.json").is_file()
+    assert (out / "README.md").is_file()
+    assert (out / "code" / "models" / "common" / "mod.py").is_file()
+    assert (out / "image" / "oci-layout").is_file()
+    assert (out / "image" / "blobs" / "sha256" / "aaaaaaaaaaaaaaaa").is_file()
+
+    # the build context is gone; only the publishable tree remains
+    assert not staged.ctx.exists()
+
+
+def test_the_published_manifest_is_a_readable_v5_1_document(tmp_path, monkeypatch):
+    from tt_kernel.manifest import Manifest
+
+    _no_network(monkeypatch)
+    _fake_docker(tmp_path, monkeypatch, FAKE_DOCKER)
+    metal = _fake_metal(tmp_path)
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    build.run_build(staged)
+    out = build.finalize(staged)
+
+    m = Manifest.from_json((out / "tt_kernel_manifest.json").read_text())
+    assert m.schema_version == "5.1" and m.is_container
+    assert m.container.image.tag == staged.image
+    assert m.container.resolve_profile().name == "p150x4"
+    assert m.weights.repo_id == "org/Weights-7B"
+    # provenance survived into the published document
+    assert m.container.built["tt_metal"]["sha"] == staged.built["tt_metal"]["sha"]
+    assert m.container.built["repo"] == "you/my-model"
+
+
+def test_the_env_is_frozen_from_the_image_when_no_lock_was_supplied(tmp_path, monkeypatch):
+    """The first build resolves live; freezing is what makes every later build reproducible."""
+    _no_network(monkeypatch)
+    _fake_docker(tmp_path, monkeypatch, FAKE_DOCKER)
+    metal = _fake_metal(tmp_path)
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    build.run_build(staged)
+    out = build.finalize(staged)
+
+    lock = (out / "requirements.lock").read_text()
+    assert "torch==2.11.0+cpu" in lock and "vllm==0.24.0" in lock
+    assert staged.manifest.runtime["lock"] == "requirements.lock"
+
+
+def test_an_existing_lock_is_passed_through_untouched(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    _fake_docker(tmp_path, monkeypatch, FAKE_DOCKER)
+    metal = _fake_metal(tmp_path)
+    (tmp_path / "requirements.lock").write_text("pinned==1.0\n")
+    rt = dict(json.loads(json.dumps(BASE))["runtime"], lock="requirements.lock")
+    staged = build.stage(_manifest_file(tmp_path, metal, runtime=rt), out_root=tmp_path / "out")
+    build.run_build(staged)
+    out = build.finalize(staged)
+    assert (out / "requirements.lock").read_text() == "pinned==1.0\n"

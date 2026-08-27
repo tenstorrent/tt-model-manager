@@ -715,7 +715,15 @@ def _install_summary(verdict, python: str, *, allow_no_ttnn: bool) -> None:
 # ---------------------------------------------------------------------------- push
 @app.command(rich_help_panel="Publish models")
 def push(
-    repo_id: str = typer.Argument(..., help="Target repo as namespace/name."),
+    repo_id: str = typer.Argument(
+        ..., help="Target repo as namespace/name — or, for a CONTAINER (v5.1) package, "
+        "the staged directory that `tt-model package --container` produced (the repo is "
+        "then taken from its manifest; pass --repo to override)."
+    ),
+    repo: Optional[str] = typer.Option(
+        None, "--repo", help="For a container package directory: the target repo, "
+        "overriding the one recorded in the manifest."
+    ),
     private: Optional[bool] = typer.Option(
         None, "--private/--public", help="Repo visibility. Applied when the repo is CREATED "
         "(new repos default to public). For a repo that already exists, passing the flag "
@@ -784,6 +792,30 @@ def push(
     ``VllmGeneratorAdapter`` class + deps) as a **kernels-less** bundle — no precompiled cache
     is shipped; the vLLM plugin JITs at first-run warmup.
     """
+    # --- container (v5.1): the positional is a staged package DIRECTORY. Everything
+    # below is v3/v4/v5 and untouched.
+    from . import container_cli
+
+    cmani = container_cli.is_package_dir(Path(repo_id).expanduser()) if repo_id else None
+    if cmani is not None:
+        staged_dir = str(Path(repo_id).expanduser())
+        target = repo or (cmani.container.built or {}).get("repo")
+        if not target:
+            raise _err(
+                f"{staged_dir} records no target repo; pass --repo namespace/name."
+            )
+        if publish:
+            raise _err(
+                "--publish lists a bundle in the community catalog, which indexes v4/v5 "
+                "bundles; a container package is not listed there yet."
+            )
+        _ensure_repo(target, private)
+        try:
+            container_cli.push_container(staged_dir, cmani, target)
+        except container_cli.ContainerCliError as e:
+            raise _err(str(e))
+        return
+
     # A catalog listing is public by definition — refuse to list a private repo. (An
     # *unspecified* visibility is resolved later, in _ensure_repo, where we know whether the
     # repo already exists and what it currently is.)

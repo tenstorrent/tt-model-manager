@@ -88,6 +88,60 @@ def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> 
     return out
 
 
+# ------------------------------------------------------------------------------ push
+
+
+def is_package_dir(path: Path) -> Optional[Manifest]:
+    """The container manifest in a staged package directory, or None if it is not one."""
+    mpath = Path(path) / MANIFEST_NAME
+    if not mpath.is_file():
+        return None
+    try:
+        m = Manifest.from_json(mpath.read_text())
+    except ValueError:
+        return None
+    return m if m.is_container else None
+
+
+def push_container(staged_dir: str, manifest: Manifest, repo_id: str) -> None:
+    """Upload a staged container package directory to the Hub.
+
+    The caller owns repo creation and visibility (``_ensure_repo`` in the CLI), so this
+    only moves bytes. The model card is already written into the directory by ``package``
+    and carries its own tags, so nothing here rewrites it — ``tag_repo`` would clobber it.
+    """
+    out = Path(staged_dir)
+    image_dir = out / "image"
+    spec = manifest.container
+    assert spec is not None
+
+    if spec.image.is_hub_hosted:
+        if not (image_dir / "oci-layout").is_file():
+            raise ContainerCliError(
+                f"{image_dir} is not an OCI layout — re-run `tt-model package --container`. "
+                "(The manifest says the image travels in this repo.)"
+            )
+        blobs = [p for p in (image_dir / "blobs").rglob("*") if p.is_file()]
+        total = sum(p.stat().st_size for p in blobs)
+        console.note(
+            f"image/ {console.fmt_bytes(total)} in {len(blobs)} content-addressed blobs — "
+            "layers shared with another model on the same tt-metal commit upload once",
+            marker="•",
+        )
+    else:
+        console.note(
+            f"image lives in {spec.image.registry}; this repo carries only a pointer "
+            f"({spec.image.pull_ref}). Push the image there separately.",
+            marker="•",
+        )
+
+    with console.step(f"uploading to {repo_id}"):
+        hub.push_large_folder(repo_id, out)
+
+    console.milestone(f"pushed {repo_id}")
+    console.note(f"consumers:  tt-model serve {repo_id}", marker="→")
+
+
 # ------------------------------------------------------------------------------ pull
 
 

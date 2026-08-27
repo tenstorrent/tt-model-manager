@@ -76,6 +76,26 @@ def push_folder(repo_id: str, folder: Path, commit_message: str) -> None:
         )
 
 
+def push_large_folder(repo_id: str, folder: Path, *, num_workers: int = 4) -> None:
+    """Upload a container package directory, whose ``image/`` is multi-GB.
+
+    ``upload_large_folder`` rather than ``upload_folder``: it commits in batches, resumes
+    per file after an interruption, and skips blobs the Hub already has. Since the OCI
+    layout is content-addressed, two models built on the same tt-metal commit share most
+    of their layers and the second push uploads only what actually differs.
+
+    It manages its own progress reporting and takes no ``tqdm_class``, so the bridge here
+    just silences HF's writers and shows one activity line.
+    """
+    with progress_bridge(f"Uploading to {repo_id}"):
+        _api().upload_large_folder(
+            repo_id=repo_id,
+            repo_type=_REPO_TYPE,
+            folder_path=str(folder),
+            num_workers=num_workers,
+        )
+
+
 def tag_repo(repo_id: str, tags: List[str]) -> None:
     """Best-effort: write a model card with metadata tags so search can filter."""
     from huggingface_hub import ModelCard, ModelCardData
