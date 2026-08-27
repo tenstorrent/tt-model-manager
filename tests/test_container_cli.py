@@ -22,6 +22,18 @@ from test_container_manifest import BASE
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _host_is_fine(monkeypatch):
+    """Default: a healthy host with the image loaded.
+
+    serve() preflights the host and checks the image is present; neither is what most of
+    these tests are about, and both would otherwise depend on the machine running them.
+    Tests that care re-patch these themselves.
+    """
+    monkeypatch.setattr(container, "preflight", lambda **k: [])
+    monkeypatch.setattr(container, "image_present", lambda ref: True)
+
+
 def _wire(tmp_path: Path, **over) -> Path:
     raw = json.loads(json.dumps(BASE))
     raw.update(over)
@@ -309,3 +321,211 @@ def test_a_plain_repo_id_still_goes_down_the_v5_path():
     """The dispatch is on "is this a package directory", so a repo id must not match."""
     res = runner.invoke(cli.app, ["push", "org/name"])
     assert "container" not in res.output.lower() or res.exit_code != 0
+
+
+# ------------------------------------------------------------------ doctor
+
+
+def _req(name, ok, detail="", fix="fix it"):
+    return container.Requirement(name, ok, detail, fix)
+
+
+def test_doctor_reports_the_container_path_separately(monkeypatch):
+    """A consumer whose box can serve must not be told to install a host toolchain the
+    container path exists to avoid."""
+    monkeypatch.setattr(container, "preflight",
+                        lambda **k: [_req("docker", True, "29.5.3"),
+                                     _req("tt devices", True, "/dev/tenstorrent"),
+                                     _req("hugepages", True, "/dev/hugepages-1G")])
+    res = runner.invoke(cli.app, ["doctor"])
+    assert "Container path (v5.1)" in res.output
+    assert "no host tt-metal, vLLM or venv" in res.output
+
+
+def test_doctor_says_which_paths_work_when_the_host_toolchain_is_inadequate(monkeypatch):
+    monkeypatch.setattr(container, "preflight",
+                        lambda **k: [_req("docker", True, "29.5.3"),
+                                     _req("tt devices", True, "/dev/tenstorrent"),
+                                     _req("hugepages", True, "/dev/hugepages-1G")])
+    res = runner.invoke(cli.app, ["doctor"])
+    if res.exit_code != 0:            # a box with no host vLLM exits 1
+        # rich hard-wraps at the terminal width, so compare on collapsed whitespace
+        flat = " ".join(res.output.split())
+        assert "host toolchain inadequate" in flat
+        assert "container (v5.1) packages can" in flat
+
+
+def test_doctor_surfaces_a_container_blocker_with_its_fix(monkeypatch):
+    monkeypatch.setattr(container, "preflight",
+                        lambda **k: [_req("docker", True, "29.5.3"),
+                                     _req("hugepages", False, "not mounted",
+                                          "mount 1G hugepages at exactly /dev/hugepages-1G")])
+    res = runner.invoke(cli.app, ["doctor"])
+    assert "mount 1G hugepages at exactly" in res.output
+
+
+def test_pull_preflights_without_requiring_a_card(tmp_path, monkeypatch):
+    """pull only moves bytes."""
+    seen = {}
+    monkeypatch.setattr(container, "preflight",
+                        lambda **k: seen.update(k) or [_req("docker", True, "29.5.3")])
+    monkeypatch.setattr(container, "image_present", lambda ref: True)
+    monkeypatch.setattr(container_cli, "_download_weights", lambda r: Path("/w"))
+    container_cli.pull_container("org/x", None, _manifest(tmp_path), no_weights=True)
+    assert seen == {"need_devices": False}
+
+
+# ------------------------------------------------------------------ missing image
+
+
+def test_serve_reloads_the_image_from_the_staged_layout_when_docker_lost_it(
+        tmp_path, monkeypatch):
+    """`docker image prune` between package and serve is ordinary. Reloading from the
+    sibling image/ beats failing on a Docker Hub pull for a local-only tag."""
+    from tt_kernel import oci
+
+    loaded, ran = [], []
+    monkeypatch.setattr(container, "preflight", lambda **k: [])
+    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(oci, "load", lambda src, expect_tag=None: loaded.append(src))
+
+    staged = tmp_path / "staged"
+    (staged / "image").mkdir(parents=True)
+    (staged / "image" / "oci-layout").write_text("{}")
+    container_cli.serve_container(_manifest(tmp_path), source=staged)
+    assert loaded == [staged / "image"]
+    assert ran and ran[0][:2] == ["docker", "run"]
+
+
+def test_a_missing_image_with_no_layout_names_all_three_remedies(tmp_path, monkeypatch):
+    monkeypatch.setattr(container, "preflight", lambda **k: [])
+    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_manifest(tmp_path), source=tmp_path / "nope")
+    msg = str(e.value)
+    assert "is not loaded in docker" in msg
+    assert "tt-model pull" in msg and "tt-model package" in msg
+
+
+def test_print_does_not_require_the_image_to_be_loaded(tmp_path, monkeypatch):
+    """--print must work on a machine that has never pulled anything."""
+    monkeypatch.setattr(container, "image_present",
+                        lambda ref: pytest.fail("must not be checked for --print"))
+    container_cli.serve_container(_manifest(tmp_path), print_only=True)
+
+
+# ------------------------------------------------------------------ --port
+
+
+def _argv_of(monkeypatch, **kw):
+    ran = []
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    return ran, kw
+
+
+def test_port_moves_the_publish_mapping_and_the_server_together(tmp_path, monkeypatch):
+    """The whole reason this is a flag: the port lives in TWO places, and a passthrough
+    argument can only move one of them."""
+    ran, _ = _argv_of(monkeypatch)
+    container_cli.serve_container(_manifest(tmp_path), port=8001)
+    argv = ran[0]
+    assert argv[argv.index("--publish") + 1] == "8001:8001"
+    assert argv[argv.index("--port") + 1] == "8001"
+    assert "8000" not in argv
+
+
+def test_without_the_flag_the_manifest_port_is_used(tmp_path, monkeypatch):
+    ran, _ = _argv_of(monkeypatch)
+    container_cli.serve_container(_manifest(tmp_path))
+    argv = ran[0]
+    assert argv[argv.index("--publish") + 1] == "8000:8000"
+    assert argv[argv.index("--port") + 1] == "8000"
+
+
+def test_the_two_ports_can_never_diverge(tmp_path, monkeypatch):
+    """Both are derived from one overridden value, so they must always agree."""
+    for p in (8000, 8001, 9999):
+        ran, _ = _argv_of(monkeypatch)
+        container_cli.serve_container(_manifest(tmp_path), port=p)
+        argv = ran[0]
+        published = argv[argv.index("--publish") + 1]
+        assert published == f"{p}:{p}"
+        assert argv[argv.index("--port") + 1] == str(p)
+
+
+def test_a_passed_through_port_is_refused_with_the_flag_that_works(tmp_path):
+    """Silently unreachable otherwise: the server moves, the mapping does not."""
+    for bad in (["--port", "8001"], ["--port=8001"]):
+        with pytest.raises(container_cli.ContainerCliError, match="must come before the target"):
+            container_cli.serve_container(_manifest(tmp_path), extra_args=bad)
+
+
+def test_other_passthrough_args_are_still_allowed(tmp_path, monkeypatch):
+    ran, _ = _argv_of(monkeypatch)
+    container_cli.serve_container(_manifest(tmp_path), extra_args=["--disable-log-stats"])
+    assert "--disable-log-stats" in ran[0]
+
+
+def test_the_endpoint_hint_reports_the_overridden_port(tmp_path, monkeypatch, capsys):
+    _argv_of(monkeypatch)
+    container_cli.serve_container(_manifest(tmp_path), port=8001)
+    assert "127.0.0.1:8001" in capsys.readouterr().out
+
+
+def test_the_cli_accepts_port_before_the_target(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(container_cli, "resolve_target", lambda t: _manifest(tmp_path))
+    monkeypatch.setattr(container_cli, "serve_container",
+                        lambda m, **k: seen.update(k))
+    res = runner.invoke(cli.app, ["serve", "--port", "8123", "org/x"])
+    assert res.exit_code == 0, res.output
+    assert seen["port"] == 8123
+
+
+# ------------------------------------------------------------------ authored vs published
+
+
+def _authored(tmp_path):
+    import yaml
+    raw = json.loads(json.dumps(BASE))
+    p = tmp_path / "tt-model.yaml"
+    p.write_text(yaml.safe_dump(raw))
+    return p
+
+
+def test_serving_the_authored_yaml_explains_the_lifecycle(tmp_path):
+    """Without this it falls through to the Hub path and reports "Repo id must be in the
+    form 'namespace/repo_name'" about a filesystem path."""
+    res = runner.invoke(cli.app, ["serve", str(_authored(tmp_path)), "--print"])
+    assert res.exit_code != 0
+    flat = " ".join(res.output.split())
+    assert "AUTHORING manifest" in flat
+    assert "tt-model package --container" in flat
+    assert "tt_kernel_manifest.json" in flat
+
+
+def test_stop_on_the_authored_yaml_explains_it_too(tmp_path):
+    res = runner.invoke(cli.app, ["stop", str(_authored(tmp_path))])
+    assert res.exit_code != 0
+    assert "AUTHORING manifest" in " ".join(res.output.split())
+
+
+def test_the_published_manifest_is_not_mistaken_for_an_authored_one(tmp_path):
+    """The wire manifest is JSON, so it must never trip the hint."""
+    assert container_cli.authored_manifest_hint(str(_wire(tmp_path))) is None
+
+
+def test_an_unrelated_yaml_is_not_claimed(tmp_path):
+    p = tmp_path / "docker-compose.yaml"
+    p.write_text("services:\n  web:\n    image: nginx\n")
+    assert container_cli.authored_manifest_hint(str(p)) is None
+
+
+def test_a_repo_id_is_not_treated_as_a_path():
+    assert container_cli.authored_manifest_hint("org/name") is None

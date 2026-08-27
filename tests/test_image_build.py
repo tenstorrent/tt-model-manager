@@ -216,6 +216,31 @@ def test_the_runtime_user_is_uid_1000_with_a_real_home():
     assert "USER tt" in DOCKERFILE
 
 
+def test_the_runtime_dirs_are_writable_by_an_arbitrary_uid():
+    """`serve` passes --user <host uid>, which may have no passwd entry and will often not
+    be 1000. HOME must be set explicitly (glibc would give an unknown uid HOME=/, which is
+    unwritable and kills the JIT) and the runtime dirs must be world-writable."""
+    assert "chmod 1777 /home/tt" in DOCKERFILE
+    assert "ENV HOME=/home/tt" in DOCKERFILE
+
+
+def test_the_uid_has_a_name_without_a_passwd_entry():
+    """getpass.getuser() falls back to pwd.getpwuid() and raises KeyError for an unknown
+    uid. torch's inductor calls it to name its cache dir, so the server would die on
+    import. Naming the user in the environment avoids making /etc/passwd writable."""
+    assert "ENV USER=tt" in DOCKERFILE
+    assert "ENV LOGNAME=tt" in DOCKERFILE
+
+
+def test_uid_1000_is_freed_before_it_is_claimed():
+    """Ubuntu 24.04's base image ships a user at uid 1000 (`ubuntu`); 22.04 did not. An
+    unconditional useradd dies with "UID 1000 is not unique" on any 24.04 build."""
+    assert "getent passwd 1000" in DOCKERFILE
+    assert "userdel" in DOCKERFILE
+    # freed by ID, not by assuming the name — base images differ
+    assert "userdel -r ubuntu" not in DOCKERFILE
+
+
 def test_the_metal_tree_is_owned_by_the_runtime_user():
     """tools/tracy/common.py mkdirs inside TT_METAL_HOME on IMPORT — root-owned trees
     turn that into EACCES ten minutes into a boot."""
@@ -232,6 +257,15 @@ def test_the_sfpi_cross_compilers_host_libraries_are_installed():
 
 def test_ld_library_path_carries_both_metal_libs_and_ulfm_mpi():
     assert "LD_LIBRARY_PATH=/opt/tt-metal/build/lib:${OMPI_DIR}/lib" in DOCKERFILE
+
+
+def test_home_is_reopened_after_verification_created_cache_dirs():
+    """verify.sh runs as uid 1000 and its imports create $HOME cache dirs (matplotlib,
+    ttnn, torch, vllm) at 0755. The arbitrary uid `serve` passes cannot write inside them,
+    so the tree has to be re-opened AFTER verification, not only before."""
+    chmod_after = DOCKERFILE.rindex("chmod -R a+rwX /home/tt")
+    verify_run = DOCKERFILE.index("bash /ctx/verify.sh")
+    assert chmod_after > verify_run
 
 
 def test_the_verification_run_is_in_the_runtime_stage_after_the_user_switch():
@@ -343,3 +377,48 @@ def test_the_cpu_suffix_check_survives_alongside_the_version_check(tmp_path):
     src = dict(BASE["source"], tt_metal=str(_metal_tree(tmp_path, REAL_REQ_SNIPPET)))
     s = _verify_payloads(source=src)
     assert "'+cpu'" in s and "'2.11.0'" in s
+
+
+# ------------------------------------------------------------------ generated-script sanity
+
+
+def test_every_generated_verify_line_is_a_compilable_program():
+    """The checks are joined with "; " into one `python -c`, which a snippet containing a
+    for-loop cannot survive — such a snippet has to be emitted as its own line. Compiling
+    each line catches that class of bug here instead of at the end of a full image build."""
+    import shlex
+
+    for kind_over in ({}, FORK):
+        m = _mani(**kind_over)
+        rt = json.loads(json.dumps(BASE))["runtime"]
+        rt["extra_models_dir"] = "models/common"
+        for over in (kind_over, {**kind_over, "runtime": rt} if not kind_over else kind_over):
+            mm = _mani(**over)
+            for i, line in enumerate(launcher_for(mm.kind).verify_lines(mm)):
+                argv = shlex.split(line)
+                assert argv[1] == "-c", argv
+                compile(argv[2], f"<verify {mm.kind} {i}>", "exec")
+
+
+def test_every_generated_install_line_is_a_single_shell_command():
+    """install_engine.sh runs under `set -euxo pipefail`; a line that is accidentally two
+    statements would half-execute."""
+    import shlex
+
+    for over in ({}, FORK):
+        m = _mani(**over)
+        for line in launcher_for(m.kind).install_lines(m):
+            shlex.split(line)  # raises on unbalanced quoting
+
+
+def test_extra_models_verification_resolves_the_class_not_just_the_file():
+    """Registration is lazy: the plugin stores "module:Class" and vLLM imports it much
+    later, in the API server and again in each EngineCore worker. A shim that computes
+    the repo root by directory depth resolves on the author's box and fails in the image."""
+    rt = json.loads(json.dumps(BASE))["runtime"]
+    rt["extra_models_dir"] = "models/common"
+    s = _verify_payloads(runtime=rt)
+    assert "importlib.import_module" in s
+    assert "sys.path.append" in s          # mirrors the plugin: append, never insert(0)
+    assert "main_class" in s
+    assert "registers no models" in s      # the weaker check still holds too

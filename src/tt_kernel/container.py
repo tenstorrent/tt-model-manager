@@ -19,14 +19,21 @@ The docker flags are not folklore; each one is load-bearing:
   ``HF_MODULES_CACHE``. Weights are the only thing that ever touches the host.
 - a per-model host dir at ``TT_METAL_CACHE``: the JIT kernel/trace cache. Persisting it
   across boots is the difference between a ~6-minute and a ~15-minute start.
+- ``--user <host uid>:<host gid>``: everything the container writes lands in bind mounts
+  the host user owns (the HF cache, the kernel cache), so it must write AS that user. A
+  baked-in uid cannot work — 1000 and 1001 are both common — and mismatched ownership
+  fails as ``Permission denied`` from the JIT, minutes into a boot.
 """
 
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .manifest import Manifest, ServeProfile
 
@@ -44,6 +51,107 @@ SIGKILL_EXIT_CODE = "137"
 
 class ContainerError(RuntimeError):
     """A docker operation that must not proceed. The message is user-facing."""
+
+
+# --------------------------------------------------------------------------- preflight
+
+#: Docker < 25 does not emit an OCI layout from `docker save`, which `oci.save` requires.
+MIN_DOCKER_MAJOR = 25
+
+#: umd matches /proc/mounts against this exact mount point. A subdirectory, a different
+#: dst, or 2M hugepages all fail that match — and the failure surfaces as a device-open
+#: error MINUTES into a boot, nowhere near the cause.
+HUGEPAGES_MOUNT = "/dev/hugepages-1G"
+
+TT_DEVICE = "/dev/tenstorrent"
+
+
+@dataclass(frozen=True)
+class Requirement:
+    name: str
+    ok: bool
+    detail: str      # what was found
+    fix: str = ""    # what to do about it, when not ok
+
+
+def _docker_version() -> Optional[str]:
+    if shutil.which("docker") is None:
+        return None
+    r = _run(["docker", "version", "--format", "{{.Server.Version}}"],
+             capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def preflight(*, need_devices: bool, proc_mounts: Optional[Path] = None,
+              dev_root: Optional[Path] = None) -> List[Requirement]:
+    """Check what this host must have, before anything slow or opaque happens.
+
+    Every one of these fails LATE and unhelpfully if left unchecked: a missing hugepages
+    mount surfaces as a device-open error ten minutes into a boot, and an old Docker only
+    shows up when ``oci.save`` finds no OCI layout after a multi-hour build.
+
+    ``need_devices`` is False for operations that only move bytes (``pull``, ``push``):
+    those work fine on a machine with no card attached.
+    """
+    out: List[Requirement] = []
+
+    version = _docker_version()
+    if version is None:
+        out.append(Requirement(
+            "docker", False, "not found or daemon unreachable",
+            "install Docker and ensure the daemon is running; add yourself to the "
+            "`docker` group (`sudo usermod -aG docker $USER`, then log out and in) so it "
+            "works without sudo",
+        ))
+    else:
+        m = re.match(r"(\d+)", version)
+        major = int(m.group(1)) if m else 0
+        ok = major >= MIN_DOCKER_MAJOR
+        out.append(Requirement(
+            "docker", ok, version,
+            "" if ok else (
+                f"Docker >= {MIN_DOCKER_MAJOR} is required: earlier versions do not emit "
+                "an OCI layout from `docker save`, which packaging and loading rely on "
+                "(installing `skopeo` is an alternative)"
+            ),
+        ))
+
+    if not need_devices:
+        return out
+
+    dev = Path(dev_root) if dev_root is not None else Path(TT_DEVICE)
+    out.append(Requirement(
+        "tt devices", dev.exists(), str(dev) if dev.exists() else "missing",
+        "" if dev.exists() else (
+            f"{TT_DEVICE} does not exist — the Tenstorrent kernel driver (tt-kmd) is not "
+            "loaded, or this is not a machine with a card"
+        ),
+    ))
+
+    mounts = Path(proc_mounts) if proc_mounts is not None else Path("/proc/mounts")
+    try:
+        text = mounts.read_text()
+    except OSError:
+        text = ""
+    mounted = any(
+        len(parts) > 2 and parts[1] == HUGEPAGES_MOUNT and parts[2] == "hugetlbfs"
+        for parts in (ln.split() for ln in text.splitlines())
+    )
+    out.append(Requirement(
+        "hugepages", mounted,
+        HUGEPAGES_MOUNT if mounted else f"{HUGEPAGES_MOUNT} not mounted",
+        "" if mounted else (
+            f"mount 1G hugepages at exactly {HUGEPAGES_MOUNT} — umd matches that path in "
+            "/proc/mounts, so a different mount point silently fails and the container "
+            "then dies on device open, minutes into the boot. This is normally set up by "
+            "the tt-metal host provisioning (see tt-metal's installation docs)"
+        ),
+    ))
+    return out
+
+
+def preflight_failures(reqs: List[Requirement]) -> List[Requirement]:
+    return [r for r in reqs if not r.ok]
 
 
 def _require_container(m: Manifest):
@@ -107,8 +215,12 @@ def compose_run(
     cmd = ["docker", "run"]
     if detach:
         cmd += ["--detach"]
+    # Bind-mount sources must exist before `docker run`, or the daemon creates them as
+    # ROOT and the container (running as the host user) cannot write them.
     cmd += [
         "--name", container_name(m, profile),
+        # write as the host user: see the module docstring
+        "--user", f"{os.getuid()}:{os.getgid()}",
         "--label", f"{LABEL}={m.name}",
         "--label", f"{LABEL}.profile={profile.name}",
         "--device", "/dev/tenstorrent",
@@ -130,6 +242,23 @@ def compose_run(
     cmd += [image_ref(m)]
     cmd += argv
     return cmd
+
+
+def ensure_mount_sources(m: Manifest, *, hf_home_dir: Optional[Path] = None,
+                         cache_dir: Optional[Path] = None) -> None:
+    """Create the bind-mount source dirs, as the host user, before ``docker run``.
+
+    If they do not exist the docker daemon creates them itself — owned by ROOT — and the
+    container, which runs as the host user, then cannot write them. The JIT fails with
+    ``Permission denied`` several minutes into a boot, nowhere near the cause.
+
+    Kept out of ``compose_run`` deliberately: that function is pure argv composition and
+    is asserted through ``serve --print``, which must not touch the filesystem.
+    """
+    hf = Path(hf_home_dir) if hf_home_dir is not None else hf_home()
+    cache = Path(cache_dir) if cache_dir is not None else model_cache_dir(m)
+    for d in (hf, cache):
+        d.mkdir(parents=True, exist_ok=True)
 
 
 def compose_pull(m: Manifest) -> Optional[List[str]]:

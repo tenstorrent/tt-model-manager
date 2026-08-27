@@ -53,6 +53,33 @@ def _run_argv(m, **kw):
     )
 
 
+def test_the_container_runs_as_the_host_user():
+    """Everything it writes lands in bind mounts the host user owns (HF cache, kernel
+    cache), so it must write AS that user. A baked-in uid cannot work — 1000 and 1001 are
+    both common — and a mismatch fails as Permission denied from the JIT, minutes in."""
+    import os
+
+    argv = _run_argv(_wire())
+    assert argv[argv.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
+
+
+def test_mount_sources_are_created_as_the_host_user(tmp_path):
+    """Otherwise the docker daemon creates them as ROOT and the container cannot write."""
+    m = _wire()
+    hf, cache = tmp_path / "hf", tmp_path / "c" / "cache"
+    container.ensure_mount_sources(m, hf_home_dir=hf, cache_dir=cache)
+    assert hf.is_dir() and cache.is_dir()
+
+
+def test_compose_run_creates_nothing(tmp_path):
+    """`serve --print` must not touch the filesystem — composition stays pure."""
+    m = _wire()
+    hf, cache = tmp_path / "hf", tmp_path / "c" / "cache"
+    container.compose_run(m, m.container.resolve_profile(), ["x"], {},
+                          hf_home_dir=hf, cache_dir=cache, include_hf_token=False)
+    assert not hf.exists() and not cache.exists()
+
+
 def test_the_hugepages_mount_is_verbatim():
     """umd regex-matches /proc/mounts for exactly `/dev/hugepages-1G`; a subdirectory or
     a different dst silently fails that match and device-open fails minutes later."""
@@ -343,3 +370,98 @@ def test_an_already_stopped_container_is_just_removed(monkeypatch):
     assert container.stop("c", image="img") is True
     assert any(c[:3] == ["docker", "rm", "c"] for c in calls)
     assert not any("--entrypoint" in c for c in calls)
+
+
+# ------------------------------------------------------------------ host preflight
+#
+# Every check here exists because the UNCHECKED failure is late and unrecognisable. The
+# hugepages one is the worst: umd regex-matches /proc/mounts, so a wrong mount point
+# fails silently and the container dies on device open, minutes into a boot.
+
+GOOD_MOUNTS = (
+    "proc /proc proc rw,relatime 0 0\n"
+    "hugetlbfs /dev/hugepages-1G hugetlbfs rw,mode=777,pagesize=1024M 0 0\n"
+)
+
+
+def _pf(tmp_path, monkeypatch, *, version="29.5.3", mounts=GOOD_MOUNTS, devices=True,
+        need_devices=True):
+    monkeypatch.setattr(container, "_docker_version", lambda: version)
+    m = tmp_path / "mounts"
+    m.write_text(mounts)
+    dev = tmp_path / "tenstorrent"
+    if devices:
+        dev.mkdir()
+    return container.preflight(need_devices=need_devices, proc_mounts=m, dev_root=dev)
+
+
+def _fail_names(reqs):
+    return [r.name for r in container.preflight_failures(reqs)]
+
+
+def test_a_healthy_host_passes_everything(tmp_path, monkeypatch):
+    assert _fail_names(_pf(tmp_path, monkeypatch)) == []
+
+
+def test_missing_docker_is_reported_with_the_group_hint(tmp_path, monkeypatch):
+    reqs = _pf(tmp_path, monkeypatch, version=None)
+    bad = container.preflight_failures(reqs)
+    assert [r.name for r in bad] == ["docker"]
+    assert "docker` group" in bad[0].fix
+
+
+def test_docker_too_old_is_refused_with_the_reason(tmp_path, monkeypatch):
+    """< 25 does not emit an OCI layout from `docker save`, which only shows up after a
+    multi-hour build otherwise."""
+    bad = container.preflight_failures(_pf(tmp_path, monkeypatch, version="24.0.7"))
+    assert [r.name for r in bad] == ["docker"]
+    assert "OCI layout" in bad[0].fix and "skopeo" in bad[0].fix
+
+
+def test_docker_25_is_accepted(tmp_path, monkeypatch):
+    assert _fail_names(_pf(tmp_path, monkeypatch, version="25.0.0")) == []
+
+
+def test_absent_tt_devices_are_reported(tmp_path, monkeypatch):
+    bad = container.preflight_failures(_pf(tmp_path, monkeypatch, devices=False))
+    assert "tt devices" in [r.name for r in bad]
+    assert "tt-kmd" in next(r for r in bad if r.name == "tt devices").fix
+
+
+def test_hugepages_mounted_at_the_wrong_path_is_caught(tmp_path, monkeypatch):
+    """This is the failure this whole check exists for."""
+    wrong = "hugetlbfs /dev/hugepages hugetlbfs rw,pagesize=2M 0 0\n"
+    bad = container.preflight_failures(_pf(tmp_path, monkeypatch, mounts=wrong))
+    assert "hugepages" in [r.name for r in bad]
+    assert "/proc/mounts" in next(r for r in bad if r.name == "hugepages").fix
+
+
+def test_a_hugepages_subdirectory_does_not_count(tmp_path, monkeypatch):
+    sub = "hugetlbfs /dev/hugepages-1G/sub hugetlbfs rw 0 0\n"
+    assert "hugepages" in _fail_names(_pf(tmp_path, monkeypatch, mounts=sub))
+
+
+def test_a_non_hugetlbfs_mount_at_the_path_does_not_count(tmp_path, monkeypatch):
+    tmpfs = "tmpfs /dev/hugepages-1G tmpfs rw 0 0\n"
+    assert "hugepages" in _fail_names(_pf(tmp_path, monkeypatch, mounts=tmpfs))
+
+
+def test_byte_moving_operations_do_not_require_a_card(tmp_path, monkeypatch):
+    """pull and push work fine on a machine with no hardware attached."""
+    reqs = _pf(tmp_path, monkeypatch, devices=False, mounts="", need_devices=False)
+    assert [r.name for r in reqs] == ["docker"]
+    assert _fail_names(reqs) == []
+
+
+def test_serve_preflights_but_print_does_not(tmp_path, monkeypatch):
+    """--print composes a command without running it, so it must work anywhere — on a
+    laptop with no card, for instance."""
+    from tt_kernel import container_cli
+
+    called = []
+    monkeypatch.setattr(container_cli, "require_host",
+                        lambda **k: called.append(k) or (_ for _ in ()).throw(
+                            container_cli.ContainerCliError("no host")))
+    m = _wire()
+    container_cli.serve_container(m, print_only=True)   # must not raise
+    assert called == []

@@ -2384,11 +2384,39 @@ def doctor(
         console.hint("harmless if the TT serving path never imports these — but if serving "
                      "fails on an import, start here")
 
+    # The container (v5.1) path needs NONE of the host toolchain above: the image carries
+    # tt-metal, vLLM and the plugin. Reporting it separately matters because otherwise a
+    # consumer whose box is perfectly able to `serve` reads "✗ vllm not found — install
+    # the Tenstorrent vLLM fork" and is told to install the very thing this path exists to
+    # avoid.
+    container_reqs = container.preflight(need_devices=True)
+    console.console.print("\n[bold accent]Container path (v5.1)[/bold accent]")
+    ctab = console.check_table()
+    for r in container_reqs:
+        mark = "[success]✓[/success]" if r.ok else "[error]✗[/error]"
+        console.check_row(ctab, mark, r.name, r.detail, "")
+    console.print_table(ctab)
+    container_ok = not container.preflight_failures(container_reqs)
+    if container_ok:
+        console.hint("a container package needs only these — no host tt-metal, vLLM or venv")
+    for r in container.preflight_failures(container_reqs):
+        console.note(r.fix, marker="!", style="warning")
+
     reqs_ok = True
     if repo_id:
         reqs_ok = _report_bundle_requirements(repo_id, arch)
 
-    if not report.ok or not reqs_ok:
+    if not reqs_ok:
+        raise typer.Exit(code=1)
+    if not report.ok:
+        # The host toolchain is inadequate. That blocks v3/v4/v5, but NOT the container
+        # path — so say which paths are usable instead of a bare failure.
+        if container_ok:
+            console.console.print(
+                "\n[warning]! host toolchain inadequate[/warning]"
+                "[muted] — v4/v5 bundles cannot serve here; container (v5.1) packages "
+                "can[/muted]"
+            )
         raise typer.Exit(code=1)
     if conflicts:
         # Don't claim "adequate" over a named conflict; don't fail on an advisory either.
@@ -2657,6 +2685,12 @@ def serve(
         False, "--follow", help="For a container package: wait for the server to report "
         "ready, streaming the boot (a cold boot JIT-compiles kernels, ~10 min)."
     ),
+    port: Optional[int] = typer.Option(
+        None, "--port", help="Serve on this port instead of the bundle's/manifest's. For a "
+        "container package it moves BOTH the published mapping and the server's own "
+        "--port (which is why it must be a flag, not a passthrough argument); for a v4/v5 "
+        "bundle it is appended to the launch command, where argparse last-wins."
+    ),
     health_check: bool = typer.Option(False, "--health-check", help="(reserved) probe the server after launch."),
     no_update_check: bool = typer.Option(
         False, "--no-update-check", help="Skip the best-effort check for a newer published "
@@ -2678,6 +2712,10 @@ def serve(
     # path as a target; everything after this is v5 and unchanged.
     from . import container_cli
 
+    hint = container_cli.authored_manifest_hint(repo_id)
+    if hint:
+        raise _err(hint)
+
     cmani = container_cli.resolve_target(repo_id)
     if cmani is None and not local_only and "/" in repo_id:
         try:
@@ -2693,13 +2731,26 @@ def serve(
             cmani = container_cli.load_pulled(repo_id)
     if cmani is not None:
         try:
+            # where the manifest came from, so a missing image can be reloaded
+            # from the sibling image/ layout rather than failing on a docker pull
+            src = Path(repo_id).parent if Path(repo_id).is_file() else \
+                container_cli.pull_dir(repo_id)
             container_cli.serve_container(
                 cmani, profile_name=profile, print_only=print_only,
-                follow=follow, extra_args=extra_args,
+                follow=follow, extra_args=extra_args, source=src, port=port,
             )
         except (container_cli.ContainerCliError, container.ContainerError) as e:
             raise _err(str(e))
         return
+
+    # Past this point we are on a v3/v4/v5 path, where --port has ALWAYS been a
+    # passthrough: `serve org/m --port 7009` appended it to the bundle's launch command and
+    # argparse last-wins gave the user priority. Declaring --port as a typer option above
+    # (which the container path needs, since the port must move in two places at once)
+    # would otherwise swallow it and silently drop the override. Put it back, appended, so
+    # the ordering that makes last-wins work is preserved.
+    if port is not None:
+        extra_args = extra_args + ["--port", str(port)]
 
     # Self-contained (v5) fast path: an already-installed bundle serves from its own venv. The host
     # toolchain (ttnn/vLLM versions) is irrelevant here — the bundle ships its own — so don't warn.
@@ -2741,6 +2792,9 @@ def _require_container(target: str):
     """Resolve a stop/logs/list target, or fail with the one thing to do next."""
     from . import container_cli
 
+    hint = container_cli.authored_manifest_hint(target)
+    if hint:
+        raise _err(hint)
     m = container_cli.resolve_target(target)
     if m is None:
         raise _err(

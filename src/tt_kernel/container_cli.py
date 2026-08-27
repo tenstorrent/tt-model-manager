@@ -32,6 +32,24 @@ class ContainerCliError(RuntimeError):
     """User-facing failure; the caller turns this into an exit code."""
 
 
+def require_host(*, need_devices: bool) -> None:
+    """Fail fast on a host that cannot possibly run this, naming the fix.
+
+    Called before anything slow. Each of these checks exists because the unchecked
+    failure is late and unrecognisable — most of all the hugepages mount, which surfaces
+    as a device-open error ten minutes into a boot.
+    """
+    reqs = container.preflight(need_devices=need_devices)
+    bad = container.preflight_failures(reqs)
+    if not bad:
+        return
+    lines = []
+    for r in bad:
+        lines.append(f"{r.name}: {r.detail}")
+        lines.append(f"  → {r.fix}")
+    raise ContainerCliError("\n".join(lines))
+
+
 # --------------------------------------------------------------------------- package
 
 
@@ -65,6 +83,12 @@ def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> 
 
     console.phase("Stage")
     console.note(f"{len(staged.code_tree)} code path(s) → code/", marker="•")
+    if staged.code_skipped:
+        # Never silent: a file that vanishes on the way into the image otherwise shows up
+        # as a ModuleNotFoundError from verify.sh with nothing explaining why.
+        shown = ", ".join(staged.code_skipped[:5])
+        more = f" (+{len(staged.code_skipped) - 5} more)" if len(staged.code_skipped) > 5 else ""
+        console.note(f"skipped by the ignore list: {shown}{more}", marker="○")
 
     console.phase("Build")
     log_path = build_log_path(staged.manifest.name)
@@ -155,6 +179,8 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
     """Snapshot the repo, load the image into docker, and put weights in the HOST cache."""
     spec = manifest.container
     assert spec is not None
+    # pull only moves bytes: it works on a machine with no card attached
+    require_host(need_devices=False)
 
     ref = container.image_ref(manifest)
     if container.image_present(ref):
@@ -215,6 +241,33 @@ def load_pulled(repo_id: str) -> Optional[Manifest]:
     return m if m.is_container else None
 
 
+def authored_manifest_hint(target: str) -> Optional[str]:
+    """If ``target`` is an AUTHORED tt-model.yaml, the message explaining what to do.
+
+    ``serve`` takes the PUBLISHED manifest (``tt_kernel_manifest.json``) or an ``org/name``
+    — never the YAML the author wrote, because an image has to be built from it first. But
+    the YAML is what an author thinks of as "the manifest", so pointing serve at it is the
+    obvious mistake, and without this it falls through to the Hub path and reports
+    "Repo id must be in the form 'namespace/repo_name'" about a filesystem path.
+    """
+    p = Path(target)
+    if not p.is_file() or p.suffix.lower() not in (".yaml", ".yml"):
+        return None
+    try:
+        from .container_manifest import load_container_manifest
+
+        m = load_container_manifest(p)
+    except Exception:  # noqa: BLE001 — not an authored manifest; let the caller proceed
+        return None
+    return (
+        f"{p} is the AUTHORING manifest, which describes how to BUILD the image — serve "
+        f"needs the built package.\n"
+        f"  → build it:  tt-model package --container {p}\n"
+        f"  → then:      tt-model serve <out-dir>/{m.name}/{MANIFEST_NAME}\n"
+        f"  → or, once published:  tt-model serve {m.repo}"
+    )
+
+
 def resolve_target(target: str) -> Optional[Manifest]:
     """A command target is either a local manifest path or a pulled ``org/name``."""
     p = Path(target)
@@ -229,20 +282,69 @@ def resolve_target(target: str) -> Optional[Manifest]:
 
 def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     print_only: bool = False, follow: bool = False,
-                    extra_args: Optional[List[str]] = None) -> None:
+                    extra_args: Optional[List[str]] = None,
+                    source: Optional[Path] = None,
+                    port: Optional[int] = None) -> None:
+    """Run one serve profile.
+
+    ``source`` is the staged/pulled dir the manifest came from, used to reload the image
+    from ``image/`` if docker no longer has it. ``port`` overrides the profile's port.
+    """
     spec = manifest.container
     assert spec is not None
+    if not print_only:
+        # --print composes a command without running it, so it must work anywhere.
+        require_host(need_devices=True)
+
+    # The port has to move in TWO places at once — docker's --publish mapping and the
+    # server's own --port — so it cannot be a passthrough argument. Passing --port after
+    # the target reaches vLLM only: the server moves, the published mapping does not, and
+    # the endpoint becomes silently unreachable with no error anywhere. Refuse it and
+    # name the flag that works.
+    for a in (extra_args or []):
+        if a == "--port" or a.startswith("--port="):
+            raise ContainerCliError(
+                "--port must come before the target so tt-model can publish it too: "
+                "`tt-model serve --port <n> <target>`. Passed after the target it reaches "
+                "only the server inside the container, while docker still publishes the "
+                "manifest's port — the endpoint would be unreachable."
+            )
 
     try:
         profile = spec.resolve_profile(profile_name)
     except ValueError as e:
         raise ContainerCliError(str(e)) from None
+    if port is not None:
+        # Override BEFORE composition, so --publish and the launcher's --port are both
+        # derived from the same value and cannot diverge.
+        profile = profile.model_copy(update={"port": port})
     if profile_name is None and len(spec.serve_profiles) > 1:
         console.note(
             f"profile {profile.name!r} (the author's default; "
             f"others: {', '.join(n for n in spec.profile_names() if n != profile.name)})",
             marker="•",
         )
+
+    # An image can go missing between package and serve — `docker image prune`, or a
+    # manifest edit that moved the tag. Without this, docker tries to PULL
+    # "tt-model/<name>:<sha>" from Docker Hub and reports "pull access denied", which
+    # names neither the cause nor the fix.
+    if not print_only:
+        ref = container.image_ref(manifest)
+        if not container.image_present(ref):
+            layout = (Path(source) / "image") if source else None
+            if layout and (layout / "oci-layout").is_file():
+                with console.step(f"docker load {ref} (image was not loaded)"):
+                    oci.load(layout, expect_tag=ref)
+            else:
+                raise ContainerCliError(
+                    f"image {ref} is not loaded in docker.\n"
+                    f"  → if you have the staged package dir:  tt-model serve "
+                    f"<dir>/{MANIFEST_NAME}\n"
+                    f"  → if it was published:                 tt-model pull {manifest.name}\n"
+                    f"  → otherwise rebuild it:                tt-model package --container "
+                    f"<manifest.yaml>"
+                )
 
     launcher = launcher_for(spec.kind)
     argv = launcher.serve_argv(manifest, profile) + list(extra_args or [])
@@ -260,6 +362,10 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
             f"{name} already exists ({existing[0]['status']}). "
             f"Stop it first:  tt-model stop {manifest.name}"
         )
+
+    # As the host user, so the daemon does not create them as root: see
+    # container.ensure_mount_sources.
+    container.ensure_mount_sources(manifest)
 
     with console.step(f"starting {name}"):
         container.run_checked(run_argv)

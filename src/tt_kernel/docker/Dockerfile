@@ -167,12 +167,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libsndfile1 ca-certificates \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# A REAL passwd entry at uid 1000: tt-metal derives its JIT cache dir from $HOME, and a
-# --user with no passwd entry gets HOME=/ (unwritable -> the JIT build dies). Host uid
-# 1000 also matches bind-mount ownership. (The dev image's own user is 1001.)
-RUN useradd --uid 1000 --create-home --home-dir /home/tt --shell /bin/bash tt \
+# A real user for the BUILD-time verification, plus dirs any uid can write at RUN time.
+#
+# tt-metal derives its JIT cache dir from $HOME, so HOME must exist and be writable. The
+# obvious approach — one baked user whose uid matches the host's — does not survive
+# contact with reality: `serve` passes `--user <host uid>:<host gid>` so that files
+# written into the bind-mounted HF cache and kernel cache belong to the person running
+# it, and a consumer's uid is whatever it is (1000 and 1001 are both common). A uid with
+# no passwd entry gets HOME=/ from glibc, which is unwritable, which kills the JIT.
+#
+# So: keep a named user for the build (USER tt below, when no bind mounts exist), set
+# HOME explicitly in ENV so it does not depend on a passwd lookup, and make the runtime
+# dirs world-writable with the sticky bit — the same trick /tmp uses — so an arbitrary
+# uid can write them without the image knowing which uid that will be.
+#
+# Ubuntu 24.04's base image already ships a user at uid 1000 (`ubuntu`); 22.04 did not.
+# So free the id first, by whatever name currently holds it, instead of assuming it is
+# vacant — otherwise `useradd` fails with "UID 1000 is not unique".
+RUN existing="$(getent passwd 1000 | cut -d: -f1)" \
+    && if [ -n "$existing" ]; then \
+         userdel -r "$existing" 2>/dev/null || userdel "$existing"; \
+       fi \
+    && useradd --uid 1000 --create-home --home-dir /home/tt --shell /bin/bash tt \
     && mkdir -p /home/tt/work/logs /cache /opt/tt-metal \
-    && chown -R tt:tt /home/tt /cache /opt/tt-metal
+    && chown -R tt:tt /home/tt /cache /opt/tt-metal \
+    && chmod 1777 /home/tt /home/tt/work /home/tt/work/logs /cache
 
 # Stable -> volatile, so a model edit re-uploads a 5 MB layer, not a 3 GB one.
 COPY --from=builder ${OMPI_DIR} ${OMPI_DIR}
@@ -216,6 +235,19 @@ ENV TT_VLLM_BUILTIN_MODELS=${TT_VLLM_BUILTIN_MODELS}
 ENV TT_MODEL_KIND=${TT_MODEL_KIND}
 ENV HF_HOME=/hf
 ENV TT_METAL_CACHE=/cache
+# Explicit, so nothing depends on a passwd lookup for whatever uid `serve` passes.
+#
+# HOME: tt-metal and ttnn derive cache paths from it, and glibc hands an unknown uid
+# HOME=/ (unwritable), which kills the JIT.
+#
+# USER/LOGNAME: `getpass.getuser()` reads LOGNAME, USER, LNAME, USERNAME in that order
+# and only falls back to pwd.getpwuid() if none is set — which raises KeyError for a uid
+# with no passwd entry. torch's inductor calls it to name its cache dir, so without this
+# the server dies on import with "getpwuid(): uid not found". Setting the name here beats
+# making /etc/passwd writable, which is the usual workaround.
+ENV HOME=/home/tt
+ENV USER=tt
+ENV LOGNAME=tt
 
 USER tt
 WORKDIR /home/tt/work
@@ -226,6 +258,16 @@ WORKDIR /home/tt/work
 # minutes into a consumer's first boot.
 COPY verify.sh /ctx/verify.sh
 RUN bash /ctx/verify.sh
+
+# Verification runs as `tt` (uid 1000) and its imports CREATE cache dirs under $HOME —
+# matplotlib, ttnn, torch, vllm all do. Those land 0755 owned by 1000, so the arbitrary
+# uid `serve` passes cannot write inside them, and vLLM then fails to save its model-info
+# cache with EACCES. Re-open the tree AFTER verification, so whatever it created is
+# covered too; chmod'ing only the dirs that exist BEFORE this RUN is not enough.
+# a+rwX: read/write for all, execute only where it already applies (directories).
+USER root
+RUN chmod -R a+rwX /home/tt
+USER tt
 
 LABEL org.tenstorrent.tt-model="${MODEL_NAME}" \
       org.tenstorrent.tt-model.repo="${MODEL_REPO}" \

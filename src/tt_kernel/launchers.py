@@ -212,15 +212,18 @@ class VllmPluginLauncher:
                 f"runtime.lock'"
             )
         if m.runtime.get("extra_models_dir") or m.runtime.get("extension"):
-            # A vllm_metadata.json in the wrong place registers ZERO architectures, and
-            # the plugin says so only in a log line nobody reads.
-            checks.append(
-                "import os; md = os.environ['EXTRA_MODELS_DIR']; "
-                "entries = [e for e in os.listdir(md) "
-                "if os.path.exists(os.path.join(md, e, 'vllm_metadata.json'))]; "
-                "assert entries, f'EXTRA_MODELS_DIR {md} registers no models'"
-            )
+            # Do what the plugin does, and what vLLM does after it: find each bundle,
+            # append its folder to sys.path, and RESOLVE the main_class string.
+            #
+            # Emitted as its OWN line: `checks` are joined with "; " into one `python -c`,
+            # which a multi-statement snippet with a for-loop cannot survive.
+            extra_check = RESOLVE_EXTRA_MODELS
+        else:
+            extra_check = None
+
         lines = [f'"$VENV/bin/python" -c {shlex.quote("; ".join(checks))}']
+        if extra_check:
+            lines.append(f'"$VENV/bin/python" -c {shlex.quote(extra_check)}')
         lines += [f'"$VENV/bin/python" -c {shlex.quote(v)}' for v in m.verify]
         return lines
 
@@ -489,6 +492,34 @@ def metal_torch_pin(metal_tree: Optional[Path]) -> Optional[str]:
         if m:
             return m.group("version")
     return None
+
+
+#: Resolve every model registered through EXTRA_MODELS_DIR, mirroring
+#: ``vllm_tt_plugin.platform._register_models_from_extra_dir`` and vLLM's later lazy
+#: import of the ``"module:Class"`` string it stores.
+RESOLVE_EXTRA_MODELS = (
+    "import os, sys, json, importlib; "
+    "md = os.environ['EXTRA_MODELS_DIR']; "
+    "found = 0\n"
+    "for e in sorted(os.listdir(md)):\n"
+    "    d = os.path.join(md, e)\n"
+    "    mp = os.path.join(d, 'vllm_metadata.json')\n"
+    "    if not os.path.exists(mp):\n"
+    "        continue\n"
+    "    found += 1\n"
+    "    meta = json.load(open(mp))\n"
+    "    spec = meta['main_class']\n"
+    # the plugin appends (never inserts) so an installed package of the same name wins
+    "    if d not in sys.path:\n"
+    "        sys.path.append(d)\n"
+    "    mod, sep, cls = spec.rpartition(':')\n"
+    "    if not sep:\n"
+    "        mod, _, cls = spec.rpartition('.')\n"
+    "    obj = getattr(importlib.import_module(mod), cls)\n"
+    "    assert obj is not None, spec\n"
+    "    print('resolved', meta.get('arch'), '->', spec)\n"
+    "assert found, f'EXTRA_MODELS_DIR {md} registers no models'\n"
+)
 
 
 def _capability_argv(profile: ServeProfile) -> List[str]:

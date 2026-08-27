@@ -48,6 +48,11 @@ from .container_manifest import (
 
 BASE_IMAGE_DEFAULT = "ghcr.io/tenstorrent/tt-metal/tt-metalium/ubuntu-{ubuntu}-dev-amd64:latest"
 
+# tt-metal's own top-level CMakeLists.txt refuses to configure without this file, and it
+# is the first thing build_metal.sh does. Checking it here turns a failure that costs a
+# base-image pull plus a CMake configure into an instant, actionable one.
+SUBMODULE_SENTINEL = "tt_metal/third_party/umd/CMakeLists.txt"
+
 
 class BuildError(RuntimeError):
     """A packaging step that must not proceed. The message is user-facing."""
@@ -144,6 +149,14 @@ def resolve_metal_source(m: ContainerManifest, scratch: Path) -> MetalSource:
                 f"source.tt_metal: {metal} does not look like a tt-metal checkout "
                 "(no tt_metal/ directory)"
             )
+        if not (metal / SUBMODULE_SENTINEL).is_file():
+            raise BuildError(
+                f"source.tt_metal: {metal} has uninitialised git submodules "
+                f"({SUBMODULE_SENTINEL} is missing), so the image's tt-metal build would "
+                "fail at CMake configure. Populate them first:\n"
+                f"    git -C {metal} submodule update --init --recursive"
+            )
+
         # A FILTERED COPY becomes the build context. Handing BuildKit the raw checkout
         # would transfer the whole worktree (.git alone is ~5.7 GB, plus .cpmcache,
         # python_env and build trees) before the Dockerfile's excludes ever run. The
@@ -196,23 +209,44 @@ def resolve_git_ref(repo: str, ref: str) -> str:
 # ---------------------------------------------------------------------- staging
 
 
-# Never ship these out of a model directory, whatever the allowlist says: weights are a
-# POINTER in this design, and bring-up artifacts litter real autoport dirs.
+# Dropped from inside an allowlisted path regardless of what the author wrote. Keep this
+# list NARROW and keep every entry justifiable: `source.code` promises "exactly what
+# ships", so anything removed here is a promise quietly broken.
+#
+# Only two justifications qualify:
+#   - build detritus that is regenerated (caches, venvs, egg-info, logs), and
+#   - model weights, which are a POINTER in this design and would otherwise silently
+#     turn a 2 GB image into a 60 GB one.
+#
+# A blanket `readiness_*` used to live here, meant for bring-up artifacts in autoport
+# directories. It also matched `models/common/readiness_check` — a real package models
+# import — and produced a ModuleNotFoundError in the finished image with nothing
+# anywhere explaining why. Patterns that match a plausible PACKAGE name do not belong
+# here; an author who does not want a directory shipped simply does not list it.
 CODE_IGNORE = (
     "__pycache__", "*.pyc", ".pytest_cache", "*.egg-info", ".venv", "venv",
-    "build", "generated", "logs", "*.log",
-    "*.safetensors", "*.pt", "*.pth", "*.ckpt", "*.bin",
-    "*.refpt", "readiness_*",
+    "logs", "*.log",
+    "*.safetensors", "*.pt", "*.pth", "*.ckpt", "*.bin", "*.refpt",
 )
 
 
-def stage_code(m: ContainerManifest, metal: Path, dest: Path) -> List[str]:
+def stage_code(m: ContainerManifest, metal: Path, dest: Path) -> "StagedCode":
     """Copy the ``source.code`` allowlist into ``dest``, refusing missing paths.
 
     A missing path RAISES rather than shipping nothing: the silent miss is the failure
     mode where the image ImportErrors on a consumer long after the push looked fine.
-    Returns a rendered file tree for the model card.
+    Returns the rendered file tree for the model card AND everything ``CODE_IGNORE``
+    dropped, so a skip can be reported rather than discovered as an ImportError inside
+    the finished image.
     """
+    skipped: List[str] = []
+
+    def _ignore(dirpath: str, names: List[str]) -> set:
+        dropped = set(shutil.ignore_patterns(*CODE_IGNORE)(dirpath, names))
+        for n in sorted(dropped):
+            skipped.append(str(Path(dirpath).relative_to(metal) / n))
+        return dropped
+
     entries: List[str] = []
     for rel in m.source.code:
         src = metal / rel
@@ -227,12 +261,12 @@ def stage_code(m: ContainerManifest, metal: Path, dest: Path) -> List[str]:
         if src.is_dir():
             shutil.copytree(
                 src, target, symlinks=False, dirs_exist_ok=True,
-                ignore=shutil.ignore_patterns(*CODE_IGNORE),
+                ignore=_ignore,
             )
         else:
             shutil.copy2(src, target)
         entries.append(rel + ("/" if src.is_dir() else ""))
-    return entries
+    return StagedCode(tree=entries, skipped=skipped)
 
 
 def _sha256_tree(root: Path) -> str:
@@ -246,6 +280,12 @@ def _sha256_tree(root: Path) -> str:
 
 
 @dataclass
+class StagedCode:
+    tree: List[str]        # rendered file tree, for the model card
+    skipped: List[str]     # paths CODE_IGNORE dropped, so the caller can report them
+
+
+@dataclass
 class Staged:
     manifest: ContainerManifest
     ctx: Path                 # docker build context
@@ -255,6 +295,7 @@ class Staged:
     build_args: Dict[str, str] = field(default_factory=dict)
     metal: Optional[MetalSource] = None
     code_tree: List[str] = field(default_factory=list)
+    code_skipped: List[str] = field(default_factory=list)
 
 
 def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
@@ -282,7 +323,7 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
     # -- code/ ----------------------------------------------------------------------
     code_dir = ctx / "code"
     if metal.mode == "local":
-        code_tree = stage_code(m, metal.origin, code_dir)
+        staged_code = stage_code(m, metal.origin, code_dir)
     else:
         # git mode: shallow-clone just to stage code/ (the image build re-clones)
         tmp = ctx / "metal-for-code"
@@ -290,7 +331,7 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
             ["git", "clone", "--filter=blob:none", metal.git_repo, str(tmp)], check=True
         )
         subprocess.run(["git", "-C", str(tmp), "checkout", metal.sha], check=True)
-        code_tree = stage_code(m, tmp, code_dir)
+        staged_code = stage_code(m, tmp, code_dir)
         shutil.rmtree(tmp)
 
     # -- lock ------------------------------------------------------------------------
@@ -367,7 +408,8 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
         build_args["METAL_GIT_REF"] = metal.git_ref or ""
 
     return Staged(manifest=m, ctx=ctx, out=out, image=image, built=built,
-                  build_args=build_args, metal=metal, code_tree=code_tree)
+                  build_args=build_args, metal=metal, code_tree=staged_code.tree,
+                  code_skipped=staged_code.skipped)
 
 
 def build_argv(staged: Staged) -> List[str]:

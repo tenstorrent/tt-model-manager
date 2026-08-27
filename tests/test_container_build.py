@@ -40,6 +40,10 @@ def _fake_metal(root: Path, *, commit: bool = True) -> Path:
     (metal / "models" / "common").mkdir(parents=True)
     (metal / "models" / "common" / "mod.py").write_text("x = 1\n")
     (metal / "build_metal.sh").write_text("#!/bin/bash\n")
+    # the submodule sentinel tt-metal's CMakeLists.txt checks for
+    sentinel = metal / "tt_metal" / "third_party" / "umd" / "CMakeLists.txt"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_text("# umd\n")
     # things that must NOT reach the build context
     (metal / ".cpmcache").mkdir()
     (metal / ".cpmcache" / "huge").write_text("x" * 100)
@@ -491,3 +495,66 @@ def test_an_existing_lock_is_passed_through_untouched(tmp_path, monkeypatch):
     build.run_build(staged)
     out = build.finalize(staged)
     assert (out / "requirements.lock").read_text() == "pinned==1.0\n"
+
+
+def test_uninitialised_submodules_are_caught_before_any_docker_work(tmp_path, monkeypatch):
+    """tt-metal's CMakeLists refuses to configure without them. Catching it at stage time
+    turns a failure that costs a base-image pull + a CMake configure into an instant one,
+    and names the command that fixes it."""
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    sentinel = metal / build.SUBMODULE_SENTINEL
+    assert sentinel.is_file()          # _fake_metal creates it
+    sentinel.unlink()
+    with pytest.raises(BuildError, match="submodule update --init --recursive"):
+        build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+
+
+# ------------------------------------------------------------------ the ignore list
+
+
+def test_a_package_named_like_a_bring_up_artifact_is_NOT_dropped(tmp_path, monkeypatch):
+    """`readiness_*` used to be in CODE_IGNORE and silently ate
+    models/common/readiness_check — a real package models import. The failure surfaced
+    only as a ModuleNotFoundError inside the finished image, after the full build."""
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    rc = metal / "models" / "common" / "readiness_check"
+    rc.mkdir(parents=True)
+    (rc / "contract.py").write_text("class Generator: pass\n")
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    assert (staged.ctx / "code" / "models" / "common" / "readiness_check" / "contract.py").is_file()
+
+
+def test_the_ignore_list_holds_no_pattern_that_could_match_a_package_name():
+    """Every entry must be build detritus or model weights — never a bare name that a
+    real python package could plausibly have."""
+    for pat in build.CODE_IGNORE:
+        assert pat.startswith("*") or pat.startswith(".") or pat in (
+            "__pycache__", "venv", "logs"
+        ), f"{pat!r} could match a package directory"
+
+
+def test_weights_are_still_dropped_from_inside_an_allowlisted_path(tmp_path, monkeypatch):
+    """The narrowing must not reopen the 60 GB image hole."""
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    (metal / "models" / "common" / "w.safetensors").write_text("W")
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    assert not (staged.ctx / "code" / "models" / "common" / "w.safetensors").exists()
+
+
+def test_whatever_the_ignore_list_drops_is_reported(tmp_path, monkeypatch):
+    """A skip must never be silent — that is the whole failure mode."""
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    (metal / "models" / "common" / "w.safetensors").write_text("W")
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    assert any("w.safetensors" in p for p in staged.code_skipped)
+
+
+def test_nothing_skipped_means_an_empty_report(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    assert staged.code_skipped == []
