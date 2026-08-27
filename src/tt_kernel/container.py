@@ -146,6 +146,19 @@ def _run(argv: List[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(argv, **kw)
 
 
+def run_checked(argv: List[str]) -> str:
+    """Run a docker command, raising ContainerError with its stderr on failure.
+
+    docker's own messages are the useful diagnosis here (no such image, port in use,
+    device busy), so they are surfaced verbatim rather than reworded.
+    """
+    r = _run(argv, capture_output=True, text=True)
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or "").strip()
+        raise ContainerError(detail or f"`{' '.join(argv[:2])}` failed (exit {r.returncode})")
+    return r.stdout
+
+
 def running(name_filter: Optional[str] = None) -> List[Dict[str, str]]:
     """tt-model containers present on this host (running or exited)."""
     fmt = "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"

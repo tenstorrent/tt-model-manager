@@ -24,8 +24,8 @@ from typer.core import TyperGroup
 from . import console
 from . import MANIFEST_NAME, TT_MODEL_CATALOG_TAG, TT_MODEL_TAG, __version__
 from . import (
-    auth, bundles, cache, compat, device, devtools, hub, instances, localdb, metal,
-    packaging, provision, resolve as resolve_mod, runtime,
+    auth, bundles, cache, compat, container, device, devtools, hub, instances, localdb,
+    metal, packaging, provision, resolve as resolve_mod, runtime,
     start as start_mod, toolchain,
 )
 from .manifest import (
@@ -1257,8 +1257,13 @@ def package(
     repo_id: Optional[str] = typer.Argument(
         None, help="Target HF repo namespace/name to push to. Omit (with --out) to only stage locally."
     ),
-    from_metal: str = typer.Option(
-        ..., "--from-metal", help="Path to your modified tt-metal-community tree (embedded as metal/)."
+    container_manifest: Optional[str] = typer.Option(
+        None, "--container", help="Package as a CONTAINER (v5.1): path to a tt-model.yaml. "
+        "The whole authoring interface is that one file, so every other flag here is "
+        "ignored. The consumer then needs only Docker + a TT card."
+    ),
+    from_metal: Optional[str] = typer.Option(
+        None, "--from-metal", help="Path to your modified tt-metal-community tree (embedded as metal/)."
     ),
     ttnn_wheel: Optional[str] = typer.Option(
         None, "--ttnn-wheel", help="Your built ttnn wheel (custom kernels compiled in). "
@@ -1344,11 +1349,26 @@ def package(
     (the HF repo id in ``--weights``), never embedded. A consumer then needs only a TT card +
     firmware: ``tt-model pull`` installs the wheels + weights, ``tt-model serve`` runs it.
     """
+    # --- container (v5.1): a wholly separate path. Everything below is v5 and untouched.
+    if container_manifest:
+        from . import container_cli
+
+        try:
+            container_cli.package_container(container_manifest, out_root=out)
+        except container_cli.ContainerCliError as e:
+            raise _err(str(e))
+        return
+
     if publish and private:
         raise _err("--publish requires --public (a catalog listing is public by definition).")
     if repo_id is None and not out:
         raise _err("Nothing to do: pass a target repo_id to push, or --out to stage locally.")
 
+    if not from_metal:
+        raise _err(
+            "--from-metal is required to package a v5 bundle "
+            "(or pass --container <tt-model.yaml> to build a container package instead)."
+        )
     metal_dir = Path(from_metal).expanduser()
     if not metal_dir.is_dir():
         raise _err(f"--from-metal {from_metal!r} is not a directory.")
@@ -1527,6 +1547,18 @@ def pull(
         if not manifest_path.is_file():
             raise _err(f"{repo_id} is not a tt-model bundle (no {MANIFEST_NAME}).")
         manifest = Manifest.from_json(manifest_path.read_text())
+
+        # A container (v5.1) package: the image goes to docker, the weights to the host
+        # HF cache, and none of the v5 wheel/venv machinery below applies.
+        if manifest.is_container:
+            from . import container_cli
+
+            try:
+                container_cli.pull_container(repo_id, resolved or revision, manifest,
+                                             no_weights=no_weights)
+            except (container_cli.ContainerCliError, container.ContainerError) as e:
+                raise _err(str(e))
+            return
 
         # v5 self-contained ("fat") bundle: ships its own ttnn/vLLM/plugin wheels. Install the
         # platform into the bundle's own venv — no host tt-metal/vLLM needed — then return.
@@ -2585,6 +2617,14 @@ def serve(
         None, "--instance", help="Force a registered tt-metal instance by name (see "
         "`tt-model instances list`), overriding the pinned/auto-resolved one."
     ),
+    profile: Optional[str] = typer.Option(
+        None, "--profile", help="For a container package: which serve profile to launch "
+        "(default: the author's). See `tt-model list <id>`."
+    ),
+    follow: bool = typer.Option(
+        False, "--follow", help="For a container package: wait for the server to report "
+        "ready, streaming the boot (a cold boot JIT-compiles kernels, ~10 min)."
+    ),
     health_check: bool = typer.Option(False, "--health-check", help="(reserved) probe the server after launch."),
     no_update_check: bool = typer.Option(
         False, "--no-update-check", help="Skip the best-effort check for a newer published "
@@ -2599,6 +2639,35 @@ def serve(
     """
     repo_id, revision = _split_revision(repo_id)
     extra_args = list(ctx.args)  # anything after the bundle id is passed through to vLLM
+
+    # --- container (v5.1) --------------------------------------------------------------
+    # A pulled package, or a local manifest path (how an author serves a build before
+    # pushing it). Checked FIRST because it is the only path that resolves a filesystem
+    # path as a target; everything after this is v5 and unchanged.
+    from . import container_cli
+
+    cmani = container_cli.resolve_target(repo_id)
+    if cmani is None and not local_only and "/" in repo_id:
+        try:
+            remote = hub.fetch_manifest(repo_id, revision)
+        except Exception:  # noqa: BLE001 — fall through to the normal path
+            remote = None
+        if remote is not None and remote.is_container:
+            resolved = hub.latest_revision(repo_id, revision, timeout=None)
+            try:
+                container_cli.pull_container(repo_id, resolved or revision, remote)
+            except (container_cli.ContainerCliError, container.ContainerError) as e:
+                raise _err(str(e))
+            cmani = container_cli.load_pulled(repo_id)
+    if cmani is not None:
+        try:
+            container_cli.serve_container(
+                cmani, profile_name=profile, print_only=print_only,
+                follow=follow, extra_args=extra_args,
+            )
+        except (container_cli.ContainerCliError, container.ContainerError) as e:
+            raise _err(str(e))
+        return
 
     # Self-contained (v5) fast path: an already-installed bundle serves from its own venv. The host
     # toolchain (ttnn/vLLM versions) is irrelevant here — the bundle ships its own — so don't warn.
@@ -2634,6 +2703,75 @@ def serve(
     _serve_vllm(repo_id, revision, print_only=print_only, local_only=local_only,
                 arch=arch, bundles_dir=bundles_dir, do_health=health_check,
                 force=force, instance=instance, extra_args=extra_args)
+
+
+def _require_container(target: str):
+    """Resolve a stop/logs/list target, or fail with the one thing to do next."""
+    from . import container_cli
+
+    m = container_cli.resolve_target(target)
+    if m is None:
+        raise _err(
+            f"{target} is not a pulled container package (nor a container manifest path). "
+            f"Pull it first:  tt-model pull {target}"
+        )
+    return m
+
+
+@app.command(rich_help_panel="Run a model")
+def stop(
+    target: str = typer.Argument(..., help="Container package: org/name, or a manifest path."),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Stop only this profile."),
+) -> None:
+    """Stop a running container package, SIGTERM first.
+
+    A clean SIGTERM lets the server close the mesh on its way out. If the grace period
+    expires and docker has to SIGKILL, the devices are left needing a reset — so the mesh
+    is reset with tt-smi from a throwaway container, and you are told it happened.
+    """
+    from . import container_cli
+
+    try:
+        container_cli.stop_container(_require_container(target), profile_name=profile)
+    except (container_cli.ContainerCliError, container.ContainerError) as e:
+        raise _err(str(e))
+
+
+@app.command(rich_help_panel="Run a model")
+def logs(
+    target: str = typer.Argument(..., help="Container package: org/name, or a manifest path."),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Stream new output."),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Logs for this profile."),
+) -> None:
+    """Show the server logs of a running container package."""
+    from . import container_cli
+
+    try:
+        code = container_cli.logs_container(_require_container(target),
+                                            profile_name=profile, follow=follow)
+    except (container_cli.ContainerCliError, container.ContainerError) as e:
+        raise _err(str(e))
+    if code != 0:
+        raise typer.Exit(code=code)
+
+
+@app.command(rich_help_panel="Get models")
+def profiles(
+    target: str = typer.Argument(
+        ..., help="A container package: org/name (pulled), or a manifest path."
+    ),
+) -> None:
+    """Show a container package's serve profiles, and which one is the default.
+
+    One image serves every profile; pick one with `tt-model serve <id> --profile <name>`.
+    (`tt-model list` remains the inventory of locally installed bundles.)
+    """
+    from . import container_cli
+
+    try:
+        container_cli.list_containers(_require_container(target))
+    except (container_cli.ContainerCliError, container.ContainerError) as e:
+        raise _err(str(e))
 
 
 @app.command(rich_help_panel="Run a model")
