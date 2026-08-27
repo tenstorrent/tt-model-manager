@@ -12,6 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
+from tqdm import tqdm as _tqdm
+
 from . import MANIFEST_NAME, TT_MODEL_CATALOG_TAG, TT_MODEL_TAG
 from .manifest import Manifest
 
@@ -332,110 +334,79 @@ def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
 # leftover bytes were handed to bash as commands. So the CLI takes sole ownership of the
 # row: HF's writers are silenced and their byte counts are re-reported through our own
 # activity line.
-class _ActivityTqdm:
-    """A tqdm stand-in that reports into ``console.activity`` instead of the terminal.
+class _Sink:
+    """Where the real tqdm writes its bars. Nobody reads it."""
 
-    huggingface_hub instantiates whatever ``tqdm_class`` it is handed, so implementing the
-    slice it actually uses (init / update / close / context manager, plus the ``total`` and
-    ``n`` attributes it reads back) is enough to divert the whole download's progress into
-    one line we control.
+    def write(self, *a, **k):
+        return 0
+
+    def flush(self, *a, **k):
+        pass
+
+    def isatty(self):
+        return False
+
+
+class _ActivityTqdm(_tqdm):
+    """A REAL tqdm whose output goes to ``console.activity`` instead of the terminal.
+
+    This subclasses tqdm rather than imitating it, and that is the whole point. The
+    previous stand-in reimplemented the slice of tqdm that huggingface_hub appeared to
+    use, and hub kept reaching for more of it — first ``get_lock``/``set_lock`` (via
+    ``tqdm.contrib.concurrent.thread_map``), then the wrapped-iterable protocol, then
+    ``format_dict`` (via the xet progress reporter). Each was an AttributeError in a
+    consumer's download, and the next hub release would have found another: the reporter
+    also touches ``format_desc``, ``bytes_completed``, ``total_transfer_bytes`` and more.
+
+    Subclassing makes that class of bug structurally impossible — every attribute exists
+    and stays correct, because it IS tqdm. The only thing overridden is where the display
+    goes: tqdm renders into a sink, and ``display()`` updates our one activity line.
     """
 
     label = "Working"
     _live = {}  # id -> (n, total), so concurrent file bars can be summed
 
-    # `_lock` is deliberately NOT defined at class level: tqdm.contrib.concurrent's
-    # ensure_lock() treats a pre-existing one as the caller's and restores it, but does
-    # `del tqdm_class._lock` when it created it. Letting get_lock() install it keeps that
-    # bookkeeping correct.
-
     def __init__(self, *args, **kwargs):
-        from . import console
-
-        self._console = console
-        self.total = kwargs.get("total")
-        self.n = kwargs.get("initial", 0) or 0
-        self.desc = kwargs.get("desc") or ""
-        self.unit = kwargs.get("unit", "")
-        self._key = id(self)
-        # tqdm's primary form is an iterable WRAPPER — tqdm(iterable) — and
-        # tqdm.contrib.concurrent._executor_map relies on it:
-        #     list(tqdm_class(ex.map(fn, *iterables), **kwargs))
-        # so consuming the wrapped iterator is what actually performs the work.
-        # Returning an empty iterator here made snapshot_download download NOTHING while
-        # reporting success. huggingface_hub's own direct uses pass no iterable.
-        self._iterable = args[0] if args else kwargs.get("iterable")
+        # tqdm still does all its bookkeeping; it just renders somewhere nobody looks.
+        kwargs["file"] = _Sink()
+        kwargs["disable"] = False
+        kwargs.setdefault("leave", False)
+        # Set BEFORE super().__init__: tqdm calls display() from its constructor, so an
+        # attribute the override reads must already exist.
+        #
         # Only byte-denominated bars are worth aggregating; a "Fetching 5 files" bar has a
         # different unit and would corrupt the byte total.
-        self._bytes = self.unit in ("B", "iB")
+        self._bytes = kwargs.get("unit") in ("B", "iB")
+        super().__init__(*args, **kwargs)
         if self._bytes:
-            _ActivityTqdm._live[self._key] = (self.n, self.total or 0)
-            self._render()
+            self._publish()
 
-    # -- the class-level lock protocol tqdm.contrib.concurrent requires ------------
-    # huggingface_hub routes multi-file downloads through thread_map, whose ensure_lock()
-    # calls get_lock()/set_lock() on the CLASS. Without them snapshot_download died with
-    # "type object '_ActivityTqdm' has no attribute 'get_lock'". Delegating to the real
-    # tqdm's lock keeps whatever cross-process semantics it intends.
-    @classmethod
-    def get_lock(cls):
-        if not hasattr(cls, "_lock"):
-            from tqdm import tqdm as _real_tqdm
+    # -- the only behaviour we change -------------------------------------------------
+    def display(self, *args, **kwargs):
+        if getattr(self, "_bytes", False):
+            self._publish()
+        return True
 
-            cls._lock = _real_tqdm.get_lock()
-        return cls._lock
-
-    @classmethod
-    def set_lock(cls, lock):
-        cls._lock = lock
-
-    # -- the tqdm surface huggingface_hub touches ---------------------------------
     def update(self, n=1):
-        self.n += n or 0
+        # Publish on every update rather than leaving it to display(), which tqdm
+        # throttles by mininterval — the activity line would then sit still through a
+        # burst of fast chunks, which is exactly when a download looks hung.
+        r = super().update(n)
         if self._bytes:
-            _ActivityTqdm._live[self._key] = (self.n, self.total or 0)
-            self._render()
+            self._publish()
+        return r
 
     def close(self):
-        _ActivityTqdm._live.pop(self._key, None)
+        # Stop publishing BEFORE closing: tqdm.close() calls display() one last time,
+        # which would re-add this bar to the aggregate immediately after it was removed.
+        self._bytes = False
+        super().close()
+        _ActivityTqdm._live.pop(id(self), None)
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self.close()
-        return False
-
-    def set_description(self, desc=None, refresh=True):
-        self.desc = desc or ""
-
-    def set_description_str(self, desc=None, refresh=True):
-        self.desc = desc or ""
-
-    def set_postfix(self, *a, **k):
-        pass
-
-    def set_postfix_str(self, *a, **k):
-        pass
-
-    def refresh(self, *a, **k):
-        pass
-
-    def reset(self, total=None):
-        self.n = 0
-        self.total = total
-
-    def write(self, s, **k):
-        pass  # tqdm.write() is a terminal escape hatch; we own the terminal here
-
-    def __iter__(self):
-        # See the note in __init__: this must pass the wrapped iterable through, or the
-        # work driven by iterating it never happens.
-        if self._iterable is None:
-            return
-        for obj in self._iterable:
-            yield obj
-            self.update(1)
+    # -- our own aggregation ----------------------------------------------------------
+    def _publish(self):
+        _ActivityTqdm._live[id(self)] = (self.n, self.total or 0)
+        self._render()
 
     @classmethod
     def _render(cls):
