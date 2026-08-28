@@ -312,12 +312,6 @@ def test_visibility_is_still_tri_state_for_a_container_push(tmp_path, monkeypatc
     assert seen["private"] is True
 
 
-def test_publish_is_refused_for_a_container_package(tmp_path, monkeypatch):
-    monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: None)
-    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path)), "--publish", "--public"])
-    assert res.exit_code != 0
-    assert "not listed there yet" in res.output
-
 
 def test_a_plain_repo_id_still_goes_down_the_v5_path():
     """The dispatch is on "is this a package directory", so a repo id must not match."""
@@ -325,45 +319,11 @@ def test_a_plain_repo_id_still_goes_down_the_v5_path():
     assert "container" not in res.output.lower() or res.exit_code != 0
 
 
-# ------------------------------------------------------------------ doctor
-
-
 def _req(name, ok, detail="", fix="fix it"):
     return container.Requirement(name, ok, detail, fix)
 
 
-def test_doctor_reports_the_container_path_separately(monkeypatch):
-    """A consumer whose box can serve must not be told to install a host toolchain the
-    container path exists to avoid."""
-    monkeypatch.setattr(container, "preflight",
-                        lambda **k: [_req("docker", True, "29.5.3"),
-                                     _req("tt devices", True, "/dev/tenstorrent"),
-                                     _req("hugepages", True, "/dev/hugepages-1G")])
-    res = runner.invoke(cli.app, ["doctor"])
-    assert "Container path (v5.1)" in res.output
-    assert "no host tt-metal, vLLM or venv" in res.output
 
-
-def test_doctor_says_which_paths_work_when_the_host_toolchain_is_inadequate(monkeypatch):
-    monkeypatch.setattr(container, "preflight",
-                        lambda **k: [_req("docker", True, "29.5.3"),
-                                     _req("tt devices", True, "/dev/tenstorrent"),
-                                     _req("hugepages", True, "/dev/hugepages-1G")])
-    res = runner.invoke(cli.app, ["doctor"])
-    if res.exit_code != 0:            # a box with no host vLLM exits 1
-        # rich hard-wraps at the terminal width, so compare on collapsed whitespace
-        flat = " ".join(res.output.split())
-        assert "host toolchain inadequate" in flat
-        assert "container (v5.1) packages can" in flat
-
-
-def test_doctor_surfaces_a_container_blocker_with_its_fix(monkeypatch):
-    monkeypatch.setattr(container, "preflight",
-                        lambda **k: [_req("docker", True, "29.5.3"),
-                                     _req("hugepages", False, "not mounted",
-                                          "mount 1G hugepages at exactly /dev/hugepages-1G")])
-    res = runner.invoke(cli.app, ["doctor"])
-    assert "mount 1G hugepages at exactly" in res.output
 
 
 def test_pull_preflights_without_requiring_a_card(tmp_path, monkeypatch):

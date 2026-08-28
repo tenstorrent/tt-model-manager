@@ -404,10 +404,17 @@ def test_a_wrong_schema_version_is_refused():
         _mani(schema="1").validate_semantics()
 
 
-def test_v5_1_is_accepted_by_the_wire_schema_gate_and_v6_is_not():
+def test_v5_1_is_accepted_by_the_wire_schema_gate():
+    """v5 (fat), v5.1 (container) and v6 (thin) are all readable; anything else is refused
+    outright rather than half-read. "6" is a REAL schema — the thin bundle — which is why
+    the container path took 5.1 and left the whole number free."""
+    from tt_kernel.manifest import SUPPORTED_SCHEMAS
+
+    assert {"5", "5.1", "6"} <= SUPPORTED_SCHEMAS
+
     wire = _mani().to_wire(image_tag="t:1", tt_metal_version="v", tt_kernel_version="0.1.0")
     raw = json.loads(wire.to_json())
-    raw["schema_version"] = "6"
+    raw["schema_version"] = "7"
     with pytest.raises(ValueError, match="Unsupported bundle schema_version"):
         Manifest.from_json(json.dumps(raw))
 

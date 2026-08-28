@@ -408,6 +408,30 @@ class _ActivityTqdm(_tqdm):
         _ActivityTqdm._live[id(self)] = (self.n, self.total or 0)
         self._render()
 
+    # tqdm.contrib.concurrent.thread_map's ensure_lock() calls tqdm_class.get_lock()/set_lock()
+    # (and `del tqdm_class._lock`) whenever more than one file downloads concurrently --
+    # snapshot_download hits this on every multi-file bundle. These must set/read the lock on
+    # THIS class (mirroring tqdm.std.tqdm's own implementation) -- delegating to the real tqdm
+    # class instead stores the lock there, so ensure_lock's cleanup `del tqdm_class._lock`
+    # fails because _ActivityTqdm itself never got the attribute.
+    #
+    # The membership test is `cls.__dict__`, NOT hasattr: this class subclasses tqdm, and
+    # hasattr is inheritance-aware — once anything has used the real tqdm, hasattr finds
+    # ITS _lock, returns it, and installs nothing here, which is the very failure the
+    # comment above describes. tqdm's own implementation can use hasattr because it is the
+    # base class; a subclass cannot.
+    @classmethod
+    def get_lock(cls):
+        if "_lock" not in cls.__dict__:
+            import tqdm
+
+            cls._lock = tqdm.std.TqdmDefaultWriteLock()
+        return cls._lock
+
+    @classmethod
+    def set_lock(cls, lock):
+        cls._lock = lock
+
     @classmethod
     def _render(cls):
         done = sum(n for n, _ in cls._live.values())

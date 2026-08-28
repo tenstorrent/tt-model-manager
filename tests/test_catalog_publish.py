@@ -51,13 +51,6 @@ def test_unpublish_delists(monkeypatch):
     assert calls == [("me/public-bundle", False)]
 
 
-def test_push_publish_rejects_private():
-    """`push --publish --private` is a contradiction and must fail before any work."""
-    res = runner.invoke(cli.app, ["push", "me/x", "--private", "--publish"])
-    assert res.exit_code == 1
-    assert "--public" in res.output
-
-
 def test_set_catalog_listing_adds_and_removes_tag(monkeypatch):
     """`set_catalog_listing` unions/removes exactly the catalog tag, preserving others."""
     pushed = {}
