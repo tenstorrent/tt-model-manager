@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from . import compat
 from .manifest import WeightsRef
@@ -74,9 +74,143 @@ def install_self_contained(bundle_dir: Path, venv_dir: Path) -> Path:
     return venv_dir / "bin" / "python"
 
 
+# ------------------------------------------------------------------ verify (tt-model curl)
+# The consumer's last step is "did it actually answer?". Everything below builds that one
+# OpenAI chat request so the user never has to retype the model id, the endpoint or the JSON
+# body. Stdlib only — tt-model takes no HTTP dependency.
+DEFAULT_BASE_URL = "http://localhost:8000"
+ENV_BASE_URL = "TT_MODEL_BASE_URL"
+DEFAULT_PROMPT = "Say hello in one sentence."
+DEFAULT_MAX_TOKENS = 64
+
+
+def list_models(base_url: str, *, timeout: float = 5.0) -> List[str]:
+    """The model ids an OpenAI-compatible server currently serves (``GET /v1/models``).
+
+    This is the authoritative answer to "what is running": it is the id vLLM registered, not
+    something we recorded at install time and hope is still true. Returns ``[]`` when the
+    server is unreachable or answers something unexpected — the caller falls back to the
+    install record, because printing a command must work with nothing listening.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    url = base_url.rstrip("/") + "/v1/models"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 — localhost probe
+            payload = _json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return []
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        return []
+    return [m["id"] for m in data if isinstance(m, dict) and isinstance(m.get("id"), str)]
+
+
+def parse_param(raw: str) -> object:
+    """Coerce a CLI-supplied sampling value to its JSON type, falling back to the string.
+
+    ``0.7`` -> float, ``200`` -> int, ``true`` -> bool, a JSON array -> list. A bare word
+    like ``length`` isn't valid JSON, so it stays a string — which is what the API wants.
+    """
+    import json as _json
+
+    try:
+        return _json.loads(raw)
+    except ValueError:
+        return raw
+
+
+def parse_extra_params(extra: List[str]) -> dict:
+    """Fold leftover ``--key value`` CLI args into OpenAI request fields.
+
+    vLLM's sampling surface moves faster than this CLI should; rather than enumerate
+    ``temperature``/``top_p``/``seed``/... as flags that go stale, anything the command
+    doesn't reserve is passed through. ``--top-p 0.9`` becomes ``{"top_p": 0.9}`` (dashes to
+    underscores, value typed by :func:`parse_param`); a lone ``--flag`` becomes ``True``.
+
+    Raises ``ValueError`` on a bare positional, which is almost always a quoting mistake
+    (``tt-model curl hello there``) and would otherwise be silently dropped.
+    """
+    params: dict = {}
+    i = 0
+    while i < len(extra):
+        token = extra[i]
+        if not token.startswith("--"):
+            raise ValueError(f"unexpected argument {token!r} (quote the prompt, or use --key value)")
+        key, sep, inline = token[2:].partition("=")
+        if sep:
+            value: object = parse_param(inline)
+        elif i + 1 < len(extra) and not extra[i + 1].startswith("--"):
+            value = parse_param(extra[i + 1])
+            i += 1
+        else:
+            value = True
+        params[key.replace("-", "_")] = value
+        i += 1
+    return params
+
+
+def chat_payload(model: str, prompt: str, *, params: Optional[dict] = None) -> dict:
+    """The ``/v1/chat/completions`` body for a one-shot prompt.
+
+    ``max_tokens`` is a default rather than a fixed field, so ``--max-tokens 200`` (or any
+    other sampling param) simply overrides it.
+    """
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": DEFAULT_MAX_TOKENS,
+    }
+    body.update(params or {})
+    return body
+
+
+def curl_argv(base_url: str, payload: dict) -> List[str]:
+    """The real ``curl`` argv for a chat request — what the command runs verbatim.
+
+    ``-sS``: no progress meter, but transport errors still surface (bare ``-s`` would make a
+    refused connection look like an empty reply).
+    """
+    import json as _json
+
+    return [
+        "curl", "-sS", base_url.rstrip("/") + "/v1/chat/completions",
+        "-H", "Content-Type: application/json",
+        "-d", _json.dumps(payload),
+    ]
+
+
+def render_curl(argv: List[str]) -> str:
+    """``argv`` as a copy-pasteable multi-line shell command.
+
+    Shaped like the recipe doc's snippet (one flag pair per continued line) and quoted with
+    ``shlex.quote``, so pasting it into a shell sends exactly what the command sends.
+    """
+    import shlex
+
+    head = " ".join(shlex.quote(a) for a in argv[:3])
+    lines = [head]
+    rest = argv[3:]
+    for i in range(0, len(rest), 2):
+        lines.append("  " + " ".join(shlex.quote(a) for a in rest[i:i + 2]))
+    return " \\\n".join(lines)
+
+
 __all__ = [
     "ENV_MODELS_DIR",
     "resolve_models_dir",
     "download_weights",
     "install_self_contained",
+    "DEFAULT_BASE_URL",
+    "ENV_BASE_URL",
+    "DEFAULT_PROMPT",
+    "DEFAULT_MAX_TOKENS",
+    "list_models",
+    "parse_param",
+    "parse_extra_params",
+    "chat_payload",
+    "curl_argv",
+    "render_curl",
 ]
