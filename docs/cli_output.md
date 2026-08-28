@@ -34,12 +34,13 @@ failure would look fine now and vanish the day that command gains a phase.
 
 ## Machine-readable output bypasses Rich
 
-`serve --print`, `run --print`, `start --print`, `search --json` and `info` must go through
-`console.raw()`, not `console.print()`. Rich wraps at terminal width and parses `[...]` as
-markup; either corrupts a pasteable command line or a JSON document. There is a
-`COLUMNS=40` test for this — see `tests/test_cli_output.py`.
+`serve --print`, `search --json`, and `info` must go through `console.raw()`, not
+`console.print()`. Rich wraps at terminal width and parses `[...]` as markup; either corrupts a
+pasteable command line or a JSON document. There is a `COLUMNS=40` test for this — see
+`tests/test_cli_output.py`.
 
-`legacy_serve.py`'s `print()`s belong to the served process, not the CLI, and stay as-is.
+The bundle's own `run.sh` and the vLLM server it launches print for themselves; that output
+belongs to the served process, not the CLI, and stays as-is.
 
 ## Subprocesses
 
@@ -74,9 +75,9 @@ or the tt-metal build; naming the problem is the job.
 
 ```bash
 pytest -q
-tt-model doctor | cat -v | grep -c '\^\['      # non-TTY: expect 0
+tt-model list | cat -v | grep -c '\^\['         # non-TTY: expect 0 (a structured offline command)
 COLUMNS=40 tt-model serve <id> --print          # one unwrapped line
-COLUMNS=80 tt-model doctor; COLUMNS=120 tt-model doctor
+COLUMNS=80 tt-model list; COLUMNS=120 tt-model list
 tt-model pull <id> -v                           # folded detail returns
 ```
 

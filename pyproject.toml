@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tt-model"
 version = "0.1.0"
-description = "Publish and pull precompiled tt-metal kernel caches over Hugging Face Hub"
+description = "Publish and pull self-contained tt-metal model bundles over Hugging Face Hub"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Tenstorrent" }]
-keywords = ["tenstorrent", "tt-metal", "ttnn", "kernel-cache", "huggingface"]
+keywords = ["tenstorrent", "tt-metal", "ttnn", "vllm", "huggingface"]
 dependencies = [
     "huggingface_hub>=0.23",
     "typer>=0.12",
@@ -21,9 +21,6 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
-# The legacy-runner OpenAI server (`python -m tt_kernel.legacy_serve`) — only needed to
-# serve a legacy (dispatch-contract) runner bundle. The vLLM path does not use this.
-serve = ["fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.scripts]
 tt-model = "tt_kernel.cli:main"

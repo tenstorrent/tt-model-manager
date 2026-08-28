@@ -3,8 +3,8 @@
 
 """Tests for the v5 self-contained ("fat") packaging model: the ``bundled`` block that ships the
 author's ttnn/vLLM/plugin wheels inside the bundle, schema round-trip, and the compare() rule that
-a self-contained bundle skips host version-range gates (it ships its own platform) while ``arch``
-stays fatal. No hardware, no network.
+a self-contained bundle gates only on ``arch`` (fatal) + ``device_count`` (forceable) — it ships
+its own platform, so no host version check applies. No hardware, no network.
 """
 
 from tt_kernel import metal
@@ -12,9 +12,7 @@ from tt_kernel.manifest import (
     BundledPlatform,
     Entrypoint,
     Manifest,
-    Platform,
     Producer,
-    Runtime,
     WeightsRef,
     WheelArtifact,
     compare,
@@ -75,11 +73,10 @@ def test_v5_schema_roundtrip():
     ]
 
 
-def test_self_contained_skips_host_range_gates():
-    # Host has NO ttnn/vLLM and a mismatched platform range — a self-contained bundle must not
-    # gate on it, because it ships its own wheels.
-    m = _v5_manifest(platform=Platform(ttnn=">=0.99"), runtime=Runtime(kind="vllm", version=">=99"))
-    report = compare(m, _env(tt_metal_version=None, vllm_version=None))
+def test_self_contained_compatible_on_matching_env():
+    # The host has NO tt-metal/vLLM — a self-contained bundle must not care (it ships its own).
+    m = _v5_manifest()
+    report = compare(m, _env())
     assert report.compatible is True
     assert report.issues == []
 
@@ -91,16 +88,6 @@ def test_self_contained_arch_still_fatal():
     assert any(i.field == "arch" and i.fatal for i in report.issues)
 
 
-def test_self_contained_ignores_host_tt_metal_version():
-    # The host has tt-metal installed at a DIFFERENT version than the bundle was built against.
-    # A self-contained bundle ships its own engine, so this must NOT surface as an issue — even
-    # when the bundle carries a kernel build_key (which for a host-provisioned bundle would gate).
-    m = _v5_manifest(tt_metal_version="0.75.0", build_key=12345)
-    report = compare(m, _env(tt_metal_version="0.99.0-different", build_key=None))
-    assert report.compatible is True
-    assert not any(i.field in ("tt_metal_version", "build_key") for i in report.issues)
-
-
 def test_self_contained_device_count_still_forceable():
     # device_count still matters (it's the mesh the model needs) — forceable, not fatal.
     m = _v5_manifest(device_count=4)
@@ -108,18 +95,3 @@ def test_self_contained_device_count_still_forceable():
     assert report.compatible is False
     assert report.forceable is True
     assert any(i.field == "device_count" and not i.fatal for i in report.issues)
-
-
-def test_self_contained_no_runner_version_advisory():
-    from tt_kernel.manifest import runner_version_advisory
-
-    # A v5 bundle has a weights pointer, so the advisory would otherwise fire on a host with a
-    # mismatched tt-metal. Self-contained => no host tt-metal advisory at all.
-    m = _v5_manifest(tt_metal_version="0.75.0")
-    assert runner_version_advisory(m, _env(tt_metal_version="0.99.0-different")) is None
-
-
-def test_v4_without_bundled_is_not_self_contained():
-    m = _v5_manifest(schema_version="4", bundled=None)
-    assert m.is_self_contained is False
-    assert m.is_v4 is True

@@ -30,7 +30,7 @@ from tt_kernel import console
 # The seam: point these at whatever commands exercise the output layer.
 CLI = [sys.executable, "-m", "tt_kernel.cli"]
 TARGETS = {
-    "plain": ["doctor"],                      # structured, no network
+    "plain": ["list"],                        # structured, no network
     "help": ["--help"],
     "version": ["--version"],
 }
@@ -122,9 +122,9 @@ class TestNarrowTerminal:
         assert res.returncode == 0, res.stderr
 
     @pytest.mark.parametrize("columns", [40, 200])
-    def test_doctor_renders_at_any_width(self, columns):
+    def test_plain_renders_at_any_width(self, columns):
         res = run(TARGETS["plain"], columns=columns)
-        assert res.returncode in (0, 1), res.stderr   # 1 = inadequate toolchain, still valid
+        assert res.returncode in (0, 1), res.stderr
         assert "\x1b" not in res.stdout
 
     def test_raw_never_wraps(self):
@@ -146,7 +146,7 @@ class TestNarrowTerminal:
 # ── 4. real terminal behaviour ───────────────────────────────────────────────
 class TestPty:
     def test_styled_when_attached_to_a_terminal(self):
-        raw = run_in_pty(TARGETS["plain"])
+        raw = run_in_pty(TARGETS["help"])
         assert "\x1b[" in raw, "no styling on a real TTY"
 
     def test_no_foreign_bars_and_nothing_left_unerased(self):
@@ -166,7 +166,7 @@ class TestPty:
 
 
 # ── 5. --help is documentation ────────────────────────────────────────────────
-EXPECTED_PANELS = ["Get started", "Run a model", "Get models", "Publish models",
+EXPECTED_PANELS = ["Run a model", "Get models", "Publish models",
                    "Environment", "Maintenance"]
 
 
@@ -179,29 +179,13 @@ class TestHelpGrouping:
         for panel in EXPECTED_PANELS:
             assert panel in out, f"missing help panel: {panel}"
 
-    def test_get_started_comes_first(self):
-        """Panel order follows source order of the first command in each. A new user should
-        meet `start`/`install` before `push`."""
-        out = self._help()
-        positions = {p: out.index(p) for p in EXPECTED_PANELS if p in out}
-        assert positions["Get started"] == min(positions.values())
-
     def test_every_command_lives_in_a_panel(self):
         """An ungrouped command falls into a generic "Commands" box, which is how a flat
         30-item list grows back."""
         out = self._help()
         assert "─ Commands ─" not in out, "some command is not assigned to a panel"
 
-    def test_developer_fixtures_are_hidden(self):
-        """`dev` fabricates test data; it should not crowd help for people running models."""
-        out = self._help()
-        assert "make-test-cache" not in out
-        assert "\ndev " not in out
-
-    def test_the_guided_entry_point_is_advertised(self):
-        assert "start" in self._help()
-
-    @pytest.mark.parametrize("cmd", ["start", "install", "serve", "pull", "doctor"])
+    @pytest.mark.parametrize("cmd", ["serve", "pull", "package", "info", "rm"])
     def test_each_command_help_renders_and_is_escape_free_when_piped(self, cmd):
         res = run([cmd, "--help"], columns=100)
         assert res.returncode == 0, res.stderr

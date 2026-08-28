@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-"""Assemble a v5 self-contained ("fat") bundle — "package what's on your box".
+"""Assemble self-contained bundles — v5 "fat" ("package what's on your box") and v6 "thin".
 
-Unlike the v4 push path (which references a host-provisioned tt-metal/vLLM and ships only the
-serving metadata), this stages ONE running folder that carries the author's actual built
-artifacts: their ttnn wheel (custom C++/LLK kernels compiled in), the empty-target base vLLM
-wheel, the vLLM plugin wheel, and their modified tt-metal-community tree — plus a generated
-``install.sh``/``run.sh`` and a v5 manifest. A consumer needs only a TT card + firmware.
+A v5 bundle stages ONE running folder that carries the author's actual built artifacts: their
+ttnn wheel (custom C++/LLK kernels compiled in), the empty-target base vLLM wheel, the vLLM
+plugin wheel, and their modified tt-metal-community tree — plus a generated ``install.sh``/
+``run.sh`` and a v5 manifest. A v6 bundle instead ships ``model.py`` + pip dependency pins and
+builds the venv at install (see ``stage_thin_package``). A consumer needs only a TT card + firmware.
 
 Weights are NEVER embedded: the manifest carries the HF repo id and ``pull`` downloads them.
 
@@ -27,7 +27,6 @@ import socket
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from . import bundles
 from .manifest import (
     BundledPlatform,
     Deps,
@@ -55,6 +54,9 @@ VLLM_VERSION = "0.25.1"
 # Per-model vLLM bundle folders live under here; this dir (not the bundle root) is EXTRA_MODELS_DIR
 # so the plugin's child-scan finds exactly the model metadata and not metal/, wheels/, venv/.
 METADATA_DIR = "vllm_models"
+# The plugin-owned metadata file at the root of each per-model folder. tt-model writes it from the
+# author's entrypoint (arch + main_class); the vLLM plugin reads it at serve via EXTRA_MODELS_DIR.
+VLLM_METADATA_NAME = "vllm_metadata.json"
 
 # torch is the CPU build for Tenstorrent (never CUDA); requirements install uses this index.
 _PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
@@ -465,7 +467,7 @@ def stage_package(
     safe_key = name.replace("/", "__")
     model_bundle = staged / METADATA_DIR / safe_key
     model_bundle.mkdir(parents=True, exist_ok=True)
-    (model_bundle / bundles.VLLM_METADATA_NAME).write_text(json.dumps(vllm_metadata, indent=2))
+    (model_bundle / VLLM_METADATA_NAME).write_text(json.dumps(vllm_metadata, indent=2))
 
     bundled = BundledPlatform(
         ttnn_wheel=ttnn_art,
@@ -489,9 +491,6 @@ def stage_package(
         tt_metal_version=tt_metal_version,
         arch=arch,
         device_count=device_count,
-        build_key=None,  # self-contained/kernels-less: kernels are inside the shipped ttnn wheel
-        kernel_count=0,
-        fast_path_kernels=None,
         producer=Producer(
             tt_kernel_version=tt_kernel_version,
             created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -641,7 +640,7 @@ def stage_thin_package(
     safe_key = name.replace("/", "__")
     model_bundle = staged / METADATA_DIR / safe_key
     model_bundle.mkdir(parents=True, exist_ok=True)
-    (model_bundle / bundles.VLLM_METADATA_NAME).write_text(json.dumps(vllm_metadata, indent=2))
+    (model_bundle / VLLM_METADATA_NAME).write_text(json.dumps(vllm_metadata, indent=2))
 
     deps = Deps(
         python=python_version,
@@ -660,9 +659,6 @@ def stage_thin_package(
         tt_metal_version=tt_metal_version,
         arch=arch,
         device_count=device_count,
-        build_key=None,
-        kernel_count=0,
-        fast_path_kernels=None,
         producer=Producer(
             tt_kernel_version=tt_kernel_version,
             created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
