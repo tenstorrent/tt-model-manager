@@ -692,8 +692,17 @@ class TtDitServerLauncher:
                 'uv pip install --python "$VENV/bin/python" -r /ctx/requirements.lock '
                 f"--extra-index-url {self.PYTORCH_CPU_INDEX} --index-strategy unsafe-best-match"
             ]
-        packages = tuple(rt.get("packages") or ()) or self.DEFAULT_PACKAGES
-        quoted = " ".join(shlex.quote(str(p)) for p in packages)
+        packages = [str(p) for p in (rt.get("packages") or ())] or list(self.DEFAULT_PACKAGES)
+
+        # Nothing in an HTTP stack depends on torch, and diffusers/transformers declare it
+        # optional — so unlike the vLLM kinds, where torch arrives as an engine dependency,
+        # nothing here pulls it in. ttnn's extension modules are built against tt-metal's
+        # pinned torch, so install exactly that rather than whatever resolves.
+        if not any(re.match(r"^torch\b", p) for p in packages):
+            pin = metal_torch_pin(_local_metal_tree(m))
+            packages.insert(0, f"torch=={pin}" if pin else "torch")
+
+        quoted = " ".join(shlex.quote(p) for p in packages)
         return [
             f'uv pip install --python "$VENV/bin/python" {quoted} '
             f"--extra-index-url {self.PYTORCH_CPU_INDEX} --index-strategy unsafe-best-match"

@@ -176,3 +176,35 @@ def test_a_lock_replaces_resolution_entirely():
     assert len(lines) == 1
     assert "requirements.lock" in lines[0]
     assert "fastapi" not in lines[0]
+
+
+def test_torch_is_installed_explicitly(monkeypatch):
+    """Nothing in an HTTP stack depends on torch, and diffusers/transformers declare it
+    optional — so unlike the vLLM kinds nothing pulls it in. The image built without it
+    and failed verify, so the launcher adds it at tt-metal's own pin."""
+    from tt_kernel import launchers
+
+    monkeypatch.setattr(launchers, "metal_torch_pin", lambda _tree: "2.11.0")
+    line = launcher_for("tt-dit-server").install_lines(_manifest())[0]
+    assert "torch==2.11.0" in line
+
+
+def test_an_author_supplied_torch_wins(monkeypatch):
+    from tt_kernel import launchers
+
+    monkeypatch.setattr(launchers, "metal_torch_pin", lambda _tree: "2.11.0")
+    line = launcher_for("tt-dit-server").install_lines(
+        _manifest(runtime={"app": "models.tt_dit.x:app", "packages": ["torch==2.9.0", "fastapi"]})
+    )[0]
+    assert "torch==2.9.0" in line
+    assert "torch==2.11.0" not in line
+
+
+def test_torch_is_unpinned_when_the_metal_tree_is_not_local(monkeypatch):
+    """A git source has no tree to read a pin from; install torch anyway rather than
+    shipping an image whose verify step is guaranteed to fail."""
+    from tt_kernel import launchers
+
+    monkeypatch.setattr(launchers, "metal_torch_pin", lambda _tree: None)
+    line = launcher_for("tt-dit-server").install_lines(_manifest())[0]
+    assert " torch " in line
