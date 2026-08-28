@@ -215,3 +215,34 @@ and — unless `--vendor-deps` — the pip deps).
 
 See [docs/self_contained_packages.md](self_contained_packages.md) for the design details and the
 offline test commands.
+
+---
+
+## v6 (thin) — the same flow, gated
+
+There is a second authoring path, **v6 "thin"**, that runs the *same* `pull → serve → curl` flow
+for the consumer but builds the venv from pip pins instead of embedding the author's `ttnn` wheel
+and `tt-metal-community` tree. Author it with **`tt-model package-thin`**:
+
+```bash
+tt-model package-thin <your-org>/<model-name> \
+  --model-py ./model.py \
+  --requirements ./requirements.txt \   # ttnn / tt-metal-models pins (omit for the #29 template)
+  --plugin-wheel  ./vllm_tt_plugin-*.whl \
+  --ops-wheel     ./generic_op-*.whl \   # optional, repeatable — custom-op wheels
+  --arch blackhole \
+  --arch-name LlamaForCausalLM \
+  --main-class models.tt_transformers.tt.generator_vllm:LlamaForCausalLM \
+  --weights unsloth/Llama-3.2-3B-Instruct \
+  --mesh P150
+```
+
+**This path is not fully runnable yet.** It's gated on the **models wheel** publishing —
+`tt-metal-models`, which packages the whole `models/` tree (including `tt_transformers`) for pip
+and pins `ttnn` exactly ([tenstorrent/tt-metal#54478](https://github.com/tenstorrent/tt-metal/pull/54478)).
+Until it lands, the generated `requirements.txt` pins `ttnn` directly (it's on PyPI) and carries a
+`tt-metal-models` TODO pin; once the wheel publishes, a thin bundle pins that one dep and becomes
+runnable end-to-end.
+
+For the full v6 design, the bundle layout, authoring flags, and the offline tests, see
+**[docs/thin_packages.md](thin_packages.md)**.
