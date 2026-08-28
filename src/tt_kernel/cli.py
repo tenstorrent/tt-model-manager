@@ -935,6 +935,38 @@ def _warn_if_update_available(repo_id: str, entry: dict) -> None:
         )
 
 
+def _refresh_self_contained(repo_id: str, entry: dict, *, force: bool, arch: Optional[str]) -> None:
+    """Opt-in (``serve --refresh``): if the Hub tip is newer than the installed revision, re-pull
+    and re-install the bundle IN PLACE before serving, so a republished source doesn't get served
+    with stale launch params. Never blocks a serve: if the tip can't be resolved (offline) or is
+    already what's installed, this is a no-op and we serve the installed bundle as-is.
+
+    Skips a pinned install (the user chose that ``@revision`` — don't move it off it). The actual
+    reuse-vs-reinstall decision is left to ``_install_self_contained``, which rmtrees + reinstalls
+    only when the resolved sha differs from the recorded one (a plain, non-``--force`` update).
+    """
+    if entry.get("pinned"):
+        return
+    installed = entry.get("revision")
+    latest = hub.latest_revision(repo_id, timeout=None)  # None => Hub unreachable; leave install as-is
+    if not latest or latest == installed:
+        return
+    typer.secho(f"↻ refreshing {repo_id}: {(installed or '?')[:8]} → {latest[:8]}", fg=typer.colors.CYAN)
+    with tempfile.TemporaryDirectory() as td:
+        snapshot = _hub(lambda: hub.download_bundle(repo_id, latest, dest=td),
+                        repo_id, what="Refresh",
+                        consequence="Kept the installed bundle; serving it as-is.")
+        manifest_path = snapshot / MANIFEST_NAME
+        if not manifest_path.is_file():
+            raise _err(f"{repo_id} is not a tt-model bundle (no {MANIFEST_NAME}).")
+        mani = Manifest.from_json(manifest_path.read_text())
+        if not mani.has_own_venv:
+            raise _err(f"{repo_id} is not a self-contained bundle (schema {mani.schema_version}).")
+        _install_self_contained(repo_id, snapshot, mani, force=force, arch=arch,
+                                models_dir=None, with_weights=False,
+                                revision=None, resolved_revision=latest)
+
+
 def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional[List[str]] = None) -> None:
     """Serve a v5 self-contained bundle by running its own ``run.sh`` in its own venv.
 
@@ -998,12 +1030,23 @@ def serve(
         "--port (which is why it must be a flag, not a passthrough argument); for a v5/v6 "
         "bundle it is appended to the launch command, where argparse last-wins."
     ),
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Before serving an already-installed self-contained bundle, "
+        "re-pull and re-install it if the Hub has a newer revision (so a republished source "
+        "isn't served with stale launch params). This is the only thing that overrides "
+        "--no-update-check and hits the Hub; a refresh that fails for any reason (offline, "
+        "missing manifest, failed rebuild) warns and serves the existing install unchanged. "
+        "No-op when already up to date, --local-only, or the install has no recorded revision."
+    ),
 ) -> None:
     """Serve a self-contained bundle from its own venv, via its ``run.sh``.
 
     One command: install the bundle if needed (building its per-model venv), then run ``run.sh``,
     which wires the engine env and launches the OpenAI-compatible server. Repeat invocations skip
     the install and go straight to launch. Anything after the bundle id is passed through to vLLM.
+
+    An installed bundle is served as-is (only an advisory warns of a newer revision). Pass
+    ``--refresh`` to opt in to picking up a newer published revision before serving.
     """
     repo_id, revision = _split_revision(repo_id)
     extra_args = list(ctx.args)  # anything after the bundle id is passed through to vLLM
@@ -1055,7 +1098,11 @@ def serve(
     # is irrelevant — the bundle ships/builds its own — so nothing about the host is checked.
     entry = localdb.get(repo_id)
     if entry and entry.get("self_contained"):
-        if not local_only and not no_update_check:
+        if not local_only and refresh:
+            # Opt-in: re-pull + re-install if a newer revision exists, then serve the fresh one.
+            _refresh_self_contained(repo_id, entry, force=force, arch=arch)
+            entry = localdb.get(repo_id) or entry  # re-read: the refresh may have updated the record
+        elif not local_only and not no_update_check:
             _warn_if_update_available(repo_id, entry)
         _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
         return
