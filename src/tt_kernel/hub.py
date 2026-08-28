@@ -382,6 +382,24 @@ class _ActivityTqdm:
     def __iter__(self):
         return iter(())
 
+    # tqdm.contrib.concurrent.thread_map's ensure_lock() calls tqdm_class.get_lock()/set_lock()
+    # (and `del tqdm_class._lock`) whenever more than one file downloads concurrently --
+    # snapshot_download hits this on every multi-file bundle. These must set/read the lock on
+    # THIS class (mirroring tqdm.std.tqdm's own implementation) -- delegating to the real tqdm
+    # class instead stores the lock there, so ensure_lock's cleanup `del tqdm_class._lock`
+    # fails because _ActivityTqdm itself never got the attribute.
+    @classmethod
+    def get_lock(cls):
+        if not hasattr(cls, "_lock"):
+            import tqdm
+
+            cls._lock = tqdm.std.TqdmDefaultWriteLock()
+        return cls._lock
+
+    @classmethod
+    def set_lock(cls, lock):
+        cls._lock = lock
+
     @classmethod
     def _render(cls):
         done = sum(n for n, _ in cls._live.values())
