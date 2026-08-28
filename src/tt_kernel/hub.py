@@ -68,6 +68,14 @@ def push_folder(repo_id: str, folder: Path, commit_message: str) -> None:
     ``upload_folder`` takes no ``tqdm_class``, so the bridge here silences HF's writers and
     shows an indeterminate activity line rather than a byte count. An honest spinner beats
     a bar fighting our own output for the row.
+
+    ``delete_patterns`` makes a push REPLACE ``code/`` and ``image/`` rather than merge
+    into them. Without it ``upload_folder`` only ever adds, so anything the bundle stops
+    shipping stays published: narrowing a ``source.code`` allowlist left the dropped files
+    on the Hub, and a repo advertising ``code/`` as byte-identical to the image then
+    described neither. Image blobs are content-addressed, so stale ones accumulate the
+    same way after any rebuild. Top-level files are rewritten on every push, and
+    ``.gitattributes`` is HF's own LFS config, so neither is swept.
     """
     with progress_bridge(f"Uploading to {repo_id}"):
         _api().upload_folder(
@@ -75,6 +83,7 @@ def push_folder(repo_id: str, folder: Path, commit_message: str) -> None:
             repo_type=_REPO_TYPE,
             folder_path=str(folder),
             commit_message=commit_message,
+            delete_patterns=["code/**", "image/**"],
         )
 
 

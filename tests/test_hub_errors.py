@@ -137,3 +137,28 @@ def test_cli_renders_a_card_not_a_traceback(monkeypatch):
     assert "no such bundle, or no access" in res.output
     assert "Traceback" not in res.output
     assert "hf_raise_for_status" not in res.output
+
+
+def test_push_replaces_code_and_image_rather_than_merging(monkeypatch, tmp_path):
+    """A push must not leave behind what the bundle stopped shipping.
+
+    `upload_folder` only adds unless told otherwise, so narrowing a `source.code`
+    allowlist previously left every dropped file published: the repo advertised `code/`
+    as byte-identical to the image while carrying files the image did not have. Image
+    blobs are content-addressed and accumulate the same way across rebuilds.
+    """
+    from tt_kernel import hub
+
+    seen = {}
+
+    class _Api:
+        def upload_folder(self, **kw):
+            seen.update(kw)
+
+    monkeypatch.setattr(hub, "_api", lambda: _Api())
+    hub.push_folder("you/model", tmp_path, "msg")
+
+    assert seen["delete_patterns"] == ["code/**", "image/**"]
+    # .gitattributes is HF's own LFS config and the top-level files are rewritten every
+    # push, so neither should be swept.
+    assert not any(p == "*" or ".gitattributes" in p for p in seen["delete_patterns"])
