@@ -58,7 +58,7 @@ tt_kernel_manifest.json                   the v5 manifest
 
 **Why this shape:**
 
-- **Self-contained, not "kernels-less."** The engine that runs is the author's actual build (their
+- **Self-contained.** The engine that runs is the author's actual build (their
   kernels ride along inside the `ttnn` wheel), not a stock pin — so custom C++/LLK kernels just work.
 - **The folder is a hard wall.** After `pull`, everything needed to serve lives *under the install
   directory* — the pinned interpreter (provisioned by `uv` into the folder), the venv, the engine,
@@ -83,7 +83,6 @@ tt-model serve <org>/<model>
 ```
 
 Full details: **[docs/self_contained_packages.md](docs/self_contained_packages.md)**.
-The older v4 "kernels-less" and legacy dispatch paths are documented below.
 
 ## Install
 

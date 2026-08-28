@@ -8,8 +8,7 @@ Hugging Face Hub, and have anyone with a Tenstorrent card pull and serve it — 
 outside the install folder** needed to run.
 
 > Scope: **v5 self-contained bundles only.** These ship their own engine + venv; a consumer needs
-> only a TT card + firmware. (The older v4 "kernels-less" and legacy dispatch paths are in the
-> [README](../README.md); this recipe does not cover them.)
+> only a TT card + firmware.
 
 There are two roles:
 
@@ -23,14 +22,15 @@ There are two roles:
 **Both roles**
 - Linux **x86_64**, Ubuntu **22.04 or 24.04**.
 - A Tenstorrent card + firmware/driver (`/dev/tenstorrent/*` present).
-- `tt-model` installed. It is **not on PyPI** — install it from a clone (which also sets up the
-  serving stack and verifies it):
+- `tt-model` installed. It is **not on PyPI** — install it from a clone:
   ```bash
   git clone https://github.com/tenstorrent/tt-model-manager && cd tt-model-manager
-  scripts/install.sh          # bootstraps tt-model, then runs `tt-model install`
+  python -m venv .venv && source .venv/bin/activate
+  pip install -e .
   ```
-  `tt-model install` expects `ttnn` to already be importable in the target env (e.g.
-  `pip install "ttnn>=0.72"`); see the [README](../README.md#install).
+  There is nothing else to provision on the box: each bundle builds its **own** per-model venv from
+  what it ships or pins, so the host's `ttnn`/vLLM (if any) is never required or touched. See the
+  [README](../README.md#install).
 - Authenticated to HF for push/pull of private repos:
   ```bash
   export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

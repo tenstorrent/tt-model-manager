@@ -7,9 +7,9 @@ take a model brought up on `tt-metal-community`, package it, publish it, and ser
 just a TT card. **This file is about *using* the flow. To change the tool's code, follow
 [AGENTS.md](AGENTS.md) instead** (draft PR, one concern, regression test, never push to `main`).
 
-**Scope: v5 self-contained only.** Do not route users down the v4 kernels-less or legacy dispatch
-paths for new work. The full recipe with commands is [docs/E2E_RECIPE.md](docs/E2E_RECIPE.md); the
-design is [docs/self_contained_packages.md](docs/self_contained_packages.md).
+**Scope: v5 self-contained only.** This guide covers the v5 fat-bundle flow (a consumer needs only
+a TT card + firmware). The full recipe with commands is [docs/E2E_RECIPE.md](docs/E2E_RECIPE.md);
+the design is [docs/self_contained_packages.md](docs/self_contained_packages.md).
 
 ## The canonical sequence
 

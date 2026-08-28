@@ -104,9 +104,10 @@ The command was renamed `tt-kernel` → `tt-model`. For anyone already on the ol
   one-line note to stderr pointing at `tt-model`.
 - **`TT_KERNEL_*` env vars are still honored** as a fallback for their `TT_MODEL_*` replacements.
 - **An existing `~/.cache|.config/tt-kernel` dir is reused** when the new `tt-model` one doesn't
-  exist yet, so a pre-rename install keeps finding its bundles/instances/index.
-- **Bundles published with the old tool still install** — the on-disk manifest is unchanged
-  (`tt_kernel_manifest.json`), and every prior schema version is still read.
+  exist yet, so a pre-rename install keeps finding its bundles and index.
+- **Bundles published with the old tool still install** *if they are v5/v6* — the on-disk manifest
+  filename is unchanged (`tt_kernel_manifest.json`); pre-v5 schemas are refused (re-publish with a
+  current tt-model).
 
 These shims are deprecated; switch to `tt-model` when convenient.
 
