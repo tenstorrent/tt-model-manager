@@ -60,6 +60,16 @@ tt-model serve   build/my-model/tt_kernel_manifest.json --follow   # prove it lo
 tt-model push    build/my-model --private           # publish to the Hub
 ```
 
+To also list it in the community catalog, push it public and opt in — the same
+`tt-model-catalog` tag the v5/v6 path writes, added after the upload so it lands on the
+model card `package` generated:
+
+```bash
+tt-model push build/my-model --public --publish     # upload + list
+tt-model publish   you/my-model                     # list one pushed earlier
+tt-model unpublish you/my-model                     # delist (repo untouched)
+```
+
 Validation is front-loaded: everything knowable without hardware — arch, kind, the mesh vs
 hardware chip-count cross-check, required launch fields, that `runtime.extra_models_dir` is
 covered by the `source.code` allowlist, that every `source.code` path actually exists — is
@@ -310,7 +320,6 @@ tests specifically rather than the full suite.
 
 ## Not covered yet (planned)
 
-- `--publish` to the community catalog does not list container packages yet.
 - Image size is unoptimised: `tools/triage` (~75 MB) and `tt_metal/pre-compiled` (~187 MB) are
   flagged in the Dockerfile as candidates to prune once a build is green.
 - `package` leaves a ~10 GB image per build and never cleans up older tags of the same model;

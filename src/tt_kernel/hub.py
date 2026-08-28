@@ -130,7 +130,12 @@ def set_catalog_listing(repo_id: str, listed: bool) -> None:
         tags.add(TT_MODEL_CATALOG_TAG)
     else:
         tags.discard(TT_MODEL_CATALOG_TAG)
-    card.data = ModelCardData(tags=sorted(tags))
+    # Mutate `tags` in place rather than rebuilding card.data: replacing the whole block
+    # would drop every OTHER frontmatter field; we need only update the tags.
+    if hasattr(card.data, "tags"):
+        card.data.tags = sorted(tags)
+    else:  # a card with no frontmatter at all
+        card.data = ModelCardData(tags=sorted(tags))
     card.push_to_hub(repo_id, repo_type=_REPO_TYPE)
 
 
