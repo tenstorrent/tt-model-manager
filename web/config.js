@@ -12,11 +12,12 @@ window.TTK_CONFIG = {
   HF_ORIGIN: "https://huggingface.co",
 
   // The opt-in tag a bundle must carry to appear here. Set by `tt-kernel push --publish`
-  // or `tt-kernel publish`. Must match tt_kernel.TT_KERNEL_CATALOG_TAG.
-  CATALOG_TAG: "tt-kernel-catalog",
+  // or `tt-kernel publish`. Must match tt_kernel.TT_MODEL_CATALOG_TAG.
+  CATALOG_TAG: "tt-model-catalog",
 
-  // The base bundle tag, and the manifest filename inside each repo.
-  BUNDLE_TAG: "tt-kernel-cache",
+  // The base bundle tag, and the manifest filename inside each repo. Must match
+  // tt_kernel.TT_MODEL_TAG.
+  BUNDLE_TAG: "tt-model-cache",
   MANIFEST_NAME: "tt_kernel_manifest.json",
 
   // Arch tags a bundle may carry (used to offer arch filters without a manifest fetch).
