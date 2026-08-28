@@ -278,7 +278,9 @@ def test_neither_kind_is_called_plain_vllm():
     here would give one field two meanings depending on which schema you read."""
     from tt_kernel.launchers import KINDS
 
-    assert sorted(KINDS) == ["vllm-fork", "vllm-plugin"]
+    assert "vllm" not in KINDS
+    # the two vLLM arrangements are both named for what they ARE, not for their age
+    assert {"vllm-fork", "vllm-plugin"} <= set(KINDS)
 
 
 def test_the_plugin_kind_requires_a_plugin_source():

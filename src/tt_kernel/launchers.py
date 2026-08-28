@@ -94,6 +94,10 @@ class VllmPluginLauncher:
 
     name = "vllm-plugin"
 
+    #: serve fields a profile must carry for this kind. max_num_seqs/block_size are
+    #: engine settings the TT backend has no working default for.
+    REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device", "max_num_seqs", "block_size")
+
     #: keys the manifest's ``runtime:`` block may contain for this kind
     RUNTIME_KEYS = ("vllm", "plugin", "extension", "extra_models_dir", "lock",
                     "overrides", "wheels")
@@ -346,6 +350,9 @@ class VllmForkLauncher:
     """
 
     name = "vllm-fork"
+
+    #: see VllmPluginLauncher.REQUIRED_SERVE_FIELDS
+    REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device", "max_num_seqs", "block_size")
 
     #: keys the manifest's ``runtime:`` block may contain for this kind
     RUNTIME_KEYS = ("vllm", "extension", "lock", "model_dir")
@@ -617,10 +624,175 @@ def _capability_argv(profile: ServeProfile) -> List[str]:
     return argv
 
 
+class TtDitServerLauncher:
+    """``kind: tt-dit-server`` — a diffusion model served by its own HTTP app.
+
+    Diffusion transformers do not serve through vLLM: there are no tokens, no KV cache
+    and no continuous batching, so the whole engine layer means nothing to them. What
+    they need instead is a warm pipeline behind a small HTTP surface, which tt-metal
+    ships per model under ``models/tt_dit/server/<model>``. This kind installs the HTTP
+    stack and launches that app with uvicorn.
+
+    The serving stack is therefore the model's own code, already inside the image via
+    ``source.code``. That is why ``verify_lines`` imports the app module: an
+    under-shipped allowlist would otherwise only surface on a consumer's first boot.
+    """
+
+    name = "tt-dit-server"
+
+    #: A diffusion server has no continuous-batching engine, so it needs neither
+    #: max_num_seqs nor block_size. It still needs to know its hardware and mesh.
+    REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device")
+
+    #: keys the manifest's ``runtime:`` block may contain for this kind
+    RUNTIME_KEYS = ("app", "packages", "lock")
+
+    #: uvicorn logs this once the ASGI lifespan has finished, which for these servers
+    #: means the pipeline is warm and the device is claimed.
+    READY_LINE = "Application startup complete"
+
+    PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+    DEFAULT_PACKAGES = ("fastapi", "uvicorn", "pydantic>=2", "pillow")
+
+    def validate(self, m: "ContainerManifest") -> None:
+        from .container_manifest import ContainerManifestError
+
+        rt = m.runtime
+        for key in rt:
+            if key not in self.RUNTIME_KEYS:
+                raise ContainerManifestError(
+                    f"runtime key {key!r} is not valid for kind {self.name}; allowed: "
+                    + ", ".join(self.RUNTIME_KEYS)
+                )
+
+        app = rt.get("app")
+        if not app or not isinstance(app, str) or ":" not in app:
+            raise ContainerManifestError(
+                f"kind {self.name} requires runtime.app, the ASGI target to serve, as "
+                '"module.path:attribute" — e.g. "models.tt_dit.server.flux2.app:app".'
+            )
+
+        # The app lives in the model's own tree, so it only exists in the image if the
+        # allowlist ships it. Catch a missing prefix here rather than in the image.
+        top = app.split(":", 1)[0].split(".")[0]
+        if not any(c.split("/")[0] == top for c in m.source.code):
+            raise ContainerManifestError(
+                f"runtime.app {app!r} lives under {top!r}, which no source.code entry "
+                "ships. Add the package holding the server to source.code."
+            )
+
+    # ---- build -----------------------------------------------------------------------
+
+    def install_lines(self, m: "ContainerManifest") -> List[str]:
+        rt = m.runtime
+        if rt.get("lock"):
+            # The lock IS the dependency set: nothing resolves at build time, so two
+            # builds a week apart produce the same environment.
+            return [
+                'uv pip install --python "$VENV/bin/python" -r /ctx/requirements.lock '
+                f"--extra-index-url {self.PYTORCH_CPU_INDEX} --index-strategy unsafe-best-match"
+            ]
+        packages = tuple(rt.get("packages") or ()) or self.DEFAULT_PACKAGES
+        quoted = " ".join(shlex.quote(str(p)) for p in packages)
+        return [
+            f'uv pip install --python "$VENV/bin/python" {quoted} '
+            f"--extra-index-url {self.PYTORCH_CPU_INDEX} --index-strategy unsafe-best-match"
+        ]
+
+    def verify_lines(self, m: "ContainerManifest") -> List[str]:
+        app = str(m.runtime["app"])
+        module, attr = app.split(":", 1)
+        checks = [
+            "import ttnn",
+            "import fastapi, uvicorn, pydantic",
+            "import torch; assert torch.__version__.endswith('+cpu'), torch.__version__",
+        ]
+        pin = metal_torch_pin(_local_metal_tree(m))
+        if pin:
+            checks.append(
+                f"import torch; v = torch.__version__.split('+')[0]; "
+                f"assert v == {pin!r}, "
+                f"f'torch {{v}} is installed but tt-metal pins {pin}; ttnn extension "
+                f"modules were built against {pin} — pin it via runtime.lock'"
+            )
+        # Import the app itself. This is what makes source.code trustworthy: it resolves
+        # the ASGI attribute the way uvicorn will, so an allowlist missing the server
+        # package fails here, on the author's machine, not on a consumer's first boot.
+        checks.append(
+            f"import importlib; mod = importlib.import_module({module!r}); "
+            f"assert hasattr(mod, {attr!r}), 'imported {module} but it has no {attr}'"
+        )
+        lines = [f'"$VENV/bin/python" -c {shlex.quote("; ".join(checks))}']
+        lines += [f'"$VENV/bin/python" -c {shlex.quote(v)}' for v in m.verify]
+        return lines
+
+    # ---- serve -----------------------------------------------------------------------
+
+    def serve_argv(self, m: Manifest, profile: ServeProfile) -> List[str]:
+        argv = [
+            "python",
+            "-m",
+            "uvicorn",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(profile.port or 8000),
+            "--lifespan",
+            "on",
+        ]
+        argv += profile.flat_args()
+        argv.append(_container_app(m))
+        return argv
+
+    def serve_env(self, m: Manifest, profile: ServeProfile) -> Dict[str, str]:
+        from .container_manifest import parse_mesh_device
+
+        env: Dict[str, str] = {"HF_MODEL": _weights_id(m)}
+        if profile.mesh_device:
+            # The manifest names a SKU ("QB2"); the servers take a shape ("2x2"). Resolve
+            # it here so the two can never drift apart.
+            rows, cols = parse_mesh_device(profile.mesh_device)
+            env["MESH_DEVICE"] = profile.mesh_device
+            env["FLUX2_MESH_SHAPE"] = f"{rows}x{cols}"
+        env.update(profile.env)
+        return env
+
+    def ready_probe(self, m: Manifest) -> str:
+        return self.READY_LINE
+
+
+def _container_app(m: Manifest) -> str:
+    """The ASGI target recorded on a published manifest."""
+    container = getattr(m, "container", None)
+    runtime = getattr(container, "runtime", {}) if container is not None else {}
+    app = runtime.get("app")
+    if not app:
+        raise LauncherError(
+            f"manifest has no container.runtime.app, so kind "
+            f"{TtDitServerLauncher.name} cannot know what to serve"
+        )
+    return str(app)
+
+
 KINDS: Dict[str, object] = {
     VllmPluginLauncher.name: VllmPluginLauncher(),
     VllmForkLauncher.name: VllmForkLauncher(),
+    TtDitServerLauncher.name: TtDitServerLauncher(),
 }
+
+#: Used when a kind is unknown or predates ``REQUIRED_SERVE_FIELDS``.
+_DEFAULT_REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device", "max_num_seqs", "block_size")
+
+
+def required_serve_fields(kind: str) -> tuple:
+    """Which ``serve:`` fields a profile must carry for ``kind``.
+
+    An unknown kind falls back to the historical set rather than raising: manifest
+    validation reports a bad kind on its own, and that report should not be masked by a
+    confusing complaint about missing engine settings.
+    """
+    launcher = KINDS.get(kind)
+    return tuple(getattr(launcher, "REQUIRED_SERVE_FIELDS", _DEFAULT_REQUIRED_SERVE_FIELDS))
 
 
 def launcher_for(kind: str):

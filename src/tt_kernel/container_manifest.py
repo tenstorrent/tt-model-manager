@@ -75,6 +75,10 @@ MESH_DEVICE_PRESETS: Dict[str, tuple] = {
     "T3K": (1, 8),
     "P150x8": (1, 8),
     "P300x2": (1, 4),
+    # The same four chips as P300x2, opened as a square rather than a line. Some models
+    # cannot use a line at all: FLUX.2 needs its sequence AND tensor parallel factors
+    # both above 1, so on four chips 2x2 is its only legal geometry.
+    "QB2": (2, 2),
     "TG": (4, 8),
     "BH-Galaxy": (4, 8),
 }
@@ -350,10 +354,17 @@ class ContainerManifest(BaseModel):
                 f"available: {', '.join(names)}"
             )
 
+        # Which launch fields a profile must carry is the kind's business: max_num_seqs
+        # and block_size describe a continuous-batching engine and mean nothing to, say,
+        # a diffusion server. Ask the launcher rather than assuming every kind is vLLM.
+        from .launchers import required_serve_fields
+
+        required = required_serve_fields(self.kind)
+
         for p in self.effective_profiles():
             merged = self.resolve_profile(p.name)
             where = f"serve profile {p.name!r}"
-            for field in ("hardware", "mesh_device", "max_num_seqs", "block_size"):
+            for field in required:
                 if getattr(merged, field) is None:
                     hint = (
                         " The TT backend rejects vLLM's own default."

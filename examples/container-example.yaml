@@ -19,6 +19,16 @@ weights: org/Weights-7B
 #                needs a fork; this is where Tenstorrent is heading.
 #   vllm-fork    the tenstorrent/vllm fork, plugin in-tree, both installed editable.
 #                The older arrangement, and what `tt-model install` provisions on a host.
+#   tt-dit-server  a diffusion model behind its own HTTP app, served with uvicorn. There
+#                are no tokens, no KV cache and no continuous batching in a diffusion
+#                pipeline, so no vLLM: point runtime.app at the ASGI target that
+#                tt-metal ships beside the model, e.g.
+#                  kind: tt-dit-server
+#                  runtime: {app: "models.tt_dit.server.flux2.app:app"}
+#                and drop max_num_seqs / block_size from serve: — this kind has no
+#                engine for them to configure. Its runtime also takes an optional
+#                `packages` list (the HTTP stack, defaulting to fastapi/uvicorn/
+#                pydantic/pillow) and the same `lock` as the vLLM kinds.
 kind: vllm-plugin
 arch: blackhole                 # fixed by the build; every profile shares it
 
