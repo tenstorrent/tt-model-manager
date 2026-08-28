@@ -184,9 +184,25 @@ def hf_home() -> Path:
     return Path(os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface")))
 
 
+def _safe_name(name: str) -> str:
+    """Refuse a name that would escape the managed cache dir when used as a path component.
+
+    ``model_cache_dir`` builds a path from ``manifest.name`` that ``remove_container``
+    deletes with ``rmtree``. Authoring validates the name (see ``ContainerManifest``), but a
+    hand-crafted *pulled* ``tt_kernel_manifest.json`` reaches ``Manifest`` directly, so guard
+    here too — a ``../..`` or absolute name must never drive an rmtree outside the cache root.
+    """
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", name or ""):
+        raise ContainerError(
+            f"unsafe container name {name!r}: refusing to derive a filesystem path from it "
+            "(expected a lowercase slug). Re-publish the package with a valid name."
+        )
+    return name
+
+
 def model_cache_dir(m: Manifest) -> Path:
     """Host-side JIT kernel cache, per model. Survives container removal on purpose."""
-    return Path.home() / ".cache" / "tt-model" / m.name / "cache"
+    return Path.home() / ".cache" / "tt-model" / _safe_name(m.name) / "cache"
 
 
 def compose_run(
@@ -423,6 +439,8 @@ def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> bool
     The generous default timeout is not padding: a cold boot JIT-compiles kernels, which
     is the ~10-minute cost the mounted TT_METAL_CACHE exists to avoid paying twice.
     """
+    import queue
+    import threading
     import time
 
     deadline = time.monotonic() + timeout_s
@@ -431,13 +449,30 @@ def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> bool
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     assert proc.stdout is not None
+    # Read the log on a thread so the deadline is honoured even while the container is
+    # SILENT. The old `for line in proc.stdout` only checked the deadline after a line
+    # arrived, so a booted-but-hung container (no output, no crash) blocked forever.
+    lines: "queue.Queue[Optional[str]]" = queue.Queue()
+
+    def _pump() -> None:
+        for line in proc.stdout:  # type: ignore[union-attr]
+            lines.put(line)
+        lines.put(None)  # EOF sentinel: the log stream closed => the container exited
+
+    threading.Thread(target=_pump, daemon=True).start()
     try:
-        for line in proc.stdout:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                line = lines.get(timeout=min(remaining, 5.0))
+            except queue.Empty:
+                continue  # silent container: re-check the deadline and keep waiting
+            if line is None:
+                return False  # container exited before the probe appeared
             echo(line.rstrip("\n"))
             if probe in line:
                 return True
-            if time.monotonic() > deadline:
-                return False
-        return False
     finally:
         proc.terminate()
