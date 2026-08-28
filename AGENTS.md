@@ -39,12 +39,16 @@ violates one of these is wrong even if tests pass:
    bundled wheels (the `vllm-tt-plugin` + any `generic_op` wheel) plus an empty-target vLLM
    build step — no embedded `ttnn` wheel, no `metal/` tree. Either way the engine that serves
    is the one the bundle builds, never a shared box install.
-5. **Manifest support is v5 + v6 only.** `manifest.py`'s `SUPPORTED_SCHEMAS` is
-   `{"5", "6"}`; a bundle with any other `schema_version` is refused ("re-publish the bundle
-   with a current tt-model"). Add fields as optional and keep a round-trip test; bump
-   `SCHEMA_VERSION` only for a genuinely new authored schema.
-6. **The serving contract is the plugin's `EXTRA_MODELS_DIR`**: per-model *subfolder* with
-   `vllm_metadata.json` (`arch` + `main_class`). Keep `run.sh`/`stage_package` aligned with it.
+5. **Manifest support is v5 + v5.1 + v6.** `manifest.py`'s `SUPPORTED_SCHEMAS` is
+   `{"5", "5.1", "6"}`; a bundle with any other `schema_version` is refused ("re-publish the
+   bundle with a current tt-model") rather than silently half-read. Bump `SCHEMA_VERSION` only
+   for a genuinely new authored schema.
+
+   **v5.1 is the CONTAINER schema** (the `container` block): the platform ships as an OCI image
+   rather than as a venv, so the consumer needs only Docker + a TT card. It is a POINT release of
+   v5 because it makes the same promise — a package needing no host tt-metal — by a stronger
+   mechanism. That numbering is deliberate: it left the whole number free, which is why v6 "thin"
+   could take it without a collision.
 
 ## Serve-path facts the code encodes (regressions here are silent and expensive)
 - The shipped `ttnn` wheel must bundle `_ttnncpp.so`; locate ttnn via

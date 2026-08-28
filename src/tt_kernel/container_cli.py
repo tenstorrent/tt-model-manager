@@ -375,7 +375,7 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     f"image {ref} is not loaded in docker.\n"
                     f"  → if you have the staged package dir:  tt-model serve "
                     f"<dir>/{MANIFEST_NAME}\n"
-                    f"  → if it was published:                 tt-model pull {manifest.name}\n"
+                    f"  → if it was published:                 tt-model pull <namespace/name>\n"
                     f"  → otherwise rebuild it:                tt-model package --container "
                     f"<manifest.yaml>"
                 )

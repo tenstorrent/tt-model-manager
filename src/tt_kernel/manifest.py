@@ -316,7 +316,9 @@ class ContainerSpec(BaseModel):
     """
 
     image: ImageRef
-    kind: str = "vllm"
+    # Matches the authoring default. NOT plain "vllm": that is neither of the supported
+    # kinds, so a wire manifest omitting the field would fail with "unsupported kind".
+    kind: str = "vllm-plugin"
     runtime: Dict[str, object] = Field(default_factory=dict)  # shape is kind-specific
     serve: ServeSettings = Field(default_factory=ServeSettings)
     serve_profiles: List[ServeProfile] = Field(default_factory=list)

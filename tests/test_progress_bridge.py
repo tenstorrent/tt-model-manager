@@ -137,3 +137,25 @@ def test_the_bridge_labels_the_activity(monkeypatch):
         bar.update(50)
         bar.close()
     assert any("Pulling" in s for s in seen)
+
+
+def test_display_returns_true_like_tqdms_own():
+    """tqdm's display() returns True and close() DEPENDS on it:
+
+        if self.display(msg='', pos=pos) and not pos:
+
+    so an override returning None would change close()'s behaviour. Delegating to
+    super().display() would also format a bar and write it to the sink — work whose only
+    purpose is to be discarded.
+    """
+    import inspect
+
+    from tqdm.std import tqdm
+
+    assert inspect.getsource(tqdm.display).rstrip().endswith("return True")
+
+    bar = _ActivityTqdm(total=10, unit="B")
+    try:
+        assert bar.display() is True
+    finally:
+        bar.close()

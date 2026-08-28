@@ -34,6 +34,25 @@ def _skopeo() -> Optional[str]:
     return shutil.which("skopeo")
 
 
+def _extract_safely(tar: tarfile.TarFile, dest: Path) -> None:
+    """Extract a docker-save stream, refusing members that escape ``dest``.
+
+    ``extractall(filter="data")`` is the one-liner for this, but it only exists from
+    Python 3.11.4 — and this package declares ``requires-python = ">=3.9"``, where the
+    keyword is a TypeError. ``tarfile.data_filter`` is the documented way to detect the
+    feature, so use it when present and hand-check otherwise. The stream comes from the
+    local docker daemon, but "trusted input" is not a reason to extract `../` paths.
+    """
+    if hasattr(tarfile, "data_filter"):
+        tar.extractall(dest, filter="data")
+        return
+    for member in tar:
+        name = member.name
+        if name.startswith("/") or ".." in Path(name).parts:
+            raise OciError(f"refusing to extract unsafe tar member {name!r}")
+        tar.extract(member, dest)
+
+
 def save(image: str, dest: Path) -> None:
     """Export a local docker image to an exploded OCI layout at ``dest``."""
     dest = Path(dest)
@@ -54,7 +73,7 @@ def save(image: str, dest: Path) -> None:
     assert proc.stdout is not None
     try:
         with tarfile.open(fileobj=proc.stdout, mode="r|") as tar:
-            tar.extractall(dest, filter="data")
+            _extract_safely(tar, dest)
     finally:
         proc.stdout.close()
         if proc.wait() != 0:
@@ -75,7 +94,12 @@ def load(src: Path, expect_tag: Optional[str] = None) -> None:
 
     sk = _skopeo()
     if sk and expect_tag:
-        subprocess.run([sk, "copy", f"oci:{src}", f"docker-daemon:{expect_tag}"], check=True)
+        # ``:latest`` mirrors what save() writes. The reference is optional in the OCI
+        # transport only when the index is unambiguous; naming it is symmetric and cannot
+        # be wrong. (This branch runs only where skopeo is installed.)
+        subprocess.run(
+            [sk, "copy", f"oci:{src}:latest", f"docker-daemon:{expect_tag}"], check=True
+        )
         return
 
     # Re-tar the directory and pipe it to docker load; nothing lands on disk twice.
