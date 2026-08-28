@@ -445,12 +445,18 @@ def stage_package(
     extra_arts = [_copy_wheel(w) for w in (extra_wheels or [])]
 
     # Embed the author's modified metal-community tree (skip caches/venvs/artifacts).
+    # symlinks=True: copy links as links instead of following them. A built tt-metal
+    # checkout normally has dangling symlinks; following them (the default) makes
+    # copytree raise. .cpmcache/python_env/tt_cache are regenerable multi-GB caches
+    # (~3.7GB/~4GB/~2GB) — embedding them defeats the point of shipping wheels.
     shutil.copytree(
         metal_dir,
         staged / METAL_DIR,
+        symlinks=True,
         ignore=shutil.ignore_patterns(
             "__pycache__", "*.pyc", ".git", "venv", ".venv", "model_cache",
             "generated", "*.log", ".pytest_cache", "dist", "build_*",
+            ".cpmcache", "python_env", "tt_cache",
         ),
     )
 

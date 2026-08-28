@@ -7,6 +7,7 @@ manifest are asserted.
 """
 
 import json
+import os
 
 from typer.testing import CliRunner
 
@@ -145,6 +146,53 @@ def test_stage_package_layout(tmp_path):
     ]
     assert m2.entrypoint.arch_name == "LlamaForCausalLM"
     assert m2.weights.repo_id == "unsloth/Llama-3.2-3B-Instruct"
+
+
+def test_stage_package_dangling_symlink_and_cache_excludes(tmp_path):
+    """A built metal tree has dangling symlinks + multi-GB regenerable caches.
+
+    copytree must copy links as links (not follow → no crash on dangling ones) and
+    exclude .cpmcache/python_env/tt_cache (they defeat the point of shipping wheels).
+    """
+    wheels = tmp_path / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
+
+    metal = tmp_path / "metal_src"
+    metal.mkdir()
+    (metal / "requirements.txt").write_text("torch==2.11.0\n")
+    (metal / "real.py").write_text("# real file\n")
+    (metal / "foo").symlink_to("nonexistent")            # dangling symlink (crashes default copytree)
+    (metal / ".cpmcache").mkdir()
+    (metal / ".cpmcache" / "big.bin").write_bytes(b"x" * 16)
+    (metal / "python_env").mkdir()
+    (metal / "python_env" / "junk").write_bytes(b"y" * 16)
+    (metal / "tt_cache").mkdir()
+    (metal / "tt_cache" / "blob").write_bytes(b"z" * 16)
+
+    vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
+    staged = tmp_path / "staged"
+
+    # Must NOT raise on the dangling symlink.
+    packaging.stage_package(
+        staged,
+        name="llama-3.2-3b-tt",
+        arch="blackhole",
+        ttnn_wheel=ttnn,
+        metal_dir=metal,
+        vllm_metadata=vmeta,
+        tt_kernel_version="0.0.0",
+    )
+
+    dst_metal = staged / "metal"
+    assert (dst_metal / "real.py").is_file()
+    # dangling symlink preserved AS a symlink (not followed, not dereferenced)
+    assert (dst_metal / "foo").is_symlink()
+    assert os.readlink(dst_metal / "foo") == "nonexistent"
+    # regenerable multi-GB caches excluded
+    assert not (dst_metal / ".cpmcache").exists()
+    assert not (dst_metal / "python_env").exists()
+    assert not (dst_metal / "tt_cache").exists()
 
 
 def test_cli_package_stage_only(tmp_path):
