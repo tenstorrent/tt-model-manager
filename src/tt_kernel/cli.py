@@ -1498,16 +1498,14 @@ def push(
         except Exception as exc:  # noqa: BLE001
             # The bytes are already on the Hub; a failed tag write must not read as a
             # failed push. Say exactly what is left to do instead.
-            typer.secho(
-                f"! Uploaded {target}, but could not list it in the catalog: {exc}\n"
-                f"  → retry the listing alone with: tt-model publish {target}",
-                fg=typer.colors.YELLOW,
-            )
+            console.note(f"uploaded {target}, but could not list it in the catalog: {exc}",
+                         marker="!", style="warning")
+            console.note(f"retry the listing alone with: tt-model publish {target}",
+                         marker="→")
         else:
-            typer.secho(
-                f"✓ Listed {target} in the community catalog (pointer only; content stays "
-                f"yours). Delist with `tt-model unpublish {target}`.",
-                fg=typer.colors.GREEN,
+            console.milestone(
+                f"listed {target} in the community catalog (pointer only; content stays "
+                f"yours) — delist with `tt-model unpublish {target}`"
             )
 
 
