@@ -162,3 +162,64 @@ def test_push_replaces_code_and_image_rather_than_merging(monkeypatch, tmp_path)
     # .gitattributes is HF's own LFS config and the top-level files are rewritten every
     # push, so neither should be swept.
     assert not any(p == "*" or ".gitattributes" in p for p in seen["delete_patterns"])
+
+
+def test_large_push_prunes_what_the_bundle_stopped_shipping(monkeypatch, tmp_path):
+    """The CONTAINER path is push_large_folder, and upload_large_folder has no
+    delete_patterns, so it only ever adds. Narrowing an allowlist previously left every
+    dropped file published. Prune must run against the same folder that was uploaded."""
+    from tt_kernel import hub
+
+    (tmp_path / "code" / "models").mkdir(parents=True)
+    (tmp_path / "code" / "models" / "keep.py").write_text("x")
+    (tmp_path / "image" / "blobs").mkdir(parents=True)
+    (tmp_path / "image" / "blobs" / "sha-keep").write_text("y")
+    (tmp_path / "README.md").write_text("z")
+
+    calls = {}
+
+    class _Api:
+        def upload_large_folder(self, **kw):
+            calls["uploaded"] = True
+
+        def list_repo_files(self, **kw):
+            return [
+                "code/models/keep.py",
+                "code/models/tests/gone.py",      # dropped by a narrowed allowlist
+                "image/blobs/sha-keep",
+                "image/blobs/sha-stale",          # superseded blob from an older build
+                "README.md",                      # rewritten every push
+                ".gitattributes",                 # HF's own LFS config
+            ]
+
+        def delete_files(self, **kw):
+            calls["deleted"] = sorted(kw["delete_patterns"])
+
+    monkeypatch.setattr(hub, "_api", lambda: _Api())
+    hub.push_large_folder("you/model", tmp_path)
+
+    assert calls["uploaded"] is True
+    assert calls["deleted"] == ["code/models/tests/gone.py", "image/blobs/sha-stale"]
+
+
+def test_large_push_makes_no_delete_commit_when_nothing_is_stale(monkeypatch, tmp_path):
+    from tt_kernel import hub
+
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "a.py").write_text("x")
+
+    calls = {}
+
+    class _Api:
+        def upload_large_folder(self, **kw):
+            pass
+
+        def list_repo_files(self, **kw):
+            return ["code/a.py", ".gitattributes"]
+
+        def delete_files(self, **kw):
+            calls["deleted"] = True
+
+    monkeypatch.setattr(hub, "_api", lambda: _Api())
+    hub.push_large_folder("you/model", tmp_path)
+    assert "deleted" not in calls
