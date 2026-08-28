@@ -96,6 +96,22 @@ tt-model serve you/mymodel -- --extra vllm-arg # anything after the id is passed
 
 Repeat invocations skip the install and go straight to launch.
 
+### Checking it answers
+
+`tt-model curl` builds the chat-completions request for whatever is being served, so
+verifying a bring-up doesn't mean hand-writing JSON and matching the model id exactly:
+
+```bash
+tt-model curl "hello"                        # send it to the running model
+tt-model curl "write a haiku" --temperature 0.7 --max-tokens 200
+tt-model curl "hello" --print                # emit the equivalent curl instead of sending
+```
+
+The model id comes from the running server (`GET /v1/models`); with nothing serving yet,
+`--print` falls back to the installed bundle's weights id so it still emits something
+pasteable. Any option the command doesn't reserve (`--print`, `--model`, `--base-url`) goes
+straight into the request body, so the whole vLLM sampling surface is available.
+
 ## Publishing a bundle
 
 Author on the box where you built/brought up the model, then push. The full authoring

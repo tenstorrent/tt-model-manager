@@ -991,6 +991,85 @@ def serve(
         _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
 
 
+# ---------------------------------------------------------------------------- curl
+def _discover_model(served: List[str]) -> "tuple[Optional[str], Optional[str]]":
+    """Which model id to put in the request, and why — ``(model, source)``.
+
+    The running server's own ``/v1/models`` (already probed by the caller) is authoritative:
+    it is the id vLLM registered, so the request can't 404 on a stale guess. With nothing
+    listening we fall back to the install record's ``weights`` — the same string ``run.sh``
+    passes as ``--model`` — because ``--print`` has to work before the server is up.
+    Ambiguous (several installs, no server) returns ``(None, None)`` so the caller can ask
+    for ``--model``.
+    """
+    if served:
+        return served[0], "the running server"
+    installed = [e for e in localdb.all_entries() if e.get("weights")]
+    if len(installed) == 1:
+        return installed[0]["weights"], "the installed bundle"
+    return None, None
+
+
+@app.command(name="curl", context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+             rich_help_panel="Run a model")
+def curl_cmd(
+    ctx: typer.Context,
+    prompt: str = typer.Argument(runtime.DEFAULT_PROMPT, help="The user message to send."),
+    print_only: bool = typer.Option(False, "--print", help="Print the request instead of sending it."),
+    model: Optional[str] = typer.Option(None, "--model", help="Model id to name in the "
+                                        "request (default: ask the running server)."),
+    base_url: Optional[str] = typer.Option(None, "--base-url", envvar=runtime.ENV_BASE_URL,
+                                           help=f"Server root (default: {runtime.DEFAULT_BASE_URL})."),
+) -> None:
+    """Send a chat completion to the model you are serving.
+
+    Fills in the endpoint and the model id — which has to match what the server registered
+    or the request 404s — so the last step of a bring-up is one line:
+    `tt-model curl "hello"`.
+
+    Any option this command does not reserve is passed straight into the request body, so
+    the whole vLLM sampling surface works without new flags:
+    `tt-model curl "write a haiku" --temperature 0.7 --max-tokens 200`.
+
+    --print emits the equivalent curl instead of sending it, for a doc or a bug report.
+    """
+    base = base_url or runtime.DEFAULT_BASE_URL
+    try:
+        params = runtime.parse_extra_params(list(ctx.args))
+    except ValueError as exc:
+        raise _err(f"{exc}\n  usage: tt-model curl \"your prompt\" [--key value ...]")
+
+    # One probe, used twice: it names the model AND tells us whether anything is listening,
+    # so a down server is reported as such instead of as a bare curl exit code.
+    served = runtime.list_models(base)
+    resolved, source = (model, "--model") if model else _discover_model(served)
+    if not resolved:
+        installed = [e for e in localdb.all_entries() if e.get("weights")]
+        raise _err(
+            f"Can't tell which model to ask for: nothing is serving at {base} and "
+            + (f"{len(installed)} bundles are installed. " if installed else "no bundle is installed. ")
+            + "Start it with `tt-model serve <id>`, or pass --model <hf-id>."
+        )
+
+    argv = runtime.curl_argv(base, runtime.chat_payload(resolved, prompt, params=params))
+    if print_only:
+        if source != "--model":
+            # stderr, not stdout: the command must stay pipeable into a shell and
+            # copy-pasteable as a whole block.
+            typer.secho(f"○ model id from {source}: {resolved}",
+                        fg=typer.colors.CYAN, err=True)
+        console.raw(runtime.render_curl(argv))
+        return
+    if not served:
+        raise _err(f"Nothing is serving at {base}. Start it with `tt-model serve <id>`, "
+                   "or use --print to just see the request.")
+    if shutil.which("curl") is None:
+        raise _err("curl is not on PATH. Re-run with --print and paste the command, "
+                   "or install curl.")
+    raise typer.Exit(code=subprocess.run(argv).returncode)
+
+
+# ---------------------------------------------------------------------------- info
 @app.command(rich_help_panel="Get models")
 def info(
     repo_id: str = typer.Argument(..., help="Repo as namespace/name[@revision]."),
