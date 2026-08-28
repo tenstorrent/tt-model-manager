@@ -216,6 +216,11 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
     localdb.record(repo_id, {
         "repo_id": repo_id, "container": True, "image": ref,
         "revision": revision, "manifest": str(dest / MANIFEST_NAME),
+        # `list` reads these: without them a container package rendered as
+        # "arch=None install=None", which found it but described nothing.
+        "arch": manifest.arch,
+        "profile": spec.resolved_default(),
+        "profiles": spec.profile_names(),
     })
 
     if not no_weights and manifest.weights:
@@ -470,6 +475,35 @@ def logs_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     raise ContainerCliError(
         f"no running container for {manifest.name}. Start it:  tt-model serve {what}"
     )
+
+
+def describe_pulled(entry: dict) -> dict:
+    """One row for ``tt-model list``: what this package is, and whether it can serve NOW.
+
+    "ready" is the column that matters — a pulled package whose image was pruned (docker
+    image prune, or a manifest edit that moved the tag) still has an index entry and a
+    manifest, and would fail only at `serve` with a docker error. Checking here turns that
+    into something visible before you try.
+    """
+    ref = entry.get("image") or "?"
+    loaded = container.image_present(ref) if ref != "?" else False
+    size = ""
+    if loaded:
+        out = container.run_or_empty(
+            ["docker", "image", "inspect", ref, "--format", "{{.Size}}"]
+        ).strip()
+        if out.isdigit():
+            size = console.fmt_bytes(int(out))
+    return {
+        "repo_id": entry.get("repo_id", "?"),
+        "kind": "container",
+        "arch": entry.get("arch") or "?",
+        "profile": entry.get("profile") or "?",
+        "image": ref.split(":")[-1],
+        "size": size,
+        "ready": loaded,
+        "why": "" if loaded else f"image {ref} not loaded — tt-model pull to restore it",
+    }
 
 
 # --------------------------------------------------------------------------------- rm

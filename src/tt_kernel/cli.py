@@ -801,8 +801,11 @@ def pull(
             from . import container_cli
 
             try:
+                # `--with-weights` is opt-IN here, matching the surrounding command:
+                # the model fetches weights from the HF id at load anyway, into the same
+                # host cache the container bind-mounts.
                 container_cli.pull_container(repo_id, resolved or revision, manifest,
-                                             no_weights=no_weights)
+                                             no_weights=not with_weights)
             except (container_cli.ContainerCliError, container.ContainerError) as e:
                 raise _err(str(e))
             return
@@ -1178,18 +1181,59 @@ def info(
 # ---------------------------------------------------------------------------- list
 @app.command(name="list", rich_help_panel="Get models")
 def list_installed() -> None:
-    """List locally installed bundles."""
+    """List locally installed bundles, and whether each can be served right now.
+
+    The last column is the useful one: a package can be recorded as installed and still not
+    be servable — a container package whose image was pruned, or a bundle whose install
+    directory was removed — and without this that only surfaces as an error at ``serve``.
+    """
     entries = localdb.all_entries()
     if not entries:
         typer.echo("No bundles installed.")
         return
+
+    from . import container_cli
+
+    rows = []
     for e in entries:
-        rev = (e.get("revision") or "")[:8]
-        typer.echo(
-            f"{e['repo_id']}  arch={e.get('arch')}"
-            + (f"  rev={rev}" if rev else "")
-            + f"  install={e.get('install_dir')}"
+        if e.get("container"):
+            rows.append(container_cli.describe_pulled(e))
+            continue
+        install = e.get("install_dir") or e.get("bundle_path")
+        ready = bool(install) and Path(install).is_dir()
+        rows.append({
+            "repo_id": e.get("repo_id", "?"),
+            "kind": "thin" if e.get("thin") else "bundle",
+            "arch": e.get("arch") or "?",
+            "profile": (e.get("revision") or "")[:8] or "-",
+            "image": "-",
+            "size": "",
+            "ready": ready,
+            "why": "" if ready else f"install dir missing ({install or 'not recorded'})",
+        })
+
+    # Laid out directly rather than through check_table: that helper truncates its columns
+    # at a fixed width, which turned "container · blackhole" into "container · black…".
+    w_id = max(len(r["repo_id"]) for r in rows)
+    w_kind = max(len(r["kind"]) for r in rows)
+    w_arch = max(len(r["arch"]) for r in rows)
+    for r in rows:
+        mark = "✓" if r["ready"] else "✗"
+        extra = "  ".join(x for x in (
+            f"image {r['image']}" if r["image"] != "-" else "",
+            r["size"],
+            f"profile {r['profile']}" if r["kind"] == "container" else "",
+        ) if x)
+        console.raw(
+            f"  {mark} {r['repo_id']:<{w_id}}  {r['kind']:<{w_kind}}  "
+            f"{r['arch']:<{w_arch}}  {extra}".rstrip()
         )
+
+    unready = [r for r in rows if not r["ready"]]
+    if unready:
+        console.raw("")
+        for r in unready:
+            console.note(f"{r['repo_id']}: {r['why']}", marker="!", style="warning")
 
 
 # -------------------------------------------------------------------------- search

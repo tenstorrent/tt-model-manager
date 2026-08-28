@@ -8,6 +8,7 @@ important — that the v5 flow through the SAME commands is unchanged.
 """
 
 import json
+import pathlib
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,21 @@ from tt_kernel.manifest import Manifest
 from test_container_manifest import BASE
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cache(monkeypatch, tmp_path_factory):
+    """Keep every test out of the developer's real caches.
+
+    Two roots matter and they are read from different places: localdb uses
+    XDG_CACHE_HOME, while pull_dir() and model_cache_dir() use Path.home(). Setting only
+    one let tests write real files — an `org/x` entry kept reappearing in the developer's
+    own `tt-model list`.
+    """
+    root = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(root))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(root / ".cache"))
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: root))
 
 
 @pytest.fixture(autouse=True)
@@ -727,3 +743,118 @@ def test_the_keep_cache_flag_reaches_the_implementation(tmp_path, monkeypatch):
     res = runner.invoke(cli.app, ["rm", "org/x", "--keep-cache"])
     assert res.exit_code == 0, res.output
     assert called == {"keep_cache": True, "include_weights": False}
+
+
+# ------------------------------------------------------------------ list
+#
+# `tt-model list` found container packages but described nothing: it reads `arch` and
+# `install_dir`, and a container pull recorded neither, so every row was
+# "arch=None install=None". The readiness column is the point — a package can be recorded
+# as installed and still not be servable.
+
+
+def test_pull_records_what_list_needs(tmp_path, monkeypatch):
+    from tt_kernel import localdb
+
+    monkeypatch.setattr(container, "preflight", lambda **k: [])
+    monkeypatch.setattr(container, "image_present", lambda ref: True)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
+    m = _manifest(tmp_path)
+    container_cli.pull_container("org/x", None, m, no_weights=True)
+    e = localdb.get("org/x")
+    assert e["arch"] == m.arch
+    assert e["profile"] == "p150x4"
+    assert e["profiles"] == ["p150x4"]
+
+
+def test_describe_pulled_reports_ready_when_the_image_is_loaded(monkeypatch):
+    monkeypatch.setattr(container, "image_present", lambda ref: True)
+    monkeypatch.setattr(container, "run_or_empty", lambda argv: "10737418240")
+    r = container_cli.describe_pulled(
+        {"repo_id": "org/x", "image": "tt-model/x:abc", "arch": "blackhole",
+         "profile": "default"})
+    assert r["ready"] is True
+    assert r["image"] == "abc"
+    assert "GB" in r["size"]
+    assert r["why"] == ""
+
+
+def test_describe_pulled_flags_a_pruned_image(monkeypatch):
+    """The case this exists for: still recorded as installed, but `serve` would fail with a
+    docker error naming neither the cause nor the fix."""
+    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    r = container_cli.describe_pulled(
+        {"repo_id": "org/x", "image": "tt-model/x:abc", "arch": "blackhole"})
+    assert r["ready"] is False
+    assert "not loaded" in r["why"] and "tt-model pull" in r["why"]
+
+
+def test_list_shows_a_container_row_in_full(tmp_path, monkeypatch):
+    """It used to print "arch=None install=None"; nothing was truncated because nothing
+    was recorded."""
+    from tt_kernel import localdb
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
+    monkeypatch.setattr(container, "image_present", lambda ref: True)
+    monkeypatch.setattr(container, "run_or_empty", lambda argv: "10737418240")
+    localdb.record("org/x", {"repo_id": "org/x", "container": True,
+                             "image": "tt-model/x:abc123", "arch": "blackhole",
+                             "profile": "default"})
+    out = " ".join(runner.invoke(cli.app, ["list"]).output.split())
+    assert "org/x" in out
+    assert "container" in out
+    assert "blackhole" in out          # not truncated to "black…"
+    assert "abc123" in out
+    assert "profile default" in out
+
+
+def test_list_still_describes_a_non_container_bundle(tmp_path, monkeypatch):
+    from tt_kernel import localdb
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
+    d = tmp_path / "installed"
+    d.mkdir()
+    localdb.record("org/v6", {"repo_id": "org/v6", "arch": "p150",
+                              "install_dir": str(d), "thin": True})
+    out = " ".join(runner.invoke(cli.app, ["list"]).output.split())
+    assert "org/v6" in out and "thin" in out and "p150" in out
+    assert "✓" in out
+
+
+def test_list_warns_when_an_install_dir_has_gone(tmp_path, monkeypatch):
+    from tt_kernel import localdb
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
+    localdb.record("org/v6", {"repo_id": "org/v6", "arch": "p150",
+                              "install_dir": str(tmp_path / "gone")})
+    out = " ".join(runner.invoke(cli.app, ["list"]).output.split())
+    assert "install dir missing" in out
+
+
+def test_pull_maps_the_with_weights_flag(tmp_path, monkeypatch):
+    """A merge regression: main's pull takes --with-weights (opt-in) while the container
+    hook was written against an older --no-weights, so `tt-model pull` raised NameError
+    before it downloaded anything. Exercised through the CLI, not the helper, because the
+    helper alone cannot catch a wiring mistake."""
+    seen = {}
+    m = _manifest(tmp_path)
+    monkeypatch.setattr(cli.hub, "latest_revision", lambda *a, **k: None)
+    monkeypatch.setattr(cli.hub, "download_bundle",
+                        lambda repo, rev, dest=None: _staged_snapshot(tmp_path, m, dest))
+    monkeypatch.setattr(container_cli, "pull_container",
+                        lambda repo, rev, mani, **k: seen.update(k))
+
+    assert runner.invoke(cli.app, ["pull", "org/x"]).exit_code == 0
+    assert seen == {"no_weights": True}          # default: skip
+
+    seen.clear()
+    assert runner.invoke(cli.app, ["pull", "org/x", "--with-weights"]).exit_code == 0
+    assert seen == {"no_weights": False}
+
+
+def _staged_snapshot(tmp_path, manifest, dest):
+    """A minimal downloaded snapshot: just the manifest pull() reads."""
+    d = pathlib.Path(dest) if dest else tmp_path / "snap"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "tt_kernel_manifest.json").write_text(manifest.to_json())
+    return d

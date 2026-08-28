@@ -324,6 +324,13 @@ def images() -> List[Dict[str, str]]:
     return rows
 
 
+def run_or_empty(argv: List[str]) -> str:
+    """stdout of a docker query, or "" if it fails. For display only — never for control
+    flow, where a silent empty string would hide a real problem."""
+    r = _run(argv, capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else ""
+
+
 def container_exists(name: str) -> bool:
     """Does a container with this exact name exist, in ANY state?
 
