@@ -369,6 +369,29 @@ class _ActivityTqdm:
     def set_postfix_str(self, *a, **k):
         pass
 
+    # huggingface_hub's xet reconstruction reporter reads throughput straight off the bar
+    # INSTANCE: _set_aggregate_rate_postfix() (utils/_xet_progress_reporting.py) does
+    # `bar.format_dict.get("rate")`, and snapshot_download's _AggregatedTqdm routes its
+    # summed-rate postfix through it. tqdm.std.tqdm exposes format_dict as a dict property;
+    # we only need a plain dict with the keys the reporter reads -- rate=None is fine, it
+    # merely does `.get("rate")` and renders "???B/s" when it's missing.
+    @property
+    def format_dict(self):
+        return {"rate": None, "n": self.n, "total": self.total, "elapsed": 0}
+
+    # The xet reporter's aggregated path (utils/_xet_progress_reporting.py update_progress)
+    # and the plain http_get loop (file_download.py) call update_transfer()/
+    # set_transfer_postfix_str() on the bar instance when the transfer bar is collapsed into
+    # the reconstruction bar -- which happens precisely because this class advertises
+    # update_transfer (uses_aggregated_tqdm_class). Both are terminal-rendering hooks we
+    # don't need: our own _render already reports byte progress off update(), so these are
+    # no-ops (mirroring set_postfix/set_postfix_str above).
+    def update_transfer(self, n=1):
+        pass
+
+    def set_transfer_postfix_str(self, *a, **k):
+        pass
+
     def refresh(self, *a, **k):
         pass
 
