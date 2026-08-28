@@ -17,6 +17,7 @@ dependencies = [
     "rich>=13",
     "pydantic>=2",
     "packaging>=21",
+    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
@@ -30,7 +31,7 @@ tt-kernel = "tt_kernel.cli:main"  # legacy alias (deprecated)
 where = ["src"]
 
 [tool.setuptools.package-data]
-tt_kernel = ["py.typed"]
+tt_kernel = ["py.typed", "docker/Dockerfile", "docker/entrypoint.sh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
