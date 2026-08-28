@@ -264,6 +264,12 @@ class ServeSettings(BaseModel):
     deep-merges over them (dicts merge, everything else overrides wholesale).
     """
 
+    # Reject unknown keys so a serve-field typo (e.g. ``server_timout``) fails at load
+    # instead of being silently dropped — the whole point of front-loaded validation. The
+    # opaque escape hatches (``additional_config``/``args``/``env``) are declared fields, so
+    # this only forbids misspelled top-level keys. (Matches ``ContainerCapabilities``.)
+    model_config = ConfigDict(extra="forbid")
+
     hardware: Optional[str] = None  # device target label: p150, p150x2, p150x4 ...
     mesh_device: Optional[str] = None  # verbatim plugin string: "P150x4", "(1, 4)" ...
     port: Optional[int] = None

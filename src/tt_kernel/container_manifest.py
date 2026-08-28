@@ -244,6 +244,21 @@ class ContainerManifest(BaseModel):
     # machine, not on a consumer's first boot.
     verify: List[str] = Field(default_factory=list)
 
+    @field_validator("name")
+    @classmethod
+    def _name_is_a_safe_slug(cls, v: str) -> str:
+        # `name` becomes a host filesystem path (the JIT cache ``~/.cache/tt-model/<name>/``
+        # that ``tt-model rm`` deletes with rmtree) and a docker container name. A traversal
+        # or absolute name would let a *pulled* package's ``rm`` escape the cache dir, so
+        # constrain it to a safe slug at authoring time.
+        import re
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", v):
+            raise ContainerManifestError(
+                f"name {v!r} is not a safe slug — use lowercase letters, digits and "
+                "'.'/'_'/'-', starting alphanumeric (it becomes a cache path + container name)."
+            )
+        return v
+
     # ---- profile resolution -------------------------------------------------------
 
     def effective_profiles(self) -> List[ServeProfile]:

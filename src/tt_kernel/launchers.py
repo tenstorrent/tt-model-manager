@@ -203,7 +203,9 @@ class VllmPluginLauncher:
                 + self._post_engine_lines(m, plugin)
             )
 
-        version = vllm["version"]
+        # Quote the version before it lands in a shell `pip install vllm==<v>` line — the
+        # same manifest→shell defence already applied to plugin.repo/ref and the overrides.
+        version = shlex.quote(vllm["version"])
         if rt.get("lock"):
             # The lock IS the dependency set: vLLM's own requirements are already in it,
             # so vLLM installs --no-deps and nothing resolves at build time.
@@ -237,7 +239,7 @@ class VllmPluginLauncher:
         if plugin.get("version"):
             lines.append(
                 f'uv pip install --python "$VENV/bin/python" '
-                f"vllm-tt-plugin=={plugin['version']}"
+                f"vllm-tt-plugin=={shlex.quote(plugin['version'])}"
             )
         elif plugin.get("path"):
             # The author's own checkout, staged into the build context by `package` —
@@ -257,7 +259,7 @@ class VllmPluginLauncher:
             )
         if rt.get("extension"):
             lines.append(
-                f'uv pip install --python "$VENV/bin/python" /opt/tt-metal/{rt["extension"]}'
+                f'uv pip install --python "$VENV/bin/python" /opt/tt-metal/{shlex.quote(rt["extension"])}'
             )
         if rt.get("wheels"):
             # Extra local wheels the author needs alongside the engine — v5's
@@ -444,7 +446,7 @@ class VllmForkLauncher:
             # The model's own vLLM extension ships inside code/, so install it from the
             # staged tree already present in the image.
             lines.append(
-                f'uv pip install --python "$VENV/bin/python" /opt/tt-metal/{rt["extension"]}'
+                f'uv pip install --python "$VENV/bin/python" /opt/tt-metal/{shlex.quote(rt["extension"])}'
             )
         return lines
 
