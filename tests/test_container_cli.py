@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from tt_kernel import cli, container, container_cli
+from tt_kernel import cli, container, container_cli, hub
 from tt_kernel.container_manifest import ContainerManifest
 from tt_kernel.manifest import Manifest
 
@@ -327,6 +327,72 @@ def test_visibility_is_still_tri_state_for_a_container_push(tmp_path, monkeypatc
     runner.invoke(cli.app, ["push", str(_staged(tmp_path)), "--private"])
     assert seen["private"] is True
 
+
+
+def test_publish_lists_a_container_package_after_the_upload(tmp_path, monkeypatch):
+    """--publish tags the catalog AFTER the bytes land, not before."""
+    order = []
+    monkeypatch.setattr(container_cli, "push_container",
+                        lambda *a, **k: order.append("upload"))
+    monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: None)
+    monkeypatch.setattr(hub, "set_catalog_listing",
+                        lambda repo_id, listed: order.append(("list", repo_id, listed)))
+
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen")),
+                                  "--public", "--publish"])
+    assert res.exit_code == 0, res.output
+    assert order == ["upload", ("list", "raahem/qwen", True)]
+
+
+def test_a_container_push_without_publish_lists_nothing(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(container_cli, "push_container", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: None)
+    monkeypatch.setattr(hub, "set_catalog_listing",
+                        lambda repo_id, listed: calls.append(repo_id))
+
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path))])
+    assert res.exit_code == 0, res.output
+    assert calls == []
+
+
+def test_publish_requires_public_for_a_container_push(tmp_path, monkeypatch):
+    """The catalog is public by definition — refuse before anything is uploaded."""
+    calls = []
+    monkeypatch.setattr(container_cli, "push_container",
+                        lambda *a, **k: calls.append("upload"))
+    monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: None)
+
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path)), "--private", "--publish"])
+    assert res.exit_code == 1
+    assert "--public" in res.output
+    assert calls == []  # nothing was uploaded
+
+
+def test_publish_gate_reaches_ensure_repo_for_an_existing_private_repo(tmp_path, monkeypatch):
+    """--publish must be threaded into _ensure_repo, which owns the existing-repo guard."""
+    seen = {}
+    monkeypatch.setattr(container_cli, "push_container", lambda *a, **k: None)
+    monkeypatch.setattr(hub, "set_catalog_listing", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_ensure_repo",
+                        lambda repo_id, private, **k: seen.update(k))
+    runner.invoke(cli.app, ["push", str(_staged(tmp_path)), "--publish"])
+    assert seen["publish"] is True
+
+
+def test_a_failed_listing_does_not_read_as_a_failed_push(tmp_path, monkeypatch):
+    """The image is already on the Hub; report the leftover step, do not fail the push."""
+    monkeypatch.setattr(container_cli, "push_container", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: None)
+
+    def boom(repo_id, listed):
+        raise RuntimeError("hub said no")
+
+    monkeypatch.setattr(hub, "set_catalog_listing", boom)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen")),
+                                  "--public", "--publish"])
+    assert res.exit_code == 0, res.output
+    assert "tt-model publish raahem/qwen" in res.output
 
 
 def test_a_plain_repo_id_still_goes_down_the_v5_path():

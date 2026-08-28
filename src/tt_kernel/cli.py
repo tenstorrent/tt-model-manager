@@ -1452,6 +1452,10 @@ def push(
         "For a repo that already exists, passing the flag changes its visibility and says "
         "so; omitting it leaves visibility exactly as it is."
     ),
+    publish: bool = typer.Option(
+        False, "--publish", help="Also list the package in the community catalog "
+        "(requires a public repo)."
+    ),
 ) -> None:
     """Publish a CONTAINER (v5.1) package directory to the Hub.
 
@@ -1459,7 +1463,12 @@ def push(
     worth verifying locally before it goes anywhere — so publishing takes the staged
     directory rather than a repo id. For a v5/v6 bundle, `tt-model package <repo>` still
     both builds and pushes.
+
+    ``--publish`` adds the community-catalog tag after the upload, exactly as
+    ``tt-model publish`` would. The catalog only ever holds a pointer to your public repo.
     """
+    if publish and private:
+        raise _err("--publish requires --public (a catalog listing is public by definition).")
     from . import container_cli
 
     out = Path(staged_dir).expanduser()
@@ -1474,11 +1483,30 @@ def push(
     target = repo or (cmani.container.built or {}).get("repo")
     if not target:
         raise _err(f"{out} records no target repo; pass --repo namespace/name.")
-    _ensure_repo(target, private)
+    _ensure_repo(target, private, publish=publish)
     try:
         container_cli.push_container(str(out), cmani, target)
     except container_cli.ContainerCliError as e:
         raise _err(str(e))
+
+    if publish:
+        # AFTER the upload, so the tag lands on the model card `package` generated and
+        # `push_container` just wrote (set_catalog_listing reloads and unions onto it,
+        # rather than clobbering it the way tag_repo would).
+        try:
+            hub.set_catalog_listing(target, listed=True)
+        except Exception as exc:  # noqa: BLE001
+            # The bytes are already on the Hub; a failed tag write must not read as a
+            # failed push. Say exactly what is left to do instead.
+            console.note(f"uploaded {target}, but could not list it in the catalog: {exc}",
+                         marker="!", style="warning")
+            console.note(f"retry the listing alone with: tt-model publish {target}",
+                         marker="→")
+        else:
+            console.milestone(
+                f"listed {target} in the community catalog (pointer only; content stays "
+                f"yours) — delist with `tt-model unpublish {target}`"
+            )
 
 
 def _split_revision(repo_id: str) -> "tuple[str, Optional[str]]":
