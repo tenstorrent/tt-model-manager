@@ -49,12 +49,46 @@ We accept bug fixes and new functionality through Pull Requests (PRs).
 - Write clear, concise docstrings for functions and classes
 - Keep functions focused and modular
 
+## Development setup
+
+`tt-model` has two deliberately different environments:
+
+- A **development environment** for editing the package and running its offline tests. It
+  does not need Tenstorrent hardware, `ttnn`, vLLM, or Hugging Face credentials.
+- A **serving environment** provisioned per model by a self-contained bundle's own
+  `install.sh` (v5 fat / v6 thin). That path builds the bundle's own venv, expects `ttnn`,
+  installs the Tenstorrent vLLM stack, and is not needed for ordinary development.
+
+Python 3.9 or newer is required. The reproducible setup uses
+[`uv`](https://docs.astral.sh/uv/) and the checked-in lockfile:
+
+```bash
+uv sync --locked --extra test
+uv run --locked --extra test pytest
+```
+
+`uv` creates and uses this checkout's `.venv`. If another virtual environment is active,
+deactivate it first so `uv` does not warn about the mismatch; do not add `--active` unless
+you intentionally want to modify that other environment.
+
+Without `uv`, create the same isolated editable install with the standard library and pip:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[test]"
+python -m pytest
+```
+
+When project dependencies change, regenerate and verify the committed lockfile with
+`uv lock` and `uv lock --check`.
+
 ## Testing
 
 All code changes should include appropriate tests:
 - Unit tests for new functions and classes
 - Integration tests for end-to-end workflows
-- Run the test suite with: `pytest`
+- Run the full offline suite with: `python -m pytest`
 
 ## Questions?
 

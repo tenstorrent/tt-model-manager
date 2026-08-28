@@ -48,7 +48,7 @@ The producer/consumer logic is fully unit-tested with mocked pip + HF:
 pytest tests/test_v5.py                    # manifest v5 schema, self-contained compare() rules
 pytest tests/test_packaging.py             # stage_package layout, wheel-tag parsing, CLI stage-only
 pytest tests/test_self_contained_install.py # pull installs into a venv; serve runs run.sh
-pytest                                     # full suite (expected: 201 passed, 1 skipped)
+pytest                                     # full offline suite (expected: 119 passed)
 ```
 
 ### Hardware smoke (a TT card)
