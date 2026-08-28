@@ -27,7 +27,7 @@ SCHEMA_VERSION = "5"
 # manifest" schema (structured target/mesh/ranges/resources — vLLM only, host-provisioned
 # platform); v3 is the legacy kernel-cache/dispatch schema, read-only supported. A bundle on any
 # other version is refused outright rather than silently half-read.
-SUPPORTED_SCHEMAS = frozenset({"3", "4", "5"})
+SUPPORTED_SCHEMAS = frozenset({"3", "4", "5", "6"})
 
 
 class FileEntry(BaseModel):
@@ -197,6 +197,55 @@ class BundledPlatform(BaseModel):
         return [w for w in ordered if w is not None]
 
 
+class Vllm(BaseModel):
+    """How a v6 thin bundle installs vLLM core for the ``vllm-tt-plugin``.
+
+    vLLM is **not** a plain pip pin. It must be **stock upstream vLLM built with
+    ``VLLM_TARGET_DEVICE=empty``** — NOT the CUDA ``vllm`` wheel on PyPI — because the ``tt``
+    platform is supplied by the ``vllm-tt-plugin`` at runtime (out-of-tree platform plugin). This
+    mirrors the plugin's own ``docs/install-vllm-tt.sh``: install vLLM's *common* deps under a TT
+    **override set** first (so ttnn's ``numpy<2`` is not bumped to numpy 2 by opencv), then install
+    vLLM itself with ``--no-deps`` — either built from source (``--no-binary vllm``) or from a
+    prebuilt empty-target wheel. See tenstorrent/vllm-tt-plugin.
+
+    The plugin wheel itself and any ``generic_op`` wheels ride in ``Deps.wheels`` (installed by path
+    AFTER vLLM). ``VLLM_TARGET_DEVICE`` is a *build-time* variable only — it is never set at serve.
+    """
+
+    version: str = "0.25.1"          # upstream vllm-project/vllm tag (empty-target build)
+    target_device: str = "empty"     # VLLM_TARGET_DEVICE at build; the plugin provides `tt` at runtime
+    overrides: Optional[str] = None  # bundle-relative override file (opencv/numpy pins) applied to common.txt
+    # bundle-relative pinned copy of vLLM's requirements/common.txt; None => fetch it from the pinned tag
+    common_requirements: Optional[str] = None
+    # bundle-relative PREBUILT empty-target vLLM wheel (stock vLLM built empty, NOT the fork). When set,
+    # install it with --no-deps instead of building from source — a hermetic, faster install.
+    wheel: Optional[str] = None
+
+
+class Deps(BaseModel):
+    """v6 "thin" bundle: the per-model venv is built from pip dependency pins + bundled wheels,
+    not from embedded platform wheels (see issue #29).
+
+    ``requirements`` (a file shipped in the bundle) lists the pins — ``ttnn`` (team-provided /
+    PyPI), ``tt-transformers``/TTTv2, the "models wheel", etc. ``wheels_dir`` is a bundle folder
+    of shipped wheels (the ``vllm-tt-plugin`` and the model's ``generic_op`` custom-op wheel) added
+    to the install via ``--find-links`` and installed BY PATH. ``vllm`` describes the separate
+    empty-target vLLM install step (see ``Vllm``) — vLLM is NOT in ``requirements`` or ``wheels``
+    because it needs its own ordered build. ``model_dir`` is where ``model.py`` lives (added to
+    PYTHONPATH at serve). SFPI and firmware are external, box-managed deps — never in here.
+    """
+
+    python: Optional[str] = None            # pinned interpreter (major.minor), uv provisions
+    requirements: str = "requirements.txt"  # pip pins from an index: ttnn, tt-metal-models, ...
+    # Bundle-relative wheels installed BY PATH (things not on a pinnable index): the ``vllm-tt-plugin``
+    # and any ``generic_op`` custom-op wheel. Installed AFTER vLLM (see ``vllm``).
+    wheels: List[str] = Field(default_factory=list)
+    wheels_dir: Optional[str] = None         # bundle dir holding those wheels -> also on --find-links
+    # vLLM core install (empty-target, for the plugin). None => bundle serves no vLLM (non-vLLM model).
+    vllm: Optional["Vllm"] = None
+    model_dir: str = "."                     # where model.py lives (bundle root), added to PYTHONPATH
+
+
 class Runtime(BaseModel):
     """The serving runtime a v4 bundle needs.
 
@@ -310,6 +359,12 @@ class Manifest(BaseModel):
     # self-contained and needs only a TT card + firmware.
     bundled: Optional[BundledPlatform] = None
 
+    # --- v6 "thin" block (optional; the direction in issue #29) --------------------------------
+    # A thin bundle keeps the per-model venv (the wall) but builds it from PIP DEPENDENCY PINS
+    # (ttnn, TTTv2, the models wheel) + any bundled generic_op wheels, instead of embedding the
+    # full platform. No metal tree, no embedded ttnn wheel. SFPI is an external box dep.
+    deps: Optional[Deps] = None
+
     @property
     def is_v4(self) -> bool:
         """True for a unified vLLM manifest (has an entrypoint / platform block)."""
@@ -319,6 +374,17 @@ class Manifest(BaseModel):
     def is_self_contained(self) -> bool:
         """True for a v5 bundle that ships its own platform wheels (needs no host tt-metal/vLLM)."""
         return self.bundled is not None and bool(self.bundled.wheels)
+
+    @property
+    def is_thin(self) -> bool:
+        """True for a v6 "thin" bundle: its venv is built from pip dep pins (no embedded wheels)."""
+        return self.deps is not None
+
+    @property
+    def has_own_venv(self) -> bool:
+        """True when the bundle carries/builds its own venv (v5 fat OR v6 thin) — the install &
+        serve paths and the compat rules are the same for both: gate only on arch + device_count."""
+        return self.is_self_contained or self.is_thin
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)
@@ -450,14 +516,14 @@ def compare(manifest: Manifest, local: "LocalEnv") -> CompatibilityReport:  # no
             Incompatibility(field="arch", expected=manifest.arch, detected=local.arch, fatal=True)
         )
 
-    # A self-contained (v5) bundle ships its own ttnn/vLLM engine wheels and installs them into its
-    # OWN venv, so NONE of the host's tt-metal facts are relevant: not the tt_metal_version (the
-    # engine that runs is the bundle's, not the host's — the host need not have tt-metal at all),
-    # not the kernel-cache build_key / harvesting (the bundle JITs into its own cache), not the
-    # platform/runtime version ranges. Gate ONLY on arch (the ISA the shipped binaries target —
-    # still fatal above) and device_count (the mesh the model needs). The shipped wheels' own
-    # interpreter/platform tags are verified separately at install time (host_incompatible_wheels).
-    if manifest.is_self_contained:
+    # A bundle that builds its OWN venv — v5 fat (embedded wheels) or v6 thin (pip dep pins) —
+    # makes NONE of the host's tt-metal facts relevant: not the tt_metal_version (the engine that
+    # runs is the venv's, not the host's — the host need not have tt-metal at all), not the
+    # kernel-cache build_key / harvesting (the venv JITs into its own cache), not the platform/
+    # runtime version ranges. Gate ONLY on arch (the ISA the binaries target — still fatal above)
+    # and device_count (the mesh the model needs). v5 wheels' interpreter/platform tags are checked
+    # separately at install (host_incompatible_wheels); v6 resolves its deps via pip at install.
+    if manifest.has_own_venv:
         if local.device_count and manifest.device_count != local.device_count:
             issues.append(
                 Incompatibility(
@@ -542,9 +608,9 @@ def runner_version_advisory(manifest: Manifest, local: "LocalEnv") -> Optional[I
     """
     if manifest.runner is None and manifest.weights is None:
         return None
-    # A self-contained bundle ships its own engine; the host tt-metal version is irrelevant to it
-    # (and the host may not have tt-metal installed at all), so never advise on it.
-    if manifest.is_self_contained:
+    # A bundle with its own venv (v5 fat or v6 thin) sources its engine independently; the host
+    # tt-metal version is irrelevant (and the host may not have tt-metal at all), so never advise.
+    if manifest.has_own_venv:
         return None
     if local.tt_metal_version and manifest.tt_metal_version != local.tt_metal_version:
         return Incompatibility(
