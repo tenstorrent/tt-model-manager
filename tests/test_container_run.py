@@ -48,6 +48,7 @@ def _run_argv(m, **kw):
         launcher.serve_env(m, profile),
         hf_home_dir=Path("/home/u/.cache/huggingface"),
         cache_dir=Path("/home/u/.cache/tt-model/my-model/cache"),
+        weight_cache_dir=Path("/home/u/.cache/tt-model/my-model/weights"),
         include_hf_token=False,
         **kw,
     )
@@ -106,6 +107,40 @@ def test_the_kernel_cache_is_persisted_on_the_host():
     argv = _run_argv(_wire())
     assert "/home/u/.cache/tt-model/my-model/cache:/cache" in argv
     assert "TT_METAL_CACHE=/cache" in argv
+
+
+def test_the_converted_weight_cache_is_persisted_on_the_host():
+    """Without this the container reconverts tens of GB on every start: FLUX.2 measured
+    8-9 minutes cold against 40 seconds once warm. tt_dit reads TT_DIT_CACHE_DIR and
+    silently skips caching when it is unset, so the miss produced no error at all."""
+    argv = _run_argv(_wire())
+    assert "/home/u/.cache/tt-model/my-model/weights:/weight-cache" in argv
+    assert "TT_DIT_CACHE_DIR=/weight-cache" in argv
+
+
+def test_every_cache_mount_has_a_variable_pointing_at_it():
+    """The failure mode this guards is a mount nothing reads. A cache dir with no
+    variable aimed at it is not a slow cache, it is no cache, and it looks fine in
+    `docker inspect`."""
+    argv = _run_argv(_wire())
+    dests = {v.split(":", 1)[1] for i, v in enumerate(argv)
+             if i and argv[i - 1] == "--volume"}
+    envs = " ".join(argv)
+    for dest in dests:
+        assert f"={dest}" in envs, f"{dest} is mounted but no env var points at it"
+
+
+def test_the_weight_cache_source_is_created_before_run(tmp_path):
+    """docker creates a missing bind source as ROOT, and the container runs as the host
+    user, so an uncreated dir fails as Permission denied minutes into a boot."""
+    m = _wire()
+    container.ensure_mount_sources(
+        m,
+        hf_home_dir=tmp_path / "hf",
+        cache_dir=tmp_path / "cache",
+        weight_cache_dir=tmp_path / "weights",
+    )
+    assert (tmp_path / "weights").is_dir()
 
 
 def test_the_port_is_published_from_the_profile():
