@@ -110,7 +110,8 @@ def test_stage_package_layout(tmp_path):
     assert json.loads(meta.read_text())["arch"] == "LlamaForCausalLM"
     assert not (staged / "vllm_metadata.json").exists()  # NOT at the root (plugin would miss it)
     for s in ("install.sh", "run.sh"):
-        assert (staged / s).stat().st_mode & 0o111  # executable
+        # Owner read/write only, no execute bit — run via `bash <script>` (least privilege).
+        assert (staged / s).stat().st_mode & 0o777 == 0o600
     # run.sh wired the non-obvious env + serving args the TT backend requires
     run = (staged / "run.sh").read_text()
     assert "_ttnncpp" in run and "TT_VLLM_BUILTIN_MODELS=0" in run
