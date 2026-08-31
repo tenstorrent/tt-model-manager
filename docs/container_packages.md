@@ -108,6 +108,13 @@ only relationship tt-model asserts between the two: a label like `p300x2` means 
 boards → 4 chips, and the mesh must open exactly that many chips. Both are stated because one
 cannot be derived from the other in general (`P150x4` and `P300x2` are both a `(1, 4)` mesh).
 
+`hardware` names **boards**, never the box they sit in — `<board>[xN]`, board one of `p100`,
+`p150`, `n150`, `e150`, `p300`, `n300` (a board-revision letter like `p300c` is fine). A label
+outside that grammar is refused at load, because a label tt-model cannot read is one whose
+`device_count` it would have to invent and whose cross-check it would skip — a 4-chip model
+publishing `device_count: 1` with nothing said. Box names (`QB2`, `T3K`, `TG`) belong in
+`mesh_device`: a QB2 is `hardware: p300x2`, a T3000 is `hardware: n300x4`.
+
 ### `kind`: the serving stack
 
 - **`vllm-plugin`** (default) — stock `vllm==X.Y.Z` from PyPI (built from sdist in the image
@@ -122,6 +129,21 @@ cannot be derived from the other in general (`P150x4` and `P300x2` are both a `(
   editable, launched through tt-metal's readiness runner. The older arrangement, and what
   this repo's own `install`/`provision` set up. Its `runtime:` wants `vllm: {repo, ref}` (the
   fork) and `model_dir` instead of a plugin block. Argv-tested but not yet run on hardware.
+- **`tt-dit-server`** — a diffusion model behind its own HTTP app, launched with
+  `python -m uvicorn`. A diffusion transformer has no tokens, no KV cache and no continuous
+  batching, so vLLM has nothing to do: this kind installs a small HTTP stack (fastapi /
+  uvicorn / pydantic / pillow) instead of an engine, and the serving code is the model's
+  own — the ASGI app tt-metal ships under `models/tt_dit/server/<model>`. Its `runtime:`
+  wants `app` (`"module.path:attribute"`, which `source.code` must ship) and optionally
+  `packages`, `lock`, and `mesh_shape_env`. Because there is no engine, `max_num_seqs` and
+  `block_size` are **not** required for this kind — only `hardware` and `mesh_device` are.
+  Run on hardware: FLUX.2-dev on a QB2 (2× p300c, 4 chips).
+
+  These servers read the resolved mesh **shape** (`"2x2"`) from an environment variable that
+  each one names for itself. `mesh_shape_env` says which; it defaults to `FLUX2_MESH_SHAPE`,
+  the model this kind was built for, so a *second* diffusion model should set its own. The
+  value is always derived from `mesh_device`, so the SKU and the shape cannot drift — never
+  hand-write the shape into `serve.env`.
 
 ### Example
 
@@ -268,9 +290,18 @@ are `HF_HOME`/`HF_TOKEN`, both overridable, so `--print` and tests are determini
 - `--user <host uid>:<host gid>` — everything the container writes lands in bind mounts owned
   by the person who ran it, not root.
 - `--ipc host`, `--volume <hf>:/hf`, `--volume <cache>:/cache` (the JIT kernel/trace cache,
-  so the ~10 min first compile is paid once), `--publish <port>:<port>`, and the profile's
-  env. `HF_TOKEN` is passed by name only so its value never enters an argv `--print`/`ps`
+  so the ~10 min first compile is paid once), `--volume <weights>:/weight-cache` with
+  `TT_DIT_CACHE_DIR` pointing at it, `--publish <port>:<port>`, and the profile's env.
+  `HF_TOKEN` is passed by name only so its value never enters an argv `--print`/`ps`
   would leak.
+
+Both host caches live under one per-model parent, `~/.cache/tt-model/<name>/` — `cache/` for
+JIT kernels, `weights/` for weights already converted to device layout. The second is what
+keeps a diffusion model from reconverting on every start: FLUX.2 measured 291 s to ready
+while writing it against 80 s reading it. It is a tradeoff, not a free win — it costs disk
+roughly equal to the weights (105 GB for FLUX.2, on top of what the HF cache already holds),
+and nothing reports it, because `tt_dit` silently reconverts when `TT_DIT_CACHE_DIR` is unset
+rather than failing. `tt-model rm` removes the whole parent; `--keep-cache` keeps it.
 
 ### Inside the image
 
@@ -325,4 +356,5 @@ tests specifically rather than the full suite.
 - `package` leaves a ~10 GB image per build and never cleans up older tags of the same model;
   `tt-model rm` only undoes a *pull*, so an author's images accumulate. No `--prune-previous`
   yet.
-- Only the `vllm-plugin` kind has run on hardware; `vllm-fork` is argv-tested.
+- The `vllm-plugin` and `tt-dit-server` kinds have run on hardware; `vllm-fork` is
+  argv-tested.

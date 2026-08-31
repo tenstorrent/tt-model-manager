@@ -73,10 +73,16 @@ Read, skipping what does not exist:
 | --- | --- |
 | stock `vllm==X.Y.Z` from PyPI + a separate `vllm-tt-plugin`; launch is `vllm serve …` | `vllm-plugin` |
 | the `tenstorrent/vllm` **fork** (plugin in-tree); launch is `python -m models.common.readiness_check.run_vllm_server …` | `vllm-fork` |
+| a diffusion model — no tokens, no KV cache; an ASGI app under `models/tt_dit/server/<model>`; launch is uvicorn | `tt-dit-server` |
 
 No local `tenstorrent/vllm` clone and a standalone plugin checkout ⇒ `vllm-plugin`.
 `vllm-fork` additionally needs `runtime.model_dir` (the launcher's `--model-dir`), covered
 by `source.code`.
+
+`tt-dit-server` needs `runtime.app` — the ASGI target as `"module.path:attribute"`, covered
+by `source.code`. Do **not** invent `max_num_seqs` / `block_size` for it: they configure a
+continuous-batching engine this kind does not have, and it does not ask for them. It needs
+only `hardware` and `mesh_device`.
 
 ## Step 4 — Build the `source.code` allowlist (the part agents get wrong)
 
@@ -126,6 +132,16 @@ cherry-picking.
 - **`lock`** — omit on the first build; `package` writes `requirements.lock` out, and the
   user commits it and sets `lock: requirements.lock` for reproducible rebuilds.
 
+For `tt-dit-server` instead:
+- **`app`** — the ASGI target, `"models.tt_dit.server.<model>.app:app"`. Read the server
+  module rather than guessing the attribute name; `verify:` resolves it at build time.
+- **`packages`** — omit unless the server needs more than fastapi / uvicorn / pydantic /
+  pillow, which is the default HTTP stack.
+- **`mesh_shape_env`** — the env var the server reads the mesh SHAPE from (`"2x2"`).
+  Defaults to `FLUX2_MESH_SHAPE`. **Set it for any model that is not FLUX.2**: grep the
+  server for `environ` to find the name it actually reads. The value is derived from
+  `mesh_device`, so never hand-write a shape into `serve.env`.
+
 ## Step 6 — Interview for what the directory cannot tell you
 
 Ask about anything you did not find evidence for. Ask in ONE batch, with your best guess
@@ -136,6 +152,7 @@ and where it came from, so the user is confirming rather than composing:
 | `repo` | HF org/name to publish to | not in the checkout |
 | `weights` | HF id; pin a `revision`? | a bare id follows the default branch — the consumer may get different weights |
 | `hardware` + `mesh_device` | which board, e.g. `p300x2` / `P300x2` | the plugin's closed enum; chip counts must agree |
+| ↳ `hardware` names **boards**, not the box | `<board>[xN]`, board ∈ p100/p150/n150/e150/p300/n300 | a box name (`QB2`, `T3K`) is refused — a QB2 is `p300x2`, a T3000 is `n300x4` |
 | `max_num_seqs` | concurrent users: 1 (interactive) or N (fleet) | **required** — the TT backend rejects vLLM's default |
 | `block_size` | paged-attention block size | **required**, same reason |
 | `max_model_len` | served context | often LOWER than the model advertises |

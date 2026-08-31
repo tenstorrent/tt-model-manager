@@ -9,6 +9,7 @@ important — that the v5 flow through the SAME commands is unchanged.
 
 import json
 import pathlib
+import shutil
 from pathlib import Path
 
 import pytest
@@ -722,6 +723,11 @@ def _pulled(tmp_path, monkeypatch, repo="org/x"):
     cache = container.model_cache_dir(m)
     cache.mkdir(parents=True, exist_ok=True)
     (cache / "kernels").write_text("x" * 100)
+    # A real boot leaves BOTH caches under one parent. Creating only the kernel one here is
+    # what hid the orphaned-weights bug: every rm test looked clean without it.
+    weights = container.model_weight_cache_dir(m)
+    weights.mkdir(parents=True, exist_ok=True)
+    (weights / "converted.bin").write_text("w" * 100)
     return m, d, cache
 
 
@@ -820,6 +826,49 @@ def test_keep_cache_preserves_the_jit_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     container_cli.remove_container("org/x", m, keep_cache=True)
     assert cache.exists()
+
+
+def test_keep_cache_also_keeps_the_weight_cache_and_says_so(tmp_path, monkeypatch, capsys):
+    """--keep-cache retains the whole per-model parent, so the converted-weight tree stays
+    too. Reporting only the kernel cache understated what was kept by 105 GB on FLUX.2."""
+    m, _, _ = _pulled(tmp_path, monkeypatch)
+    weights = container.model_weight_cache_dir(m)
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "image_present", lambda ref: False)
+
+    container_cli.remove_container("org/x", m, keep_cache=True)
+
+    assert weights.exists()
+    out = " ".join(capsys.readouterr().out.split())
+    assert "caches kept" in out
+    assert str(weights.parent) in out
+
+
+def test_rm_removes_a_weight_cache_orphaned_by_a_missing_kernel_cache(tmp_path, monkeypatch):
+    """The leak this fixes: a boot that converted weights but never wrote a JIT cache. The
+    old gate tested `cache/` — absent here — so it skipped the branch entirely and left the
+    105 GB weight tree behind, silently, because the note lived inside the same branch."""
+    m, _, cache = _pulled(tmp_path, monkeypatch)
+    weights = container.model_weight_cache_dir(m)
+    shutil.rmtree(cache)                      # never compiled a kernel
+    assert weights.exists() and not cache.exists()
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "image_present", lambda ref: False)
+
+    container_cli.remove_container("org/x", m)
+
+    assert not weights.exists()
+    assert not weights.parent.exists()
+
+
+def test_rm_reports_that_weights_will_be_reconverted(tmp_path, monkeypatch, capsys):
+    """Removing the weight cache costs a reconversion on the next boot (291s vs 80s on
+    FLUX.2). That is worth one clause, so the slow next start is not a surprise."""
+    m, _, _ = _pulled(tmp_path, monkeypatch)
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    container_cli.remove_container("org/x", m)
+    assert "reconverts weights" in " ".join(capsys.readouterr().out.split())
 
 
 def test_an_image_shared_with_another_pulled_package_is_kept(tmp_path, monkeypatch, capsys):

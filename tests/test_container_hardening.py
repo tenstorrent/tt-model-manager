@@ -8,6 +8,11 @@
 2. serve-field typos must fail at load (``ServeSettings`` forbids unknown keys).
 3. manifest-sourced values interpolated into the generated build shell must be shlex-quoted.
 4. ``wait_ready`` must honour its timeout even while the container is silent (no hang).
+
+...and from PR #50's review, which added the ``tt-dit-server`` kind:
+
+5. ``model_weight_cache_dir`` must apply the same ``_safe_name`` guard as its sibling — it is
+   mkdir'd and bind-mounted, and both caches must share one parent so ``rm`` catches both.
 """
 
 import json
@@ -71,6 +76,26 @@ def test_model_cache_dir_refuses_a_traversal_name():
 def test_model_cache_dir_accepts_a_safe_name():
     p = container.model_cache_dir(_wire_manifest("my-model"))
     assert p.name == "cache" and p.parent.name == "my-model"
+
+
+def test_model_weight_cache_dir_refuses_a_traversal_name():
+    # Parity with its sibling above. This one is never rmtree'd directly, but
+    # ensure_mount_sources mkdirs it with parents=True and compose_run bind-mounts it, so an
+    # unguarded name creates and mounts an arbitrary host directory instead.
+    with pytest.raises(ContainerError):
+        container.model_weight_cache_dir(_wire_manifest("../../../../tmp/pwned"))
+
+
+def test_model_weight_cache_dir_accepts_a_safe_name():
+    p = container.model_weight_cache_dir(_wire_manifest("my-model"))
+    assert p.name == "weights" and p.parent.name == "my-model"
+
+
+def test_both_caches_share_one_guarded_parent():
+    """``remove_container`` drops the parent to remove both caches at once, so they must
+    agree on it — a divergence there is how the 105 GB weight tree gets orphaned."""
+    m = _wire_manifest("my-model")
+    assert container.model_cache_dir(m).parent == container.model_weight_cache_dir(m).parent
 
 
 # ---- 2. serve-field typos fail at load --------------------------------------------------

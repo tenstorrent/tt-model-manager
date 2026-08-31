@@ -182,6 +182,42 @@ def test_mesh_device_that_contradicts_hardware_is_refused():
         ).validate_semantics()
 
 
+def _with_hardware(label, mesh="P150x4"):
+    return _mani(serve_profiles=[{"name": "p", "hardware": label, "mesh_device": mesh,
+                                  "max_num_seqs": 8, "block_size": 64}])
+
+
+@pytest.mark.parametrize("label", ["wibble", "t3k", "galaxy", "x4", "p150b7"])
+def test_unrecognised_hardware_is_refused(label):
+    """An unreadable label is not harmless: to_wire publishes `device_count: 1` for it and
+    the mesh cross-check is skipped, so a 4-chip model ships claiming one chip and the one
+    assertion tt-model makes about the mesh never runs. Both failures are silent."""
+    with pytest.raises(ContainerManifestError, match="not a recognised board label"):
+        _with_hardware(label).validate_semantics()
+
+
+def test_a_mesh_sku_in_the_hardware_field_is_diagnosed():
+    """The easy slip: `QB2` is a real thing to type, just not in this field. Naming it as a
+    SKU is the difference between a fixable message and a puzzling one."""
+    with pytest.raises(ContainerManifestError, match="is a mesh_device SKU"):
+        _with_hardware("QB2", mesh="QB2").validate_semantics()
+
+
+def test_a_zero_board_multiplier_is_refused():
+    """`hardware_chip_count("p150x0")` is 0, which is falsy — so `... or 1` would rewrite it
+    to one chip exactly like an unknown label. Guarding only on None leaves this open."""
+    with pytest.raises(ContainerManifestError, match="not a recognised board label"):
+        _with_hardware("p150x0").validate_semantics()
+
+
+@pytest.mark.parametrize("label", ["p150", "p150x4", "p300x2", "n300x2", "P150X4", "p150a"])
+def test_recognised_hardware_labels_still_load(label):
+    """The refusal must not narrow what a correct manifest may say: revision letters,
+    case and the bare board are all still valid."""
+    mesh = {1: "P150", 2: "P150x2", 4: "P150x4"}[hardware_chip_count(label)]
+    _with_hardware(label, mesh=mesh).validate_semantics()
+
+
 @pytest.mark.parametrize("field", ["max_num_seqs", "block_size", "mesh_device", "hardware"])
 def test_required_serve_fields_are_required_after_merge(field):
     profile = {
