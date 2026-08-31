@@ -9,7 +9,7 @@ everything that varies arrives through the hooks below, so adding a kind is a ne
 here plus a registration in :data:`KINDS` — no change to the manifest schema, the image
 build, or any command.
 
-Two kinds, named for what they ARE rather than for their age:
+Three kinds, named for what they ARE rather than for their age:
 
 ``vllm-plugin``
     Stock ``vllm==X.Y.Z`` from PyPI (built from sdist with ``VLLM_TARGET_DEVICE=empty``)
@@ -23,9 +23,15 @@ Two kinds, named for what they ARE rather than for their age:
     image. Launched through tt-metal's readiness runner. This is the older arrangement,
     and it is what this repo's own ``install``/``provision`` still set up.
 
-Neither is called plain ``vllm``: a v4 manifest's ``runtime.kind = "vllm"`` already means
-the fork, so reusing the bare word here would give one field two meanings depending on
-which schema you were reading.
+``tt-dit-server``
+    A diffusion transformer served by the ASGI app tt-metal ships beside it under
+    ``models/tt_dit/server/<model>``, launched with uvicorn. There are no tokens, no KV
+    cache and no continuous batching, so vLLM has nothing to do: this kind installs a
+    small HTTP stack instead of an engine, and the serving code is the model's own.
+
+Neither vLLM kind is called plain ``vllm``: a v4 manifest's ``runtime.kind = "vllm"``
+already means the fork, so reusing the bare word here would give one field two meanings
+depending on which schema you were reading.
 
 Two different inputs on purpose:
 
@@ -645,7 +651,14 @@ class TtDitServerLauncher:
     REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device")
 
     #: keys the manifest's ``runtime:`` block may contain for this kind
-    RUNTIME_KEYS = ("app", "packages", "lock")
+    RUNTIME_KEYS = ("app", "packages", "lock", "mesh_shape_env")
+
+    #: Env var carrying the resolved mesh SHAPE, when the manifest does not name one.
+    #: These servers read the shape from the environment under a name they each choose;
+    #: FLUX.2 reads ``FLUX2_MESH_SHAPE``, and it is the default only because it is the
+    #: model this kind was built for. A second diffusion model sets ``mesh_shape_env``
+    #: rather than inheriting a name that means nothing to it.
+    DEFAULT_MESH_SHAPE_ENV = "FLUX2_MESH_SHAPE"
 
     #: uvicorn logs this once the ASGI lifespan has finished, which for these servers
     #: means the pipeline is warm and the device is claimed.
@@ -679,6 +692,20 @@ class TtDitServerLauncher:
             raise ContainerManifestError(
                 f"runtime.app {app!r} lives under {top!r}, which no source.code entry "
                 "ships. Add the package holding the server to source.code."
+            )
+
+        # The name is interpolated into `docker run --env K=V` and into an `export K=...`
+        # line in the image's default CMD, so a junk one is a broken shell line inside a
+        # built image rather than a load-time error.
+        shape_env = rt.get("mesh_shape_env")
+        if shape_env is not None and (
+            not isinstance(shape_env, str)
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", shape_env)
+        ):
+            raise ContainerManifestError(
+                f"runtime.mesh_shape_env {shape_env!r} is not a valid environment variable "
+                f"name — expected letters, digits and '_', not starting with a digit "
+                f"(default: {self.DEFAULT_MESH_SHAPE_ENV})."
             )
 
     # ---- build -----------------------------------------------------------------------
@@ -759,15 +786,29 @@ class TtDitServerLauncher:
         env: Dict[str, str] = {"HF_MODEL": _weights_id(m)}
         if profile.mesh_device:
             # The manifest names a SKU ("QB2"); the servers take a shape ("2x2"). Resolve
-            # it here so the two can never drift apart.
+            # it here so the two can never drift apart. Which variable carries the shape is
+            # the model's choice, not this kind's — see DEFAULT_MESH_SHAPE_ENV.
             rows, cols = parse_mesh_device(profile.mesh_device)
             env["MESH_DEVICE"] = profile.mesh_device
-            env["FLUX2_MESH_SHAPE"] = f"{rows}x{cols}"
+            env[_mesh_shape_env(m)] = f"{rows}x{cols}"
         env.update(profile.env)
         return env
 
     def ready_probe(self, m: Manifest) -> str:
         return self.READY_LINE
+
+
+def _mesh_shape_env(m: Manifest) -> str:
+    """Name of the env var carrying the mesh shape, per the published manifest.
+
+    Absent on every manifest published before the key existed, which is why it falls back
+    to the FLUX.2 name rather than emitting nothing: a bundle in the wild carries whatever
+    it was published with, and dropping the variable would leave its server converting
+    against a default mesh with no error anywhere.
+    """
+    container = getattr(m, "container", None)
+    runtime = getattr(container, "runtime", {}) if container is not None else {}
+    return str(runtime.get("mesh_shape_env") or TtDitServerLauncher.DEFAULT_MESH_SHAPE_ENV)
 
 
 def _container_app(m: Manifest) -> str:

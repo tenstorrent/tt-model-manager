@@ -29,6 +29,13 @@ weights: org/Weights-7B
 #                engine for them to configure. Its runtime also takes an optional
 #                `packages` list (the HTTP stack, defaulting to fastapi/uvicorn/
 #                pydantic/pillow) and the same `lock` as the vLLM kinds.
+#                These servers read the resolved mesh SHAPE ("2x2") from an environment
+#                variable they each name themselves. `mesh_shape_env` says which one;
+#                it defaults to FLUX2_MESH_SHAPE, the model this kind was built for, so
+#                any OTHER diffusion model should set it:
+#                  runtime: {app: "...", mesh_shape_env: OTHER_MESH_SHAPE}
+#                The VALUE is always derived from mesh_device below — never hand-write
+#                the shape in serve.env, or the two drift.
 kind: vllm-plugin
 arch: blackhole                 # fixed by the build; every profile shares it
 

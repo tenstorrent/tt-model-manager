@@ -137,6 +137,40 @@ def test_serve_env_resolves_the_mesh_sku_to_a_shape():
     assert env["HF_MODEL"] == "org/Weights"
 
 
+def test_a_manifest_without_the_key_still_gets_the_flux2_name():
+    """Every bundle published before ``mesh_shape_env`` existed carries no such key. The
+    default is what keeps those serving: emitting nothing instead would leave the server
+    converting against a default mesh, which tt_dit does silently."""
+    m = _manifest()
+    wire = _wire(m)
+    assert "mesh_shape_env" not in wire.container.runtime
+    env = launcher_for(m.kind).serve_env(wire, wire.container.resolve_profile())
+    assert env["FLUX2_MESH_SHAPE"] == "2x2"
+
+
+def test_a_second_model_names_its_own_mesh_shape_var():
+    """The whole point of the lever: a non-FLUX.2 diffusion model gets the var IT reads and
+    is not handed ``FLUX2_MESH_SHAPE``, which means nothing to it."""
+    m = _manifest(runtime={
+        "app": "models.tt_dit.server.other.app:app",
+        "mesh_shape_env": "OTHER_MESH_SHAPE",
+    })
+    wire = _wire(m)
+    env = launcher_for(m.kind).serve_env(wire, wire.container.resolve_profile())
+    assert env["OTHER_MESH_SHAPE"] == "2x2"
+    assert "FLUX2_MESH_SHAPE" not in env
+    assert env["MESH_DEVICE"] == "QB2"
+
+
+@pytest.mark.parametrize("bad", ["2MESH", "a-b", "has space", "", "x=y", 7])
+def test_a_mesh_shape_env_that_is_not_a_variable_name_is_refused(bad):
+    """It is interpolated into ``--env K=V`` and into an ``export K=...`` line in the
+    image's default CMD, so a junk name is a broken shell line inside a built image."""
+    with pytest.raises(ContainerManifestError, match="environment variable name"):
+        _manifest(runtime={"app": "models.tt_dit.server.flux2.app:app",
+                           "mesh_shape_env": bad})
+
+
 def test_qb2_is_a_square_not_a_line():
     """FLUX.2 needs sequence AND tensor parallel factors above 1. P300x2 is the same four
     chips as a (1, 4) line, on which one factor is 1 and attention fails deep inside."""
