@@ -86,9 +86,13 @@ MESH_DEVICE_PRESETS: Dict[str, tuple] = {
 # Chips per *board*, keyed by the base of a ``hardware`` label. A label like "p150x4"
 # means <base>x<multiplier>: 4 p150 boards -> 4 chips; "p300x2" -> 2 dual-chip boards
 # -> 4 chips. This is the ONLY relationship tt-model asserts between ``hardware`` (the
-# author-owned target label) and ``mesh_device`` (the string the plugin consumes) —
-# deriving one from the other is not possible in general (P150x4 and P300x2 are both a
-# (1, 4) mesh), which is exactly why the author states both.
+# board target label) and ``mesh_device`` (the string the plugin consumes) — deriving one
+# from the other is not possible in general (P150x4 and P300x2 are both a (1, 4) mesh),
+# which is exactly why the author states both.
+#
+# The label names BOARDS, never the box they sit in: a T3000 is "n300x4", a QB2 is
+# "p300x2". Box names live in MESH_DEVICE_PRESETS above, and putting one here is refused
+# by validate_semantics rather than silently publishing device_count: 1.
 _BOARD_CHIPS = {"p100": 1, "p150": 1, "n150": 1, "e150": 1, "p300": 2, "n300": 2}
 
 _HARDWARE_RE = re.compile(r"^(?P<base>[a-z]\d+[a-z]?)(?:x(?P<mult>\d+))?$")
@@ -101,9 +105,11 @@ class ContainerManifestError(ValueError):
 def hardware_chip_count(hardware: str) -> Optional[int]:
     """Chip count implied by a ``hardware`` label, or None for an unrecognised base.
 
-    Unrecognised bases are allowed (the label is author-owned); they simply skip the
-    mesh cross-check rather than failing it. Guessing wrong here would block a launch
-    the author knows is right.
+    Total on purpose — it never raises — so ``to_wire`` can call it on a manifest that
+    skipped validation. The *refusal* of an unrecognised label lives in
+    ``validate_semantics`` instead: a label this cannot read is a label whose
+    ``device_count`` would be invented and whose mesh cross-check would be skipped, and
+    both failures are silent. See the comment on ``_BOARD_CHIPS`` for the grammar.
     """
     m = _HARDWARE_RE.match(hardware.strip().lower())
     if not m:
@@ -251,10 +257,11 @@ class ContainerManifest(BaseModel):
     @field_validator("name")
     @classmethod
     def _name_is_a_safe_slug(cls, v: str) -> str:
-        # `name` becomes a host filesystem path (the JIT cache ``~/.cache/tt-model/<name>/``
-        # that ``tt-model rm`` deletes with rmtree) and a docker container name. A traversal
-        # or absolute name would let a *pulled* package's ``rm`` escape the cache dir, so
-        # constrain it to a safe slug at authoring time.
+        # `name` becomes a host filesystem path (``~/.cache/tt-model/<name>/``, holding both
+        # the JIT kernel cache and the converted-weight cache, which ``tt-model rm`` deletes
+        # with rmtree) and a docker container name. A traversal or absolute name would let a
+        # *pulled* package's ``rm`` escape the cache dir, so constrain it to a safe slug at
+        # authoring time.
         import re
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", v):
             raise ContainerManifestError(
@@ -377,7 +384,23 @@ class ContainerManifest(BaseModel):
                     )
             rows, cols = parse_mesh_device(merged.mesh_device)
             chips = hardware_chip_count(merged.hardware)
-            if chips is not None and rows * cols != chips:
+            # An unreadable label is refused rather than defaulted: to_wire would publish
+            # device_count: 1 for it, and the cross-check below would be skipped — so a
+            # 4-chip model would ship claiming one chip, with nothing said. `x0` lands here
+            # too, because a zero count is falsy and would be rewritten to 1 the same way.
+            if chips is None or chips < 1:
+                hint = (
+                    f" {merged.hardware!r} is a mesh_device SKU, not a board label."
+                    if merged.hardware in MESH_DEVICE_PRESETS
+                    else ""
+                )
+                raise ContainerManifestError(
+                    f"{where}: hardware {merged.hardware!r} is not a recognised board "
+                    f"label, so device_count and the mesh cross-check cannot be derived."
+                    f"{hint} Expected <board>[xN] with board one of "
+                    f"{sorted(_BOARD_CHIPS)} — a T3000 is 'n300x4', a QB2 is 'p300x2'."
+                )
+            if rows * cols != chips:
                 raise ContainerManifestError(
                     f"{where}: mesh_device {merged.mesh_device!r} opens a {rows}x{cols} "
                     f"mesh ({rows * cols} chips) but hardware {merged.hardware!r} "
