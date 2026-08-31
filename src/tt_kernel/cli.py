@@ -992,6 +992,12 @@ def serve(
         False, "--follow", help="For a container package: wait for the server to report "
         "ready, streaming the boot (a cold boot JIT-compiles kernels, ~10 min)."
     ),
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Before serving an already-installed package, re-pull it if "
+        "the Hub has a newer revision (so a republished source is not served stale). No-op "
+        "when already up to date, --local-only, --print, or the install has no recorded "
+        "revision; any failure warns and serves the existing install unchanged."
+    ),
     port: Optional[int] = typer.Option(
         None, "--port", help="Serve on this port instead of the bundle's/manifest's. For a "
         "container package it moves BOTH the published mapping and the server's own "
@@ -1032,6 +1038,12 @@ def serve(
                 raise _err(str(e))
             cmani = container_cli.load_pulled(repo_id)
     if cmani is not None:
+        # Opt-in re-pull, only for a Hub target: a local manifest path has no revision to
+        # compare against. Returns None (and warns) on any failure, leaving cmani as-is.
+        if refresh and not local_only and not Path(repo_id).is_file():
+            refreshed = container_cli.refresh_if_newer(repo_id, print_only=print_only)
+            if refreshed is not None:
+                cmani = refreshed
         src = Path(repo_id).parent if Path(repo_id).is_file() else \
             container_cli.pull_dir(repo_id)
         try:

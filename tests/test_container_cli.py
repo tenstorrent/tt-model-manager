@@ -193,9 +193,56 @@ def test_an_unknown_profile_is_refused_with_the_available_ones(tmp_path, monkeyp
 def test_follow_reports_when_the_server_never_became_ready(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "running", lambda name=None: [])
     monkeypatch.setattr(container, "run_checked", lambda argv: None)
-    monkeypatch.setattr(container, "wait_ready", lambda *a, **k: False)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(False, False, ["slow..."]))
     with pytest.raises(container_cli.ContainerCliError, match="did not report ready"):
         container_cli.serve_container(_manifest(tmp_path), follow=True)
+
+
+def test_follow_says_the_container_EXITED_when_it_did(tmp_path, monkeypatch):
+    """"did not report ready" is useless when the container crashed — the reason is in
+    what it printed on the way out."""
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(
+                            False, True, ["boom: could not open device"]))
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_manifest(tmp_path), follow=True)
+    msg = str(e.value)
+    assert "container exited" in msg
+    assert "boom: could not open device" in msg
+
+
+def test_a_rejected_passthrough_flag_is_blamed_by_name(tmp_path, monkeypatch):
+    """The exact failure from the field: `serve <target> --refresh` forwarded --refresh to
+    vLLM (serve declares ignore_unknown_options), the container started, and vLLM died on
+    argparse — while the message said only "did not report ready"."""
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(
+                            False, True, ["vllm: error: unrecognized arguments: --refresh"]))
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_manifest(tmp_path), follow=True,
+                                      extra_args=["--refresh"], target="org/x")
+    msg = str(e.value)
+    assert "--refresh was passed through to the engine" in msg
+    assert "must come BEFORE the target" in msg
+
+
+def test_a_still_running_container_is_not_reported_as_exited(tmp_path, monkeypatch):
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(False, False, ["still booting"]))
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_manifest(tmp_path), follow=True, target="org/x")
+    msg = str(e.value)
+    assert "still running" in msg and "tt-model stop org/x" in msg
 
 
 # ------------------------------------------------------------------ stop
@@ -959,3 +1006,118 @@ def test_a_digest_bearing_package_says_nothing_about_it(tmp_path, monkeypatch, c
     monkeypatch.setattr(container_cli, "_download_weights", lambda ref: Path("/w"))
     container_cli.pull_container("org/x", None, m, no_weights=True)
     assert "no image digest" not in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ --refresh
+#
+# Opt-in re-pull before serving. The image half only works because a published package
+# records its digest — the tag alone could be reused across builds, so a re-pull would have
+# skipped the load and served the previous image.
+
+
+def _pulled_entry(tmp_path, monkeypatch, *, revision="a" * 40, **extra):
+    from tt_kernel import localdb
+
+    m = _manifest(tmp_path)
+    d = container_cli.pull_dir("org/x")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "tt_kernel_manifest.json").write_text(m.to_json())
+    localdb.record("org/x", {"repo_id": "org/x", "container": True,
+                             "image": container.image_ref(m), "revision": revision,
+                             **extra})
+    return m
+
+
+def test_refresh_repulls_when_the_hub_is_newer(tmp_path, monkeypatch):
+    m = _pulled_entry(tmp_path, monkeypatch)
+    pulled = {}
+    monkeypatch.setattr(cli.hub, "latest_revision", lambda *a, **k: "b" * 40)
+    monkeypatch.setattr(container_cli.hub, "latest_revision", lambda *a, **k: "b" * 40)
+    monkeypatch.setattr(container_cli.hub, "fetch_manifest", lambda r, rev: m)
+    monkeypatch.setattr(container_cli, "pull_container",
+                        lambda r, rev, mani, **k: pulled.update(rev=rev))
+    container_cli.refresh_if_newer("org/x")
+    assert pulled["rev"] == "b" * 40
+
+
+def test_refresh_is_a_noop_when_up_to_date(tmp_path, monkeypatch):
+    _pulled_entry(tmp_path, monkeypatch, revision="a" * 40)
+    monkeypatch.setattr(container_cli.hub, "latest_revision", lambda *a, **k: "a" * 40)
+    monkeypatch.setattr(container_cli, "pull_container",
+                        lambda *a, **k: pytest.fail("must not re-pull"))
+    assert container_cli.refresh_if_newer("org/x") is None
+
+
+def test_refresh_skips_a_pinned_install(tmp_path, monkeypatch):
+    """The user chose that revision; do not second-guess it."""
+    _pulled_entry(tmp_path, monkeypatch, pinned=True)
+    monkeypatch.setattr(container_cli.hub, "latest_revision",
+                        lambda *a, **k: pytest.fail("must not hit the Hub"))
+    assert container_cli.refresh_if_newer("org/x") is None
+
+
+def test_refresh_skips_an_install_with_no_recorded_revision(tmp_path, monkeypatch):
+    _pulled_entry(tmp_path, monkeypatch, revision=None)
+    monkeypatch.setattr(container_cli.hub, "latest_revision",
+                        lambda *a, **k: pytest.fail("no baseline to compare against"))
+    assert container_cli.refresh_if_newer("org/x") is None
+
+
+def test_refresh_bounds_the_hub_call(tmp_path, monkeypatch):
+    """A serve must not hang on a half-open network."""
+    seen = {}
+    _pulled_entry(tmp_path, monkeypatch)
+    monkeypatch.setattr(container_cli.hub, "latest_revision",
+                        lambda r, rev, timeout=None: seen.update(timeout=timeout))
+    container_cli.refresh_if_newer("org/x")
+    assert seen["timeout"] == 3.0
+
+
+def test_refresh_is_non_fatal(tmp_path, monkeypatch, capsys):
+    """A refresh must never leave the user unserved."""
+    m = _pulled_entry(tmp_path, monkeypatch)
+    monkeypatch.setattr(container_cli.hub, "latest_revision", lambda *a, **k: "b" * 40)
+    monkeypatch.setattr(container_cli.hub, "fetch_manifest", lambda r, rev: m)
+
+    def boom(*a, **k):
+        raise container.ContainerError("docker load failed")
+
+    monkeypatch.setattr(container_cli, "pull_container", boom)
+    assert container_cli.refresh_if_newer("org/x") is None
+    assert "serving the installed package unchanged" in " ".join(capsys.readouterr().out.split())
+
+
+def test_refresh_does_nothing_under_print(tmp_path, monkeypatch):
+    _pulled_entry(tmp_path, monkeypatch)
+    monkeypatch.setattr(container_cli.hub, "latest_revision",
+                        lambda *a, **k: pytest.fail("must not hit the Hub under --print"))
+    assert container_cli.refresh_if_newer("org/x", print_only=True) is None
+
+
+def test_serve_only_refreshes_a_hub_target(tmp_path, monkeypatch):
+    """A local manifest path has no revision to compare against."""
+    monkeypatch.setattr(container_cli, "resolve_target", lambda t: _manifest(tmp_path))
+    monkeypatch.setattr(container_cli, "serve_container", lambda m, **k: None)
+    monkeypatch.setattr(container_cli, "refresh_if_newer",
+                        lambda *a, **k: pytest.fail("a path has no Hub revision"))
+    path = _wire(tmp_path)
+    assert runner.invoke(cli.app, ["serve", str(path), "--refresh"]).exit_code == 0
+
+
+def test_serve_passes_refresh_through_for_a_repo_id(tmp_path, monkeypatch):
+    called = {}
+    monkeypatch.setattr(container_cli, "resolve_target", lambda t: _manifest(tmp_path))
+    monkeypatch.setattr(container_cli, "serve_container", lambda m, **k: None)
+    monkeypatch.setattr(container_cli, "refresh_if_newer",
+                        lambda repo, **k: called.update(repo=repo, kw=k))
+    assert runner.invoke(cli.app, ["serve", "org/x", "--refresh"]).exit_code == 0
+    assert called["repo"] == "org/x"
+
+
+def test_serve_does_not_refresh_under_local_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(container_cli, "resolve_target", lambda t: _manifest(tmp_path))
+    monkeypatch.setattr(container_cli, "serve_container", lambda m, **k: None)
+    monkeypatch.setattr(container_cli, "refresh_if_newer",
+                        lambda *a, **k: pytest.fail("--local-only must not hit the Hub"))
+    assert runner.invoke(
+        cli.app, ["serve", "org/x", "--refresh", "--local-only"]).exit_code == 0

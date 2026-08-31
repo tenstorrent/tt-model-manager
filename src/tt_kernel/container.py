@@ -444,7 +444,17 @@ def logs(name: str, follow: bool = False) -> int:
     return _run(argv).returncode
 
 
-def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> bool:
+@dataclass(frozen=True)
+class ReadyResult:
+    """Why the wait ended. ``ready`` alone cannot say WHY it failed, and "the server did
+    not report ready" is a useless thing to print when the container actually crashed."""
+
+    ready: bool
+    exited: bool           # the log stream closed => the container is gone
+    tail: List[str]        # last lines seen, for a failure card
+
+
+def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> ReadyResult:
     """Follow the container's logs until the launcher's ready line appears.
 
     The generous default timeout is not padding: a cold boot JIT-compiles kernels, which
@@ -464,6 +474,7 @@ def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> bool
     # SILENT. The old `for line in proc.stdout` only checked the deadline after a line
     # arrived, so a booted-but-hung container (no output, no crash) blocked forever.
     lines: "queue.Queue[Optional[str]]" = queue.Queue()
+    tail: List[str] = []
 
     def _pump() -> None:
         for line in proc.stdout:  # type: ignore[union-attr]
@@ -475,15 +486,20 @@ def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> bool
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return False
+                return ReadyResult(False, False, tail[-20:])
             try:
                 line = lines.get(timeout=min(remaining, 5.0))
             except queue.Empty:
                 continue  # silent container: re-check the deadline and keep waiting
             if line is None:
-                return False  # container exited before the probe appeared
-            echo(line.rstrip("\n"))
+                # EOF: the container exited before the probe appeared. The reason is in
+                # what it printed on the way out, so hand that back rather than a bare
+                # "not ready".
+                return ReadyResult(False, True, tail[-20:])
+            stripped = line.rstrip("\n")
+            tail.append(stripped)
+            echo(stripped)
             if probe in line:
-                return True
+                return ReadyResult(True, False, tail[-20:])
     finally:
         proc.terminate()
