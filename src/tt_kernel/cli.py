@@ -1310,8 +1310,10 @@ def unpublish(
 def rm(
     repo_id: str = typer.Argument(..., help="Installed bundle as namespace/name."),
     keep_cache: bool = typer.Option(
-        False, "--keep-cache", help="For a container package: keep the JIT kernel cache, "
-        "so a later pull of the same model boots fast instead of recompiling (~10 min)."
+        False, "--keep-cache", help="For a container package: keep the host caches — JIT "
+        "kernels AND converted weights — so a later pull of the same model boots fast "
+        "instead of recompiling (~10 min) and reconverting. The weight cache is roughly "
+        "the size of the weights themselves (105 GB for FLUX.2), so this can keep a lot."
     ),
     include_weights: bool = typer.Option(
         False, "--include-weights", help="For a container package: ALSO delete the model "
@@ -1322,8 +1324,9 @@ def rm(
     """Remove a locally installed bundle and its index entry.
 
     For a container (v5.1) package this removes the containers, the docker image, the
-    pulled manifest, the kernel cache and the package's own snapshot in the HF cache.
-    For a v5/v6 bundle it removes the per-model venv and files.
+    pulled manifest, both host caches (JIT kernels and converted weights) and the
+    package's own snapshot in the HF cache. For a v5/v6 bundle it removes the per-model
+    venv and files.
 
     Weights are kept unless ``--include-weights``: they are shared with everything else on
     the host and are a pointer rather than part of the package.
