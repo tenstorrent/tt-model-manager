@@ -1140,12 +1140,6 @@ def serve(
         False, "--follow", help="For a container package: wait for the server to report "
         "ready, streaming the boot (a cold boot JIT-compiles kernels, ~10 min)."
     ),
-    refresh: bool = typer.Option(
-        False, "--refresh", help="Before serving an already-installed package, re-pull it if "
-        "the Hub has a newer revision (so a republished source is not served stale). No-op "
-        "when already up to date, --local-only, --print, or the install has no recorded "
-        "revision; any failure warns and serves the existing install unchanged."
-    ),
     port: Optional[int] = typer.Option(
         None, "--port", help="Serve on this port instead of the bundle's/manifest's. For a "
         "container package it moves BOTH the published mapping and the server's own "
@@ -1153,12 +1147,14 @@ def serve(
         "bundle it is appended to the launch command, where argparse last-wins."
     ),
     refresh: bool = typer.Option(
-        False, "--refresh", help="Before serving an already-installed self-contained bundle, "
-        "re-pull and re-install it if the Hub has a newer revision (so a republished source "
-        "isn't served with stale launch params). This is the only thing that overrides "
-        "--no-update-check and hits the Hub; a refresh that fails for any reason (offline, "
-        "missing manifest, failed rebuild) warns and serves the existing install unchanged. "
-        "No-op when already up to date, --local-only, or the install has no recorded revision."
+        False, "--refresh", help="Before serving an already-installed package, re-pull it if "
+        "the Hub has a newer revision (so a republished source isn't served with stale launch "
+        "params). Applies to every path: a v5/v6 bundle is re-installed, a v5.1 container "
+        "package has its image reloaded when the digest differs. This is the only thing that "
+        "overrides --no-update-check and hits the Hub; a refresh that fails for any reason "
+        "(offline, missing manifest, failed rebuild) warns and serves the existing install "
+        "unchanged. No-op when already up to date, --local-only, --print, or the install has "
+        "no recorded revision."
     ),
 ) -> None:
     """Serve a self-contained bundle from its own venv, via its ``run.sh``.
