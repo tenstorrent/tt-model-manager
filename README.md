@@ -185,12 +185,33 @@ tt-model pull you/mymodel --with-weights           # ...and also pre-download th
 automatically on push. See **[docs/self_contained_packages.md](docs/self_contained_packages.md)**
 (v5) and **[docs/thin_packages.md](docs/thin_packages.md)** (v6).
 
-### Repo visibility
+### push vs. public vs. publish
 
-`push` / `package` / `package-thin` create a new repo `--private` by default; pass `--public`
-to make it public (shared by link) without listing it. A push never lists your bundle in the
-community catalog on its own — that is a separate opt-in (`--publish`, which implies `--public`,
-or `tt-model publish` later).
+These are three independent things — keeping them straight is the whole model:
+
+| Concept | What it does | Flag |
+|---|---|---|
+| **push** | Upload the bundle's files to an HF repo. | `package` / `package-thin` / `push` |
+| **public / private** | The repo's **visibility**. | `--public` / `--private` |
+| **publish** | List the repo in the community **catalog** (a public pointer index). | `--publish`, or `tt-model publish` later |
+
+Two rules make this predictable and safe:
+
+- **Private by default.** `push`, `package`, and `package-thin` all create a **new** repo
+  **private** — a bundle can point at proprietary weights, so nothing is ever made public by
+  omission. Pass `--public` to share openly; pass `--private` to be explicit. Pushing to a repo
+  that **already exists never changes its visibility** unless you pass the flag, and a change is
+  always announced (`! Changed visibility …`).
+- **`--publish` requires `--public`.** The catalog is a public index that can only see public
+  repos, so listing a private one is meaningless — `--publish` on its own (default private) is
+  refused before anything is uploaded. Publishing is otherwise a pure pointer opt-in: the catalog
+  stores none of your content and the repo stays under your governance.
+
+```bash
+tt-model package you/mymodel               # private repo, not listed  (the default)
+tt-model package you/mymodel --public      # public repo, not listed  (shared by link)
+tt-model package you/mymodel --public --publish   # public repo, listed in the catalog
+```
 
 ## Community catalog
 

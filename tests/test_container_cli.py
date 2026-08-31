@@ -420,15 +420,19 @@ def test_publish_requires_public_for_a_container_push(tmp_path, monkeypatch):
     assert calls == []  # nothing was uploaded
 
 
-def test_publish_gate_reaches_ensure_repo_for_an_existing_private_repo(tmp_path, monkeypatch):
-    """--publish must be threaded into _ensure_repo, which owns the existing-repo guard."""
-    seen = {}
-    monkeypatch.setattr(container_cli, "push_container", lambda *a, **k: None)
-    monkeypatch.setattr(hub, "set_catalog_listing", lambda *a, **k: None)
-    monkeypatch.setattr(cli, "_ensure_repo",
-                        lambda repo_id, private, **k: seen.update(k))
-    runner.invoke(cli.app, ["push", str(_staged(tmp_path)), "--publish"])
-    assert seen["publish"] is True
+def test_publish_alone_is_refused_without_public(tmp_path, monkeypatch):
+    """--publish requires an EXPLICIT --public. The default visibility is private, and a private
+    repo can't be listed in the public catalog, so `--publish` on its own (private by default) is
+    refused up front — nothing is created, uploaded, or listed."""
+    calls = []
+    monkeypatch.setattr(container_cli, "push_container", lambda *a, **k: calls.append("upload"))
+    monkeypatch.setattr(hub, "set_catalog_listing", lambda *a, **k: calls.append("list"))
+    monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: calls.append("ensure"))
+
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path)), "--publish"])
+    assert res.exit_code == 1
+    assert "--public" in res.output
+    assert calls == []  # refused before touching the Hub
 
 
 def test_a_failed_listing_does_not_read_as_a_failed_push(tmp_path, monkeypatch):
