@@ -61,6 +61,81 @@ VLLM_METADATA_NAME = "vllm_metadata.json"
 # torch is the CPU build for Tenstorrent (never CUDA); requirements install uses this index.
 _PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 
+
+class StagingError(RuntimeError):
+    """Staging the embedded ``metal/`` tree failed part-way through.
+
+    ``shutil.copytree`` walks the whole source before raising, so a failure (EACCES on a
+    root-owned build artifact, ENOSPC mid-copy, a socket/fifo) surfaces only at the end with a
+    raw traceback. This carries the offending source paths so the CLI can render the repo's
+    styled error instead. ``paths`` is a list of human-readable ``"<path>: <why>"`` strings.
+    """
+
+    def __init__(self, message: str, paths: Optional[List[str]] = None) -> None:
+        super().__init__(message)
+        self.paths = paths or []
+
+
+# Basenames excluded at EVERY depth of the metal tree (VCS, byte-caches, venvs, logs, loose
+# per-type build dirs). Mirrors the pre-existing ignore_patterns list unchanged.
+_METAL_IGNORE_ANYWHERE = shutil.ignore_patterns(
+    "__pycache__", "*.pyc", ".git", "venv", ".venv", "model_cache",
+    "generated", "*.log", ".pytest_cache", "dist", "build_*",
+)
+# Regenerable multi-GB caches (~3.7/~4/~2 GB) and build output, excluded ONLY at the tree ROOT —
+# mirroring tt-metal's own .gitignore anchoring (e.g. ``/python_env/``). Anchoring at the root
+# keeps a tracked NESTED dir of the same basename (e.g. tt_metal/python_env/requirements-dev.txt)
+# from silently vanishing. ``build`` is the ``build -> build_Release`` symlink build_metal.sh
+# creates; ``built``/``built_kernels`` are tt-metal's generated kernel caches (its .gitignore).
+_METAL_IGNORE_ROOT_ONLY = frozenset(
+    {".cpmcache", "python_env", "tt_cache", "build", "built", "built_kernels"}
+)
+
+
+def _normalize_staged_symlinks(root: Path) -> None:
+    """Make the staged ``metal/`` tree self-contained after a ``symlinks=True`` copytree.
+
+    Copying links as links (rather than following them) means the staged tree can hold links that
+    dangle (their target was excluded, e.g. ``build -> build_Release``) or point OUTSIDE the tree
+    (an absolute path that leaks the author's host, or a ``..`` escape). Neither belongs in a
+    shipped artifact — a dereferencing copy (``cp -rL``, ``rsync -aL``, ``tar -czhf``) breaks on a
+    dangling link, and ``hub.push_folder`` silently drops symlinked directories, so a ``--out``
+    bundle and the same bundle after push/pull would diverge. Walk the tree and, per symlink:
+
+    * dangling (target missing, or a symlink loop) -> drop it;
+    * resolves INSIDE ``root`` -> keep it (a self-contained relative link);
+    * resolves OUTSIDE ``root`` -> replace it with a real copy of the target (file or directory)
+      so nothing leaks and the bundle carries the content the pre-change copytree used to embed.
+    """
+    root = root.resolve()
+
+    def _normalize_link(link: Path) -> None:
+        try:
+            target = link.resolve(strict=True)  # follows the chain; strict flags a missing target
+        except (OSError, RuntimeError):
+            link.unlink()  # dangling target or a symlink loop -> no bundle should ship it
+            return
+        try:
+            target.relative_to(root)
+            return  # inside the staged tree already: a self-contained link, keep as-is
+        except ValueError:
+            pass  # points outside -> materialize below so the host path never ships
+        link.unlink()
+        if target.is_dir():
+            shutil.copytree(target, link, symlinks=True)
+            _walk(link)  # the fresh copy may itself carry links that escape the tree
+        else:
+            shutil.copy2(target, link)
+
+    def _walk(directory: Path) -> None:
+        for entry in list(directory.iterdir()):  # snapshot: we mutate as we go
+            if entry.is_symlink():
+                _normalize_link(entry)
+            elif entry.is_dir():  # a real dir (symlinks handled above, never followed)
+                _walk(entry)
+
+    _walk(root)
+
 # A wheel filename is: {distribution}-{version}(-{build})?-{python}-{abi}-{platform}.whl
 # (PEP 427). We only need the trailing three compatibility tags.
 _WHEEL_RE = re.compile(r"^(?P<dist>.+?)-(?P<ver>[^-]+)(-\d[^-]*)?-(?P<py>[^-]+)-(?P<abi>[^-]+)-(?P<plat>[^-]+)\.whl$")
@@ -447,18 +522,38 @@ def stage_package(
     # Embed the author's modified metal-community tree (skip caches/venvs/artifacts).
     # symlinks=True: copy links as links instead of following them. A built tt-metal
     # checkout normally has dangling symlinks; following them (the default) makes
-    # copytree raise. .cpmcache/python_env/tt_cache are regenerable multi-GB caches
-    # (~3.7GB/~4GB/~2GB) — embedding them defeats the point of shipping wheels.
-    shutil.copytree(
-        metal_dir,
-        staged / METAL_DIR,
-        symlinks=True,
-        ignore=shutil.ignore_patterns(
-            "__pycache__", "*.pyc", ".git", "venv", ".venv", "model_cache",
-            "generated", "*.log", ".pytest_cache", "dist", "build_*",
-            ".cpmcache", "python_env", "tt_cache",
-        ),
-    )
+    # copytree raise. The root-anchored excludes (.cpmcache/python_env/tt_cache/build/...)
+    # are regenerable multi-GB caches + build output — embedding them defeats the point
+    # of shipping wheels. _normalize_staged_symlinks then makes the tree self-contained.
+    metal_root = metal_dir.resolve()
+
+    def _ignore(src, names):
+        ignored = set(_METAL_IGNORE_ANYWHERE(src, names))
+        if Path(src).resolve() == metal_root:  # root-anchored only, mirroring tt-metal's .gitignore
+            ignored |= _METAL_IGNORE_ROOT_ONLY.intersection(names)
+        return ignored
+
+    try:
+        shutil.copytree(metal_dir, staged / METAL_DIR, symlinks=True, ignore=_ignore)
+    except shutil.Error as exc:  # per-entry failures accumulated across the whole walk
+        details = []
+        for item in (exc.args[0] if exc.args else []):
+            try:
+                src_p, _dst, why = item
+                details.append(f"{src_p}: {why}")
+            except (TypeError, ValueError):
+                details.append(str(item))
+        raise StagingError(
+            f"Failed to stage the embedded metal tree from {metal_dir}.", details
+        ) from exc
+    except OSError as exc:  # EACCES/ENOSPC, and SpecialFileError (socket/fifo) — both OSError
+        where = getattr(exc, "filename", None) or metal_dir
+        raise StagingError(
+            f"Failed to stage the embedded metal tree from {metal_dir}: {exc}", [str(where)]
+        ) from exc
+
+    # Make the staged tree self-contained: drop dangling links, materialize any that escape it.
+    _normalize_staged_symlinks(staged / METAL_DIR)
 
     # requirements.txt: prefer the metal tree's, else a minimal note.
     req_src = metal_dir / "requirements.txt"
@@ -704,4 +799,5 @@ __all__ = [
     "render_run_sh",
     "stage_package",
     "stage_thin_package",
+    "StagingError",
 ]

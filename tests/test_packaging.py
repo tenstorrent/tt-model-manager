@@ -149,31 +149,52 @@ def test_stage_package_layout(tmp_path):
 
 
 def test_stage_package_dangling_symlink_and_cache_excludes(tmp_path):
-    """A built metal tree has dangling symlinks + multi-GB regenerable caches.
+    """A built metal tree has dangling symlinks, host-absolute links, and multi-GB caches.
 
-    copytree must copy links as links (not follow → no crash on dangling ones) and
-    exclude .cpmcache/python_env/tt_cache (they defeat the point of shipping wheels).
+    copytree copies links as links (no crash on dangling ones), the excludes are ROOT-anchored
+    (a nested dir of the same basename survives), and the staged tree is then normalized so it
+    ships NO dangling links and NO links that leak the author's host path.
     """
     wheels = tmp_path / "in_wheels"
     wheels.mkdir()
     ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
 
+    # A real directory OUTSIDE the metal tree (the author's box); a link into it must materialize.
+    outside = tmp_path / "outside_real"
+    outside.mkdir()
+    (outside / "data.txt").write_text("outside content\n")
+
     metal = tmp_path / "metal_src"
     metal.mkdir()
     (metal / "requirements.txt").write_text("torch==2.11.0\n")
     (metal / "real.py").write_text("# real file\n")
-    (metal / "foo").symlink_to("nonexistent")            # dangling symlink (crashes default copytree)
-    (metal / ".cpmcache").mkdir()
-    (metal / ".cpmcache" / "big.bin").write_bytes(b"x" * 16)
-    (metal / "python_env").mkdir()
-    (metal / "python_env" / "junk").write_bytes(b"y" * 16)
-    (metal / "tt_cache").mkdir()
-    (metal / "tt_cache" / "blob").write_bytes(b"z" * 16)
+    # root-level dangling link (must NOT crash copytree, must be dropped by normalization)
+    (metal / "foo").symlink_to("nonexistent")
+    # a self-contained relative link INTO the tree — must be kept
+    (metal / "alias.py").symlink_to("real.py")
+    # `build -> build_Release`, exactly what build_metal.sh creates; target present but ROOT-excluded
+    (metal / "build_Release").mkdir()
+    (metal / "build_Release" / "libttnn.so").write_bytes(b"\x7fELF" + b"\x00" * 32)
+    (metal / "build").symlink_to("build_Release")
+    # a link to a real dir OUTSIDE the tree — must be replaced by a real recursive copy
+    (metal / "linked_outside").symlink_to(outside)
+    # depth-3 ABSOLUTE dangling link (issue #38's real shape) — must be dropped, not shipped broken
+    umd = metal / "tt_metal" / "third_party" / "umd"
+    umd.mkdir(parents=True)
+    (umd / "keep.cpp").write_text("// real\n")
+    (umd / "compile_commands.json").symlink_to("/nonexistent/build_Release/compile_commands.json")
+    # NESTED python_env — root-anchoring must KEEP this while dropping the root one
+    (metal / "tt_metal" / "python_env").mkdir()
+    (metal / "tt_metal" / "python_env" / "keep.txt").write_text("tracked nested file\n")
+    # root-level regenerable caches / build output — all excluded
+    for cache in (".cpmcache", "python_env", "tt_cache", "built", "built_kernels"):
+        (metal / cache).mkdir()
+        (metal / cache / "blob").write_bytes(b"z" * 16)
 
     vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
     staged = tmp_path / "staged"
 
-    # Must NOT raise on the dangling symlink.
+    # Must NOT raise on any dangling symlink.
     packaging.stage_package(
         staged,
         name="llama-3.2-3b-tt",
@@ -186,13 +207,59 @@ def test_stage_package_dangling_symlink_and_cache_excludes(tmp_path):
 
     dst_metal = staged / "metal"
     assert (dst_metal / "real.py").is_file()
-    # dangling symlink preserved AS a symlink (not followed, not dereferenced)
-    assert (dst_metal / "foo").is_symlink()
-    assert os.readlink(dst_metal / "foo") == "nonexistent"
-    # regenerable multi-GB caches excluded
-    assert not (dst_metal / ".cpmcache").exists()
-    assert not (dst_metal / "python_env").exists()
-    assert not (dst_metal / "tt_cache").exists()
+    # a self-contained relative link is preserved as a link
+    assert (dst_metal / "alias.py").is_symlink()
+    assert os.readlink(dst_metal / "alias.py") == "real.py"
+    # root-level dangling link dropped
+    assert not (dst_metal / "foo").is_symlink() and not (dst_metal / "foo").exists()
+    # `build` link dropped (its target was excluded) — never shipped as a dangling link
+    assert not (dst_metal / "build").is_symlink()
+    assert not (dst_metal / "build_Release").exists()  # excluded build output
+    # link to an OUTSIDE dir materialized as a real copy (no leaked host-absolute link)
+    assert (dst_metal / "linked_outside").is_dir()
+    assert not (dst_metal / "linked_outside").is_symlink()
+    assert (dst_metal / "linked_outside" / "data.txt").read_text() == "outside content\n"
+    # depth-3 absolute dangling link dropped; its sibling real file survives
+    assert (dst_metal / "tt_metal" / "third_party" / "umd" / "keep.cpp").is_file()
+    assert not (dst_metal / "tt_metal" / "third_party" / "umd" / "compile_commands.json").is_symlink()
+    # ROOT-anchoring: nested python_env kept, root python_env (+ other caches) dropped
+    assert (dst_metal / "tt_metal" / "python_env" / "keep.txt").read_text() == "tracked nested file\n"
+    for cache in (".cpmcache", "python_env", "tt_cache", "built", "built_kernels"):
+        assert not (dst_metal / cache).exists()
+    # The invariant that matters for a shipped artifact: no dangling links anywhere.
+    assert not any(p.is_symlink() and not p.exists() for p in dst_metal.rglob("*"))
+
+
+def test_stage_package_special_file_raises_styled_error(tmp_path):
+    """A copytree abort (here a fifo → SpecialFileError) surfaces as StagingError with the path,
+    not a raw traceback; the CLI renders it via _err (non-zero exit, no crash)."""
+    import pytest
+
+    wheels = tmp_path / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
+    metal = tmp_path / "metal_src"
+    metal.mkdir()
+    (metal / "requirements.txt").write_text("torch==2.11.0\n")
+    os.mkfifo(metal / "a_socket")  # copytree cannot copy a fifo → shutil.Error at end of walk
+
+    vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
+    with pytest.raises(packaging.StagingError) as ei:
+        packaging.stage_package(
+            tmp_path / "staged", name="m", arch="blackhole", ttnn_wheel=ttnn,
+            metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
+        )
+    assert any("a_socket" in p for p in ei.value.paths)
+
+    # And through the CLI: styled error, non-zero exit, no traceback.
+    res = _runner.invoke(
+        cli.app,
+        ["package", "--from-metal", str(metal), "--ttnn-wheel", str(ttnn),
+         "--arch", "blackhole", "--arch-name", "X", "--main-class", "m:C",
+         "--no-repair", "--no-vendor-deps", "--out", str(tmp_path / "s")],
+    )
+    assert res.exit_code == 1
+    assert "metal tree" in res.output
 
 
 def test_cli_package_stage_only(tmp_path):
