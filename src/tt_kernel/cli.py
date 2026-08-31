@@ -458,8 +458,8 @@ def package(
         None, "--private/--public", help="Repo visibility, applied when the repo is CREATED "
         "(default: private); an existing repo is left as-is unless you pass the flag."),
     publish: bool = typer.Option(
-        False, "--publish", help="Also list the pushed repo in the community catalog. Separate "
-        "from visibility, and requires --public (the catalog is a public index)."),
+        False, "--publish", help="Also list the pushed repo in the community catalog. Implies --public "
+        "(the catalog is a public index); use --public alone to make the repo public but NOT listed."),
 ) -> None:
     """Package what's on your box into ONE self-contained (v5) bundle and (optionally) push it.
 
@@ -485,8 +485,12 @@ def package(
             "(or pass --container <tt-model.yaml> to build a container package instead)."
         )
 
-    if publish and private is not False:  # None (default private) or True both fail: publish needs public
-        raise _err("--publish requires --public (a catalog listing is public by definition).")
+    if publish and private is True:  # explicit --private contradicts --publish
+        raise _err("--publish and --private conflict: a catalog listing is public by definition. "
+                   "Use --publish alone (it makes the repo public), or --public without --publish "
+                   "to make the repo public but NOT listed.")
+    if publish:
+        private = False  # --publish implies --public: a listed repo is public by definition
     if repo_id is None and not out:
         raise _err("Nothing to do: pass a target repo_id to push, or --out to stage locally.")
 
@@ -651,8 +655,8 @@ def package_thin(
         None, "--private/--public", help="Repo visibility, applied when the repo is CREATED "
         "(default: private); an existing repo is left as-is unless you pass the flag."),
     publish: bool = typer.Option(
-        False, "--publish", help="Also list the pushed repo in the community catalog. Separate "
-        "from visibility, and requires --public (the catalog is a public index)."),
+        False, "--publish", help="Also list the pushed repo in the community catalog. Implies --public "
+        "(the catalog is a public index); use --public alone to make the repo public but NOT listed."),
 ) -> None:
     """Package a v6 THIN bundle (issue #29): ship ``model.py`` + pip dependency pins
     (ttnn / TTTv2 / models wheel) + optional ``generic_op`` wheels. The per-model venv is built from
@@ -663,8 +667,12 @@ def package_thin(
     real; until then the generated requirements.txt carries TODO pins for those two (ttnn already
     resolves from PyPI).
     """
-    if publish and private is not False:  # None (default private) or True both fail: publish needs public
-        raise _err("--publish requires --public (a catalog listing is public by definition).")
+    if publish and private is True:  # explicit --private contradicts --publish
+        raise _err("--publish and --private conflict: a catalog listing is public by definition. "
+                   "Use --publish alone (it makes the repo public), or --public without --publish "
+                   "to make the repo public but NOT listed.")
+    if publish:
+        private = False  # --publish implies --public: a listed repo is public by definition
     if repo_id is None and not out:
         raise _err("Nothing to do: pass a repo_id to push, or --out to stage locally.")
     model_path = Path(model_py).expanduser()
@@ -1430,25 +1438,31 @@ def search(
 # ----------------------------------------------------------------------- publish
 @app.command(rich_help_panel="Publish models")
 def publish(
-    repo_id: str = typer.Argument(..., help="An already-pushed public bundle as namespace/name."),
+    repo_id: str = typer.Argument(..., help="An already-pushed bundle as namespace/name."),
 ) -> None:
-    """List an existing public bundle in the community catalog (opt-in).
+    """List an existing bundle in the community catalog (opt-in).
 
-    Use this to add a bundle you pushed earlier without ``--publish``. The catalog only
-    ever holds a pointer to your public HF repo; it stores none of your content, and your
-    repo stays entirely under your governance. Delist with ``tt-model unpublish``.
+    Use this to add a bundle you pushed earlier without ``--publish``. The catalog is a public
+    index, so publishing makes the repo public first: if it is private, this makes it public
+    (announced) and then lists it. The catalog only ever holds a pointer to your public HF repo;
+    it stores none of your content, and your repo stays under your governance. Delist with
+    ``tt-model unpublish`` (delisting does not make the repo private again).
     """
     try:
-        if hub.is_private(repo_id):
-            raise _err(f"{repo_id} is private; the catalog is public. Make it public first "
-                       "(`tt-model push ... --public`) before listing.")
-    except typer.Exit:
-        raise
+        was_private = hub.is_private(repo_id)
     except Exception as exc:  # noqa: BLE001
         raise _err(f"Could not read {repo_id} on the Hub: {exc}")
+    if was_private:
+        # The catalog is public by definition; publishing implies public (same as the --publish
+        # flag on push). Make the visibility change loud — it is never a silent side effect.
+        typer.secho(
+            f"! {repo_id} is private — making it public so it can be listed in the public catalog.",
+            fg=typer.colors.YELLOW,
+        )
+        hub.set_visibility(repo_id, private=False)
     hub.set_catalog_listing(repo_id, listed=True)
     typer.secho(
-        f"✓ Listed {repo_id} in the community catalog (pointer only; content stays yours). "
+        f"✓ Listed {repo_id} in the community catalog (public pointer only; content stays yours). "
         f"Delist with `tt-model unpublish {repo_id}`.",
         fg=typer.colors.GREEN,
     )
@@ -1619,8 +1633,8 @@ def push(
         "visibility and says so; omitting it leaves visibility exactly as it is."
     ),
     publish: bool = typer.Option(
-        False, "--publish", help="Also list the pushed repo in the community catalog. Separate "
-        "from visibility, and requires --public (the catalog is a public index)."
+        False, "--publish", help="Also list the pushed repo in the community catalog. Implies --public "
+        "(the catalog is a public index); use --public alone to make the repo public but NOT listed."
     ),
 ) -> None:
     """Publish a CONTAINER (v5.1) package directory to the Hub.
@@ -1633,8 +1647,12 @@ def push(
     ``--publish`` adds the community-catalog tag after the upload, exactly as
     ``tt-model publish`` would. The catalog only ever holds a pointer to your public repo.
     """
-    if publish and private is not False:  # None (default private) or True both fail: publish needs public
-        raise _err("--publish requires --public (a catalog listing is public by definition).")
+    if publish and private is True:  # explicit --private contradicts --publish
+        raise _err("--publish and --private conflict: a catalog listing is public by definition. "
+                   "Use --publish alone (it makes the repo public), or --public without --publish "
+                   "to make the repo public but NOT listed.")
+    if publish:
+        private = False  # --publish implies --public: a listed repo is public by definition
     from . import container_cli
 
     out = Path(staged_dir).expanduser()

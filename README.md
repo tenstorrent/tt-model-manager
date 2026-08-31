@@ -202,15 +202,17 @@ Two rules make this predictable and safe:
   omission. Pass `--public` to share openly; pass `--private` to be explicit. Pushing to a repo
   that **already exists never changes its visibility** unless you pass the flag, and a change is
   always announced (`! Changed visibility …`).
-- **`--publish` requires `--public`.** The catalog is a public index that can only see public
-  repos, so listing a private one is meaningless — `--publish` on its own (default private) is
-  refused before anything is uploaded. Publishing is otherwise a pure pointer opt-in: the catalog
-  stores none of your content and the repo stays under your governance.
+- **`--publish` implies `--public`.** The catalog is a public index that can only see public
+  repos, so publishing makes the repo public and lists it in one step — you never pass both flags.
+  `--public` on its own makes the repo public **without** listing it (shared by link, not
+  advertised). `--publish` combined with `--private` is a contradiction and is refused. Publishing
+  is a pure pointer opt-in: the catalog stores none of your content and the repo stays under your
+  governance.
 
 ```bash
 tt-model package you/mymodel               # private repo, not listed  (the default)
-tt-model package you/mymodel --public      # public repo, not listed  (shared by link)
-tt-model package you/mymodel --public --publish   # public repo, listed in the catalog
+tt-model package you/mymodel --public      # public repo, not listed   (shared by link)
+tt-model package you/mymodel --publish     # public repo, listed in the catalog (implies --public)
 ```
 
 ## Community catalog

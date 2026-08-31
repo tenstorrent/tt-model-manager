@@ -407,8 +407,9 @@ def test_a_container_push_without_publish_lists_nothing(tmp_path, monkeypatch):
     assert calls == []
 
 
-def test_publish_requires_public_for_a_container_push(tmp_path, monkeypatch):
-    """The catalog is public by definition — refuse before anything is uploaded."""
+def test_publish_with_private_is_a_conflict(tmp_path, monkeypatch):
+    """--publish implies public; combining it with --private is a contradiction, refused before
+    anything is uploaded."""
     calls = []
     monkeypatch.setattr(container_cli, "push_container",
                         lambda *a, **k: calls.append("upload"))
@@ -416,23 +417,25 @@ def test_publish_requires_public_for_a_container_push(tmp_path, monkeypatch):
 
     res = runner.invoke(cli.app, ["push", str(_staged(tmp_path)), "--private", "--publish"])
     assert res.exit_code == 1
-    assert "--public" in res.output
+    assert "--public" in res.output  # the message explains publish is public
     assert calls == []  # nothing was uploaded
 
 
-def test_publish_alone_is_refused_without_public(tmp_path, monkeypatch):
-    """--publish requires an EXPLICIT --public. The default visibility is private, and a private
-    repo can't be listed in the public catalog, so `--publish` on its own (private by default) is
-    refused up front — nothing is created, uploaded, or listed."""
-    calls = []
-    monkeypatch.setattr(container_cli, "push_container", lambda *a, **k: calls.append("upload"))
-    monkeypatch.setattr(hub, "set_catalog_listing", lambda *a, **k: calls.append("list"))
-    monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: calls.append("ensure"))
+def test_publish_alone_implies_public_and_lists(tmp_path, monkeypatch):
+    """--publish on its own needs no separate --public: it makes the repo public (private=False
+    into _ensure_repo) and lists it. No two-flag dance."""
+    seen = {"ensure_private": "unset", "order": []}
+    monkeypatch.setattr(container_cli, "push_container",
+                        lambda *a, **k: seen["order"].append("upload"))
+    monkeypatch.setattr(cli, "_ensure_repo",
+                        lambda repo_id, private: seen.update(ensure_private=private))
+    monkeypatch.setattr(hub, "set_catalog_listing",
+                        lambda repo_id, listed: seen["order"].append(("list", repo_id, listed)))
 
-    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path)), "--publish"])
-    assert res.exit_code == 1
-    assert "--public" in res.output
-    assert calls == []  # refused before touching the Hub
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen")), "--publish"])
+    assert res.exit_code == 0, res.output
+    assert seen["ensure_private"] is False  # --publish forced public
+    assert seen["order"] == ["upload", ("list", "raahem/qwen", True)]  # listed after the upload
 
 
 def test_a_failed_listing_does_not_read_as_a_failed_push(tmp_path, monkeypatch):

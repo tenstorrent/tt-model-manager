@@ -69,7 +69,7 @@ def _model_py(tmp_path: Path) -> Path:
     return p
 
 
-def _thin_argv(tmp_path, repo="me/thin", *extra):
+def _thin_argv(tmp_path, *extra, repo="me/thin"):
     return [
         "package-thin", repo, "--model-py", str(_model_py(tmp_path)),
         "--arch", "blackhole", "--arch-name", "QwenForCausalLM", "--main-class", "model:C",
@@ -93,15 +93,32 @@ def test_package_thin_routes_creation_through_ensure_repo_private_by_default(mon
     assert seen == {"repo": "me/thin", "private": None}  # tri-state None => _ensure_repo makes it private
 
 
-def test_package_thin_publish_requires_public(monkeypatch, tmp_path):
-    # --publish without --public is refused up front (default is private; the catalog is public).
+def test_package_thin_publish_implies_public(monkeypatch, tmp_path):
+    # --publish needs no separate --public: it forces public (private=False into _ensure_repo) and
+    # lists (package/package-thin list by writing the catalog tag via tag_repo). One flag, not two.
+    from tt_kernel import TT_MODEL_CATALOG_TAG
+
+    seen = {"ensure_private": "unset", "tags": None}
+    monkeypatch.setattr(cli, "_ensure_repo",
+                        lambda repo_id, private: seen.update(ensure_private=private))
+    monkeypatch.setattr(hub, "push_folder", lambda *a, **k: None)
+    monkeypatch.setattr(hub, "tag_repo", lambda repo_id, tags: seen.update(tags=list(tags)))
+
+    res = runner.invoke(cli.app, _thin_argv(tmp_path, "--publish"))
+    assert res.exit_code == 0, res.output
+    assert seen["ensure_private"] is False  # --publish implied --public
+    assert TT_MODEL_CATALOG_TAG in seen["tags"]  # and listed it (catalog tag written)
+
+
+def test_package_thin_publish_with_private_conflicts(monkeypatch, tmp_path):
+    # The one refusal: --publish (public by definition) can't be combined with --private.
     calls = []
     monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: calls.append("ensure"))
     monkeypatch.setattr(hub, "push_folder", lambda *a, **k: calls.append("push"))
-    res = runner.invoke(cli.app, _thin_argv(tmp_path, "--publish"))
+    res = runner.invoke(cli.app, _thin_argv(tmp_path, "--publish", "--private"))
     assert res.exit_code == 1
-    assert "--public" in res.output
-    assert calls == []  # nothing created or pushed
+    assert "--public" in res.output  # message points at the resolution
+    assert calls == []  # refused before anything happens
 
 
 def pytest_fail(msg):  # tiny helper so the lambdas above read cleanly
