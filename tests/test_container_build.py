@@ -243,13 +243,53 @@ def test_builtin_models_is_suppressed_only_when_an_extension_ships(tmp_path, mon
     assert ext.build_args["EXTRA_MODELS_DIR"].endswith("/extra_models")
 
 
-def test_the_image_tag_encodes_the_build_not_the_hardware(tmp_path, monkeypatch):
-    """One image serves every profile, so the tag names the metal commit."""
+def test_the_build_tag_is_provisional(tmp_path, monkeypatch):
+    """`stage` cannot know the image's digest — it does not exist until the build runs — so
+    it names the output provisionally and `finalize` retags by digest."""
     _no_network(monkeypatch)
     metal = _fake_metal(tmp_path)
     staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
-    assert staged.image.startswith("tt-model/my-model:")
-    assert staged.image.split(":")[1] == staged.built["tt_metal"]["sha"][:9]
+    assert staged.image == f"tt-model/my-model:build-{staged.built['tt_metal']['sha'][:9]}"
+    assert staged.digest is None
+
+
+def test_the_published_tag_is_the_image_digest(tmp_path, monkeypatch):
+    """The old tag came from tt-metal's HEAD, which is not the image's identity: a
+    republish that changed the plugin pin or the allowlist without moving that sha reused
+    the tag, so a consumer's pull skipped the load and served the previous image."""
+    _no_network(monkeypatch)
+    _fake_docker(tmp_path, monkeypatch, FAKE_DOCKER)
+    metal = _fake_metal(tmp_path)
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    build.run_build(staged)
+    final = build.retag_to_digest(staged)
+    assert final == "tt-model/my-model:ee5226aec965"
+    assert staged.digest.startswith("sha256:")
+    assert staged.built["image"] == final
+    assert staged.built["image_digest"] == staged.digest
+
+
+def test_two_builds_with_the_same_content_get_the_same_tag(tmp_path, monkeypatch):
+    """And the corollary: an unrelated commit in the metal tree no longer mints a new
+    10 GB tag for byte-identical content."""
+    _no_network(monkeypatch)
+    _fake_docker(tmp_path, monkeypatch, FAKE_DOCKER)
+    metal = _fake_metal(tmp_path)
+    tags = []
+    for i in range(2):
+        staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / f"out{i}")
+        build.run_build(staged)
+        tags.append(build.retag_to_digest(staged))
+    assert tags[0] == tags[1]
+
+
+def test_a_missing_digest_is_a_clear_error(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    _fake_docker(tmp_path, monkeypatch, 'exit 1\n')
+    metal = _fake_metal(tmp_path)
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    with pytest.raises(BuildError, match="could not read the digest"):
+        build.retag_to_digest(staged)
 
 
 # ------------------------------------------------------------------ model card
@@ -426,6 +466,15 @@ case "$1" in
     tar -C "$d" -cf - .
     exit 0 ;;
   run) echo "torch==2.11.0+cpu"; echo "vllm==0.24.0"; exit 0 ;;
+  image)
+    # `image inspect --format {{.Id}}` — the digest the final tag is derived from — and
+    # `image rm` for dropping the provisional tag.
+    case "$2" in
+      inspect) echo "sha256:ee5226aec96561844c9371059d44338202eff46d1a2572815b716215205cbb0d"; exit 0 ;;
+      rm) exit 0 ;;
+    esac
+    exit 1 ;;
+  tag) exit 0 ;;
 esac
 exit 1
 '''
@@ -899,3 +948,16 @@ def test_a_wheel_pattern_matching_nothing_is_an_error(tmp_path, monkeypatch):
         build.stage(_manifest_file(tmp_path, metal,
                                    runtime=_rt(vllm={"wheel": str(tmp_path / "vllm-*.whl")})),
                     out_root=tmp_path / "out")
+
+
+def test_the_source_commits_are_passed_as_build_args(tmp_path, monkeypatch):
+    """So `docker inspect <digest-tagged image>` can still answer which commits built it."""
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    assert staged.build_args["MODEL_TT_METAL_SHA"] == staged.built["tt_metal"]["sha"]
+    assert staged.build_args["MODEL_PLUGIN_SHA"] == staged.built["plugin"]["sha"]
+    # describe() is empty when the tree carries no release tag to describe from — a real
+    # checkout has one, this fixture does not. Passed through either way, never None.
+    assert staged.build_args["MODEL_TT_METAL_DESCRIBE"] == (
+        staged.built["tt_metal"]["describe"] or "")

@@ -99,6 +99,12 @@ def test_save_cleans_up_when_docker_fails(tmp_path, monkeypatch):
     assert not dest.exists()
 
 
+# Narrowed by MESSAGE, not module: a warning filter's module field matches where the
+# warning is ISSUED (the caller — tt_kernel.oci), not the module that raises it, so
+# "ignore::DeprecationWarning:tarfile" does not match. Verified: it does not suppress.
+@pytest.mark.filterwarnings(
+    "ignore:Python 3.14 will, by default, filter extracted tar archives:DeprecationWarning"
+)
 def test_extraction_works_without_the_data_filter(tmp_path, monkeypatch):
     """`extractall(filter="data")` only exists from Python 3.11.4, and this package
     declares requires-python >=3.9 — there it is a TypeError. The fallback must extract
@@ -124,6 +130,12 @@ def test_extraction_works_without_the_data_filter(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("evil", ["../escape", "/etc/passwd"])
+# Narrowed by MESSAGE, not module: a warning filter's module field matches where the
+# warning is ISSUED (the caller — tt_kernel.oci), not the module that raises it, so
+# "ignore::DeprecationWarning:tarfile" does not match. Verified: it does not suppress.
+@pytest.mark.filterwarnings(
+    "ignore:Python 3.14 will, by default, filter extracted tar archives:DeprecationWarning"
+)
 def test_the_fallback_refuses_members_that_escape_the_destination(tmp_path, monkeypatch, evil):
     """"It comes from the local docker daemon" is not a reason to extract ../ paths."""
     import tarfile

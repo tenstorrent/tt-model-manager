@@ -49,6 +49,9 @@ def _host_is_fine(monkeypatch):
     """
     monkeypatch.setattr(container, "preflight", lambda **k: [])
     monkeypatch.setattr(container, "image_present", lambda ref: True)
+    # The image is identified by its digest now, not by a tag being present. Default to
+    # "the right image is loaded"; tests about a missing or mismatched image override it.
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
 
 
 def _wire(tmp_path: Path, **over) -> Path:
@@ -191,9 +194,56 @@ def test_an_unknown_profile_is_refused_with_the_available_ones(tmp_path, monkeyp
 def test_follow_reports_when_the_server_never_became_ready(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "running", lambda name=None: [])
     monkeypatch.setattr(container, "run_checked", lambda argv: None)
-    monkeypatch.setattr(container, "wait_ready", lambda *a, **k: False)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(False, False, ["slow..."]))
     with pytest.raises(container_cli.ContainerCliError, match="did not report ready"):
         container_cli.serve_container(_manifest(tmp_path), follow=True)
+
+
+def test_follow_says_the_container_EXITED_when_it_did(tmp_path, monkeypatch):
+    """"did not report ready" is useless when the container crashed — the reason is in
+    what it printed on the way out."""
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(
+                            False, True, ["boom: could not open device"]))
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_manifest(tmp_path), follow=True)
+    msg = str(e.value)
+    assert "container exited" in msg
+    assert "boom: could not open device" in msg
+
+
+def test_a_rejected_passthrough_flag_is_blamed_by_name(tmp_path, monkeypatch):
+    """The exact failure from the field: `serve <target> --refresh` forwarded --refresh to
+    vLLM (serve declares ignore_unknown_options), the container started, and vLLM died on
+    argparse — while the message said only "did not report ready"."""
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(
+                            False, True, ["vllm: error: unrecognized arguments: --refresh"]))
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_manifest(tmp_path), follow=True,
+                                      extra_args=["--refresh"], target="org/x")
+    msg = str(e.value)
+    assert "--refresh was passed through to the engine" in msg
+    assert "must come BEFORE the target" in msg
+
+
+def test_a_still_running_container_is_not_reported_as_exited(tmp_path, monkeypatch):
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(False, False, ["still booting"]))
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_manifest(tmp_path), follow=True, target="org/x")
+    msg = str(e.value)
+    assert "still running" in msg and "tt-model stop org/x" in msg
 
 
 # ------------------------------------------------------------------ stop
@@ -431,7 +481,7 @@ def test_serve_reloads_the_image_from_the_staged_layout_when_docker_lost_it(
 
     loaded, ran = [], []
     monkeypatch.setattr(container, "preflight", lambda **k: [])
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     monkeypatch.setattr(container, "running", lambda name=None: [])
     monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
@@ -447,7 +497,7 @@ def test_serve_reloads_the_image_from_the_staged_layout_when_docker_lost_it(
 
 def test_a_missing_image_with_no_layout_names_all_three_remedies(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "preflight", lambda **k: [])
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     monkeypatch.setattr(container, "running", lambda name=None: [])
     with pytest.raises(container_cli.ContainerCliError) as e:
         container_cli.serve_container(_manifest(tmp_path), source=tmp_path / "nope")
@@ -458,7 +508,7 @@ def test_a_missing_image_with_no_layout_names_all_three_remedies(tmp_path, monke
 
 def test_print_does_not_require_the_image_to_be_loaded(tmp_path, monkeypatch):
     """--print must work on a machine that has never pulled anything."""
-    monkeypatch.setattr(container, "image_present",
+    monkeypatch.setattr(container, "loaded_digest",
                         lambda ref: pytest.fail("must not be checked for --print"))
     container_cli.serve_container(_manifest(tmp_path), print_only=True)
 
@@ -687,7 +737,7 @@ def test_rm_removes_image_pulled_dir_index_and_cache(tmp_path, monkeypatch):
     removed_images = []
     m, d, cache = _pulled(tmp_path, monkeypatch)
     monkeypatch.setattr(container, "container_exists", lambda n: False)
-    monkeypatch.setattr(container, "image_present", lambda ref: True)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
     monkeypatch.setattr(container, "remove_image", lambda ref: removed_images.append(ref))
 
     container_cli.remove_container("org/x", m)
@@ -703,7 +753,7 @@ def test_rm_stops_and_removes_any_container(tmp_path, monkeypatch):
     m, _, _ = _pulled(tmp_path, monkeypatch)
     monkeypatch.setattr(container, "container_exists", lambda n: True)
     monkeypatch.setattr(container, "remove", lambda n, force=False: gone.append(n))
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     container_cli.remove_container("org/x", m)
     assert gone == ["tt-model-my-model-p150x4"]
 
@@ -713,7 +763,7 @@ def test_rm_keeps_weights_by_default(tmp_path, monkeypatch, capsys):
     the package. Nobody means "re-download 57 GB" by "remove this model"."""
     m, _, _ = _pulled(tmp_path, monkeypatch)
     monkeypatch.setattr(container, "container_exists", lambda n: False)
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     purged = []
     monkeypatch.setattr(container_cli, "_purge_hf", lambda r, w: purged.append(r))
     container_cli.remove_container("org/x", m)
@@ -727,7 +777,7 @@ def test_the_package_snapshot_is_purged_so_a_repull_really_downloads(tmp_path, m
     exactly what someone resetting to test the path is trying to avoid."""
     m, _, _ = _pulled(tmp_path, monkeypatch)
     monkeypatch.setattr(container, "container_exists", lambda n: False)
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     purged = []
     monkeypatch.setattr(container_cli, "_purge_hf", lambda r, w: purged.append(r))
     container_cli.remove_container("org/x", m)
@@ -737,7 +787,7 @@ def test_the_package_snapshot_is_purged_so_a_repull_really_downloads(tmp_path, m
 def test_include_weights_purges_them_too(tmp_path, monkeypatch):
     m, _, _ = _pulled(tmp_path, monkeypatch)
     monkeypatch.setattr(container, "container_exists", lambda n: False)
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     purged = []
     monkeypatch.setattr(container_cli, "_purge_hf", lambda r, w: purged.append(r))
     container_cli.remove_container("org/x", m, include_weights=True)
@@ -773,7 +823,7 @@ def test_the_include_weights_flag_reaches_the_implementation(tmp_path, monkeypat
 def test_keep_cache_preserves_the_jit_cache(tmp_path, monkeypatch):
     m, _, cache = _pulled(tmp_path, monkeypatch)
     monkeypatch.setattr(container, "container_exists", lambda n: False)
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     container_cli.remove_container("org/x", m, keep_cache=True)
     assert cache.exists()
 
@@ -829,7 +879,7 @@ def test_an_image_shared_with_another_pulled_package_is_kept(tmp_path, monkeypat
     (other / "tt_kernel_manifest.json").write_text(m.to_json())   # same image tag
 
     monkeypatch.setattr(container, "container_exists", lambda n: False)
-    monkeypatch.setattr(container, "image_present", lambda ref: True)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
     monkeypatch.setattr(container, "remove_image",
                         lambda ref: pytest.fail("shared image must not be removed"))
     container_cli.remove_container("org/x", m)
@@ -883,7 +933,7 @@ def test_pull_records_what_list_needs(tmp_path, monkeypatch):
 
 
 def test_describe_pulled_reports_ready_when_the_image_is_loaded(monkeypatch):
-    monkeypatch.setattr(container, "image_present", lambda ref: True)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
     monkeypatch.setattr(container, "run_or_empty", lambda argv: "10737418240")
     r = container_cli.describe_pulled(
         {"repo_id": "org/x", "image": "tt-model/x:abc", "arch": "blackhole",
@@ -897,7 +947,7 @@ def test_describe_pulled_reports_ready_when_the_image_is_loaded(monkeypatch):
 def test_describe_pulled_flags_a_pruned_image(monkeypatch):
     """The case this exists for: still recorded as installed, but `serve` would fail with a
     docker error naming neither the cause nor the fix."""
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     r = container_cli.describe_pulled(
         {"repo_id": "org/x", "image": "tt-model/x:abc", "arch": "blackhole"})
     assert r["ready"] is False
@@ -910,7 +960,7 @@ def test_list_shows_a_container_row_in_full(tmp_path, monkeypatch):
     from tt_kernel import localdb
 
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
-    monkeypatch.setattr(container, "image_present", lambda ref: True)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
     monkeypatch.setattr(container, "run_or_empty", lambda argv: "10737418240")
     localdb.record("org/x", {"repo_id": "org/x", "container": True,
                              "image": "tt-model/x:abc123", "arch": "blackhole",
@@ -973,3 +1023,150 @@ def _staged_snapshot(tmp_path, manifest, dest):
     d.mkdir(parents=True, exist_ok=True)
     (d / "tt_kernel_manifest.json").write_text(manifest.to_json())
     return d
+
+
+def test_a_pre_digest_package_still_pulls_and_says_what_it_gives_up(tmp_path, monkeypatch,
+                                                                   capsys):
+    """Packages published before digest identity keep working: the comparison degrades to
+    the old tag-presence test. But the protection is absent, so the limitation is stated
+    rather than left invisible."""
+    from tt_kernel.container_manifest import ContainerManifest
+
+    raw = json.loads(json.dumps(BASE))
+    m = ContainerManifest.model_validate(raw).to_wire(
+        image_tag="tt-model/my-model:29569a8e2", tt_metal_version="v",
+        tt_kernel_version="0.1.0")          # to_wire without digest= -> None
+    assert m.container.image.digest is None
+
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "b" * 64)
+    monkeypatch.setattr(container_cli, "_download_weights", lambda ref: Path("/w"))
+    container_cli.pull_container("org/x", None, m, no_weights=True)
+
+    out = " ".join(capsys.readouterr().out.split())
+    assert "no image digest" in out
+    assert "republishing it enables staleness detection" in out
+    assert "already loaded" in out          # and it still short-circuits, as before
+
+
+def test_a_digest_bearing_package_says_nothing_about_it(tmp_path, monkeypatch, capsys):
+    m = _manifest(tmp_path)
+    m.container.image.digest = "sha256:" + "c" * 64
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "c" * 64)
+    monkeypatch.setattr(container_cli, "_download_weights", lambda ref: Path("/w"))
+    container_cli.pull_container("org/x", None, m, no_weights=True)
+    assert "no image digest" not in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ --refresh
+#
+# Opt-in re-pull before serving. The image half only works because a published package
+# records its digest — the tag alone could be reused across builds, so a re-pull would have
+# skipped the load and served the previous image.
+
+
+def _pulled_entry(tmp_path, monkeypatch, *, revision="a" * 40, **extra):
+    from tt_kernel import localdb
+
+    m = _manifest(tmp_path)
+    d = container_cli.pull_dir("org/x")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "tt_kernel_manifest.json").write_text(m.to_json())
+    localdb.record("org/x", {"repo_id": "org/x", "container": True,
+                             "image": container.image_ref(m), "revision": revision,
+                             **extra})
+    return m
+
+
+def test_refresh_repulls_when_the_hub_is_newer(tmp_path, monkeypatch):
+    m = _pulled_entry(tmp_path, monkeypatch)
+    pulled = {}
+    monkeypatch.setattr(cli.hub, "latest_revision", lambda *a, **k: "b" * 40)
+    monkeypatch.setattr(container_cli.hub, "latest_revision", lambda *a, **k: "b" * 40)
+    monkeypatch.setattr(container_cli.hub, "fetch_manifest", lambda r, rev: m)
+    monkeypatch.setattr(container_cli, "pull_container",
+                        lambda r, rev, mani, **k: pulled.update(rev=rev))
+    container_cli.refresh_if_newer("org/x")
+    assert pulled["rev"] == "b" * 40
+
+
+def test_refresh_is_a_noop_when_up_to_date(tmp_path, monkeypatch):
+    _pulled_entry(tmp_path, monkeypatch, revision="a" * 40)
+    monkeypatch.setattr(container_cli.hub, "latest_revision", lambda *a, **k: "a" * 40)
+    monkeypatch.setattr(container_cli, "pull_container",
+                        lambda *a, **k: pytest.fail("must not re-pull"))
+    assert container_cli.refresh_if_newer("org/x") is None
+
+
+def test_refresh_skips_a_pinned_install(tmp_path, monkeypatch):
+    """The user chose that revision; do not second-guess it."""
+    _pulled_entry(tmp_path, monkeypatch, pinned=True)
+    monkeypatch.setattr(container_cli.hub, "latest_revision",
+                        lambda *a, **k: pytest.fail("must not hit the Hub"))
+    assert container_cli.refresh_if_newer("org/x") is None
+
+
+def test_refresh_skips_an_install_with_no_recorded_revision(tmp_path, monkeypatch):
+    _pulled_entry(tmp_path, monkeypatch, revision=None)
+    monkeypatch.setattr(container_cli.hub, "latest_revision",
+                        lambda *a, **k: pytest.fail("no baseline to compare against"))
+    assert container_cli.refresh_if_newer("org/x") is None
+
+
+def test_refresh_bounds_the_hub_call(tmp_path, monkeypatch):
+    """A serve must not hang on a half-open network."""
+    seen = {}
+    _pulled_entry(tmp_path, monkeypatch)
+    monkeypatch.setattr(container_cli.hub, "latest_revision",
+                        lambda r, rev, timeout=None: seen.update(timeout=timeout))
+    container_cli.refresh_if_newer("org/x")
+    assert seen["timeout"] == 3.0
+
+
+def test_refresh_is_non_fatal(tmp_path, monkeypatch, capsys):
+    """A refresh must never leave the user unserved."""
+    m = _pulled_entry(tmp_path, monkeypatch)
+    monkeypatch.setattr(container_cli.hub, "latest_revision", lambda *a, **k: "b" * 40)
+    monkeypatch.setattr(container_cli.hub, "fetch_manifest", lambda r, rev: m)
+
+    def boom(*a, **k):
+        raise container.ContainerError("docker load failed")
+
+    monkeypatch.setattr(container_cli, "pull_container", boom)
+    assert container_cli.refresh_if_newer("org/x") is None
+    assert "serving the installed package unchanged" in " ".join(capsys.readouterr().out.split())
+
+
+def test_refresh_does_nothing_under_print(tmp_path, monkeypatch):
+    _pulled_entry(tmp_path, monkeypatch)
+    monkeypatch.setattr(container_cli.hub, "latest_revision",
+                        lambda *a, **k: pytest.fail("must not hit the Hub under --print"))
+    assert container_cli.refresh_if_newer("org/x", print_only=True) is None
+
+
+def test_serve_only_refreshes_a_hub_target(tmp_path, monkeypatch):
+    """A local manifest path has no revision to compare against."""
+    monkeypatch.setattr(container_cli, "resolve_target", lambda t: _manifest(tmp_path))
+    monkeypatch.setattr(container_cli, "serve_container", lambda m, **k: None)
+    monkeypatch.setattr(container_cli, "refresh_if_newer",
+                        lambda *a, **k: pytest.fail("a path has no Hub revision"))
+    path = _wire(tmp_path)
+    assert runner.invoke(cli.app, ["serve", str(path), "--refresh"]).exit_code == 0
+
+
+def test_serve_passes_refresh_through_for_a_repo_id(tmp_path, monkeypatch):
+    called = {}
+    monkeypatch.setattr(container_cli, "resolve_target", lambda t: _manifest(tmp_path))
+    monkeypatch.setattr(container_cli, "serve_container", lambda m, **k: None)
+    monkeypatch.setattr(container_cli, "refresh_if_newer",
+                        lambda repo, **k: called.update(repo=repo, kw=k))
+    assert runner.invoke(cli.app, ["serve", "org/x", "--refresh"]).exit_code == 0
+    assert called["repo"] == "org/x"
+
+
+def test_serve_does_not_refresh_under_local_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(container_cli, "resolve_target", lambda t: _manifest(tmp_path))
+    monkeypatch.setattr(container_cli, "serve_container", lambda m, **k: None)
+    monkeypatch.setattr(container_cli, "refresh_if_newer",
+                        lambda *a, **k: pytest.fail("--local-only must not hit the Hub"))
+    assert runner.invoke(
+        cli.app, ["serve", "org/x", "--refresh", "--local-only"]).exit_code == 0

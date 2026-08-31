@@ -197,9 +197,32 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
     require_host(need_devices=False)
 
     ref = container.image_ref(manifest)
-    if container.image_present(ref):
+    # Compare the image's own digest, never just the tag's presence. A published package
+    # records the digest of the image it was built from, so "already loaded" means the
+    # SAME image — not merely something under that name. Before tags were derived from the
+    # digest a republish could reuse a tag, and a re-pull then skipped the load and served
+    # the previous image while reporting success.
+    want = spec.image.digest
+    have = container.loaded_digest(ref)
+    if want is None:
+        # Published before digest identity. Everything still works — the comparison below
+        # degrades to the old tag-presence test — but the protection this exists to give is
+        # absent, and saying so beats leaving the limitation invisible.
+        console.note(
+            "this package records no image digest (published before digest identity), so "
+            "\"already loaded\" is judged by tag alone; republishing it enables staleness "
+            "detection",
+            marker="○",
+        )
+    if have is not None and (want is None or have == want):
         console.note(f"image {ref} already loaded", marker="•")
     elif spec.image.is_hub_hosted:
+        if have is not None and want is not None and have != want:
+            console.note(
+                f"{ref} is loaded but is a different image than this package records "
+                f"({have[7:19]} vs {want[7:19]}) — reloading",
+                marker="○",
+            )
         with console.step(f"docker load {ref}"):
             with tempfile.TemporaryDirectory() as td:
                 snapshot = hub.download_bundle(repo_id, revision, dest=td)
@@ -219,6 +242,7 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
         # `list` reads these: without them a container package rendered as
         # "arch=None install=None", which found it but described nothing.
         "arch": manifest.arch,
+        "image_digest": spec.image.digest,
         "profile": spec.resolved_default(),
         "profiles": spec.profile_names(),
     })
@@ -254,6 +278,58 @@ def _download_weights(ref) -> Path:
         allow_patterns=ref.allow_patterns,
         ignore_patterns=ref.ignore_patterns,
     ))
+
+
+# --------------------------------------------------------------------------- refresh
+
+
+def refresh_if_newer(repo_id: str, *, print_only: bool = False) -> Optional[Manifest]:
+    """Re-pull a container package when the Hub has a newer revision. Returns the refreshed
+    manifest, or None when nothing was done.
+
+    Same contract as the v5/v6 refresh: opt-in, and a refresh must never leave the user
+    unserved — every failure warns and returns None so the caller serves what is already
+    installed.
+
+    The image half only works because a published package records its digest: the tag alone
+    could be reused across builds, so a re-pull would have skipped the load and served the
+    previous image. ``pull_container`` compares digests, so an unchanged image is skipped
+    and a changed one is reloaded.
+    """
+    entry = localdb.get(repo_id) or {}
+    if entry.get("pinned"):
+        return None  # the user chose a revision; do not second-guess it
+    installed = entry.get("revision")
+    if not installed:
+        # No honest baseline to compare against (an install predating the field, or one
+        # done offline). Mirrors the v5/v6 rule rather than guessing.
+        return None
+    if print_only:
+        console.note("--refresh skipped under --print (no re-pull)", marker="○")
+        return None
+
+    # Bounded: a serve must not hang on a half-open network.
+    try:
+        latest = hub.latest_revision(repo_id, None, timeout=3.0)
+    except Exception:  # noqa: BLE001
+        latest = None
+    if not latest or latest == installed:
+        return None
+
+    console.note(f"refreshing {repo_id}: {installed[:8]} → {latest[:8]}", marker="↻")
+    try:
+        remote = hub.fetch_manifest(repo_id, latest)
+        if remote is None or not remote.is_container:
+            return None
+        pull_container(repo_id, latest, remote, no_weights=True)
+    except Exception as e:  # noqa: BLE001
+        console.note(
+            f"refresh failed ({e.__class__.__name__}); serving the installed package "
+            f"unchanged",
+            marker="⚠", style="warning",
+        )
+        return None
+    return load_pulled(repo_id)
 
 
 # ----------------------------------------------------------------------------- serve
@@ -365,7 +441,9 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     # names neither the cause nor the fix.
     if not print_only:
         ref = container.image_ref(manifest)
-        if not container.image_present(ref):
+        want = spec.image.digest
+        have = container.loaded_digest(ref)
+        if have is None or (want is not None and have != want):
             layout = (Path(source) / "image") if source else None
             if layout and (layout / "oci-layout").is_file():
                 with console.step(f"docker load {ref} (image was not loaded)"):
@@ -420,12 +498,10 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     if follow:
         console.note("waiting for the server to become ready (a cold boot JIT-compiles "
                      "kernels; ~10 min the first time)", marker="○")
-        ready = container.wait_ready(name, launcher.ready_probe(manifest),
-                                     echo=console.raw)
-        if not ready:
-            raise ContainerCliError(
-                f"the server did not report ready. Logs:  tt-model logs {what} -f"
-            )
+        result = container.wait_ready(name, launcher.ready_probe(manifest),
+                                      echo=console.raw)
+        if not result.ready:
+            raise ContainerCliError(_not_ready_message(result, what, extra_args))
         console.milestone(f"ready at http://127.0.0.1:{port}")
     else:
         console.note(f"endpoint (once ready):  http://127.0.0.1:{port}", marker="→")
@@ -433,6 +509,39 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
 
 
 # ------------------------------------------------------------------------ stop / logs
+
+
+def _not_ready_message(result, target: str, extra_args: Optional[List[str]]) -> str:
+    """Say what actually happened, and name the cause when the logs give it away.
+
+    A container that CRASHED and one that is merely slow need different next steps, and
+    the most common crash here is an argument tt-model forwarded to the engine: `serve`
+    declares ignore_unknown_options, so a flag it does not know (a tt-model flag typed
+    after the target, or one that only exists on a newer version) is passed straight
+    through and the engine rejects it — after the container has already started.
+    """
+    tail = "\n".join(f"    {ln}" for ln in result.tail[-8:])
+    if not result.exited:
+        return (
+            f"the server did not report ready within the timeout; the container is still "
+            f"running.\n  → follow it:  tt-model logs {target} -f\n"
+            f"  → give up:    tt-model stop {target}\n\n  last output:\n{tail}"
+        )
+
+    bad = [a for a in (extra_args or []) if a.startswith("-")]
+    blamed = ""
+    joined = "\n".join(result.tail)
+    if bad and ("unrecognized arguments" in joined or "error: argument" in joined
+                or "no such option" in joined):
+        blamed = (
+            f"\n  {', '.join(bad)} was passed through to the engine, which rejected it. "
+            f"tt-model's own flags must come BEFORE the target "
+            f"(`tt-model serve --flag {target}`); anything after it goes to the engine "
+            f"verbatim. If the flag is not a tt-model flag either, drop it."
+        )
+    return (
+        f"the container exited before the server was ready.{blamed}\n\n  last output:\n{tail}"
+    )
 
 
 def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) -> None:
@@ -486,7 +595,9 @@ def describe_pulled(entry: dict) -> dict:
     into something visible before you try.
     """
     ref = entry.get("image") or "?"
-    loaded = container.image_present(ref) if ref != "?" else False
+    want = entry.get("image_digest")
+    have = container.loaded_digest(ref) if ref != "?" else None
+    loaded = have is not None and (want is None or have == want)
     size = ""
     if loaded:
         out = container.run_or_empty(
@@ -502,7 +613,12 @@ def describe_pulled(entry: dict) -> dict:
         "image": ref.split(":")[-1],
         "size": size,
         "ready": loaded,
-        "why": "" if loaded else f"image {ref} not loaded — tt-model pull to restore it",
+        "why": "" if loaded else (
+            f"image {ref} is loaded but is a different build than this package records "
+            f"— tt-model pull to correct it"
+            if have is not None
+            else f"image {ref} not loaded — tt-model pull to restore it"
+        ),
     }
 
 

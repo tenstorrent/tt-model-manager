@@ -155,7 +155,10 @@ class _FakeProc:
 def test_wait_ready_honours_timeout_on_a_silent_container(monkeypatch):
     monkeypatch.setattr(container.subprocess, "Popen", lambda *a, **k: _FakeProc())
     t0 = time.monotonic()
-    ok = container.wait_ready("tt-model-x", "APP READY", timeout_s=1, echo=lambda *_: None)
+    r = container.wait_ready("tt-model-x", "APP READY", timeout_s=1, echo=lambda *_: None)
     elapsed = time.monotonic() - t0
-    assert ok is False
+    assert r.ready is False
+    # A silent container is still RUNNING — the distinction the caller needs to tell
+    # "slow boot" from "crashed".
+    assert r.exited is False
     assert elapsed < 5, f"wait_ready hung past its timeout ({elapsed:.1f}s)"
