@@ -372,6 +372,17 @@ def remove(name: str, *, force: bool = False) -> bool:
     return _run(argv, capture_output=True, text=True).returncode == 0
 
 
+def loaded_digest(ref: str) -> Optional[str]:
+    """The config digest of the image currently under ``ref``, or None if it is absent.
+
+    ``image_present`` only answers "is something under this name". With digest tags that is
+    usually enough, but a hand-tagged or hand-loaded image can sit under the right name and
+    be the wrong image — so where correctness matters, compare digests.
+    """
+    out = run_or_empty(["docker", "image", "inspect", ref, "--format", "{{.Id}}"]).strip()
+    return out or None
+
+
 def remove_image(ref: str) -> bool:
     return _run(["docker", "image", "rm", ref], capture_output=True, text=True).returncode == 0
 

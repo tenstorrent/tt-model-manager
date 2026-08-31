@@ -527,3 +527,12 @@ def test_the_missing_plugin_error_documents_the_local_path_option():
 def test_the_dockerfile_copies_the_plugin_context_unconditionally():
     """It is an empty dir when unused, so the COPY is always valid."""
     assert "COPY plugin-src /ctx/plugin-src" in DOCKERFILE
+
+
+def test_the_labels_carry_the_source_commits():
+    """The tag is the image's digest — correct identity, but opaque. `docker inspect` is
+    where a human triages "which build is this", so the metal and plugin commits go in the
+    labels; org.opencontainers.image.revision is the standard key for the source commit."""
+    assert 'org.opencontainers.image.revision="${MODEL_TT_METAL_SHA}"' in DOCKERFILE
+    assert 'org.tenstorrent.tt-model.tt-metal="${MODEL_TT_METAL_DESCRIBE}"' in DOCKERFILE
+    assert 'org.tenstorrent.tt-model.plugin="${MODEL_PLUGIN_SHA}"' in DOCKERFILE

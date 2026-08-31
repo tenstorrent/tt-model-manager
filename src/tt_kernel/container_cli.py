@@ -197,9 +197,32 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
     require_host(need_devices=False)
 
     ref = container.image_ref(manifest)
-    if container.image_present(ref):
+    # Compare the image's own digest, never just the tag's presence. A published package
+    # records the digest of the image it was built from, so "already loaded" means the
+    # SAME image — not merely something under that name. Before tags were derived from the
+    # digest a republish could reuse a tag, and a re-pull then skipped the load and served
+    # the previous image while reporting success.
+    want = spec.image.digest
+    have = container.loaded_digest(ref)
+    if want is None:
+        # Published before digest identity. Everything still works — the comparison below
+        # degrades to the old tag-presence test — but the protection this exists to give is
+        # absent, and saying so beats leaving the limitation invisible.
+        console.note(
+            "this package records no image digest (published before digest identity), so "
+            "\"already loaded\" is judged by tag alone; republishing it enables staleness "
+            "detection",
+            marker="○",
+        )
+    if have is not None and (want is None or have == want):
         console.note(f"image {ref} already loaded", marker="•")
     elif spec.image.is_hub_hosted:
+        if have is not None and want is not None and have != want:
+            console.note(
+                f"{ref} is loaded but is a different image than this package records "
+                f"({have[7:19]} vs {want[7:19]}) — reloading",
+                marker="○",
+            )
         with console.step(f"docker load {ref}"):
             with tempfile.TemporaryDirectory() as td:
                 snapshot = hub.download_bundle(repo_id, revision, dest=td)
@@ -219,6 +242,7 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
         # `list` reads these: without them a container package rendered as
         # "arch=None install=None", which found it but described nothing.
         "arch": manifest.arch,
+        "image_digest": spec.image.digest,
         "profile": spec.resolved_default(),
         "profiles": spec.profile_names(),
     })
@@ -365,7 +389,9 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     # names neither the cause nor the fix.
     if not print_only:
         ref = container.image_ref(manifest)
-        if not container.image_present(ref):
+        want = spec.image.digest
+        have = container.loaded_digest(ref)
+        if have is None or (want is not None and have != want):
             layout = (Path(source) / "image") if source else None
             if layout and (layout / "oci-layout").is_file():
                 with console.step(f"docker load {ref} (image was not loaded)"):
@@ -486,7 +512,9 @@ def describe_pulled(entry: dict) -> dict:
     into something visible before you try.
     """
     ref = entry.get("image") or "?"
-    loaded = container.image_present(ref) if ref != "?" else False
+    want = entry.get("image_digest")
+    have = container.loaded_digest(ref) if ref != "?" else None
+    loaded = have is not None and (want is None or have == want)
     size = ""
     if loaded:
         out = container.run_or_empty(
@@ -502,7 +530,12 @@ def describe_pulled(entry: dict) -> dict:
         "image": ref.split(":")[-1],
         "size": size,
         "ready": loaded,
-        "why": "" if loaded else f"image {ref} not loaded — tt-model pull to restore it",
+        "why": "" if loaded else (
+            f"image {ref} is loaded but is a different build than this package records "
+            f"— tt-model pull to correct it"
+            if have is not None
+            else f"image {ref} not loaded — tt-model pull to restore it"
+        ),
     }
 
 

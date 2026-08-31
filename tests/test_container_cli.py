@@ -48,6 +48,9 @@ def _host_is_fine(monkeypatch):
     """
     monkeypatch.setattr(container, "preflight", lambda **k: [])
     monkeypatch.setattr(container, "image_present", lambda ref: True)
+    # The image is identified by its digest now, not by a tag being present. Default to
+    # "the right image is loaded"; tests about a missing or mismatched image override it.
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
 
 
 def _wire(tmp_path: Path, **over) -> Path:
@@ -430,7 +433,7 @@ def test_serve_reloads_the_image_from_the_staged_layout_when_docker_lost_it(
 
     loaded, ran = [], []
     monkeypatch.setattr(container, "preflight", lambda **k: [])
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     monkeypatch.setattr(container, "running", lambda name=None: [])
     monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
@@ -446,7 +449,7 @@ def test_serve_reloads_the_image_from_the_staged_layout_when_docker_lost_it(
 
 def test_a_missing_image_with_no_layout_names_all_three_remedies(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "preflight", lambda **k: [])
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     monkeypatch.setattr(container, "running", lambda name=None: [])
     with pytest.raises(container_cli.ContainerCliError) as e:
         container_cli.serve_container(_manifest(tmp_path), source=tmp_path / "nope")
@@ -457,7 +460,7 @@ def test_a_missing_image_with_no_layout_names_all_three_remedies(tmp_path, monke
 
 def test_print_does_not_require_the_image_to_be_loaded(tmp_path, monkeypatch):
     """--print must work on a machine that has never pulled anything."""
-    monkeypatch.setattr(container, "image_present",
+    monkeypatch.setattr(container, "loaded_digest",
                         lambda ref: pytest.fail("must not be checked for --print"))
     container_cli.serve_container(_manifest(tmp_path), print_only=True)
 
@@ -681,7 +684,7 @@ def test_rm_removes_image_pulled_dir_index_and_cache(tmp_path, monkeypatch):
     removed_images = []
     m, d, cache = _pulled(tmp_path, monkeypatch)
     monkeypatch.setattr(container, "container_exists", lambda n: False)
-    monkeypatch.setattr(container, "image_present", lambda ref: True)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
     monkeypatch.setattr(container, "remove_image", lambda ref: removed_images.append(ref))
 
     container_cli.remove_container("org/x", m)
@@ -697,7 +700,7 @@ def test_rm_stops_and_removes_any_container(tmp_path, monkeypatch):
     m, _, _ = _pulled(tmp_path, monkeypatch)
     monkeypatch.setattr(container, "container_exists", lambda n: True)
     monkeypatch.setattr(container, "remove", lambda n, force=False: gone.append(n))
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     container_cli.remove_container("org/x", m)
     assert gone == ["tt-model-my-model-p150x4"]
 
@@ -707,7 +710,7 @@ def test_rm_keeps_weights_by_default(tmp_path, monkeypatch, capsys):
     the package. Nobody means "re-download 57 GB" by "remove this model"."""
     m, _, _ = _pulled(tmp_path, monkeypatch)
     monkeypatch.setattr(container, "container_exists", lambda n: False)
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     purged = []
     monkeypatch.setattr(container_cli, "_purge_hf", lambda r, w: purged.append(r))
     container_cli.remove_container("org/x", m)
@@ -721,7 +724,7 @@ def test_the_package_snapshot_is_purged_so_a_repull_really_downloads(tmp_path, m
     exactly what someone resetting to test the path is trying to avoid."""
     m, _, _ = _pulled(tmp_path, monkeypatch)
     monkeypatch.setattr(container, "container_exists", lambda n: False)
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     purged = []
     monkeypatch.setattr(container_cli, "_purge_hf", lambda r, w: purged.append(r))
     container_cli.remove_container("org/x", m)
@@ -731,7 +734,7 @@ def test_the_package_snapshot_is_purged_so_a_repull_really_downloads(tmp_path, m
 def test_include_weights_purges_them_too(tmp_path, monkeypatch):
     m, _, _ = _pulled(tmp_path, monkeypatch)
     monkeypatch.setattr(container, "container_exists", lambda n: False)
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     purged = []
     monkeypatch.setattr(container_cli, "_purge_hf", lambda r, w: purged.append(r))
     container_cli.remove_container("org/x", m, include_weights=True)
@@ -767,7 +770,7 @@ def test_the_include_weights_flag_reaches_the_implementation(tmp_path, monkeypat
 def test_keep_cache_preserves_the_jit_cache(tmp_path, monkeypatch):
     m, _, cache = _pulled(tmp_path, monkeypatch)
     monkeypatch.setattr(container, "container_exists", lambda n: False)
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     container_cli.remove_container("org/x", m, keep_cache=True)
     assert cache.exists()
 
@@ -780,7 +783,7 @@ def test_an_image_shared_with_another_pulled_package_is_kept(tmp_path, monkeypat
     (other / "tt_kernel_manifest.json").write_text(m.to_json())   # same image tag
 
     monkeypatch.setattr(container, "container_exists", lambda n: False)
-    monkeypatch.setattr(container, "image_present", lambda ref: True)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
     monkeypatch.setattr(container, "remove_image",
                         lambda ref: pytest.fail("shared image must not be removed"))
     container_cli.remove_container("org/x", m)
@@ -834,7 +837,7 @@ def test_pull_records_what_list_needs(tmp_path, monkeypatch):
 
 
 def test_describe_pulled_reports_ready_when_the_image_is_loaded(monkeypatch):
-    monkeypatch.setattr(container, "image_present", lambda ref: True)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
     monkeypatch.setattr(container, "run_or_empty", lambda argv: "10737418240")
     r = container_cli.describe_pulled(
         {"repo_id": "org/x", "image": "tt-model/x:abc", "arch": "blackhole",
@@ -848,7 +851,7 @@ def test_describe_pulled_reports_ready_when_the_image_is_loaded(monkeypatch):
 def test_describe_pulled_flags_a_pruned_image(monkeypatch):
     """The case this exists for: still recorded as installed, but `serve` would fail with a
     docker error naming neither the cause nor the fix."""
-    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     r = container_cli.describe_pulled(
         {"repo_id": "org/x", "image": "tt-model/x:abc", "arch": "blackhole"})
     assert r["ready"] is False
@@ -861,7 +864,7 @@ def test_list_shows_a_container_row_in_full(tmp_path, monkeypatch):
     from tt_kernel import localdb
 
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
-    monkeypatch.setattr(container, "image_present", lambda ref: True)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
     monkeypatch.setattr(container, "run_or_empty", lambda argv: "10737418240")
     localdb.record("org/x", {"repo_id": "org/x", "container": True,
                              "image": "tt-model/x:abc123", "arch": "blackhole",
@@ -924,3 +927,35 @@ def _staged_snapshot(tmp_path, manifest, dest):
     d.mkdir(parents=True, exist_ok=True)
     (d / "tt_kernel_manifest.json").write_text(manifest.to_json())
     return d
+
+
+def test_a_pre_digest_package_still_pulls_and_says_what_it_gives_up(tmp_path, monkeypatch,
+                                                                   capsys):
+    """Packages published before digest identity keep working: the comparison degrades to
+    the old tag-presence test. But the protection is absent, so the limitation is stated
+    rather than left invisible."""
+    from tt_kernel.container_manifest import ContainerManifest
+
+    raw = json.loads(json.dumps(BASE))
+    m = ContainerManifest.model_validate(raw).to_wire(
+        image_tag="tt-model/my-model:29569a8e2", tt_metal_version="v",
+        tt_kernel_version="0.1.0")          # to_wire without digest= -> None
+    assert m.container.image.digest is None
+
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "b" * 64)
+    monkeypatch.setattr(container_cli, "_download_weights", lambda ref: Path("/w"))
+    container_cli.pull_container("org/x", None, m, no_weights=True)
+
+    out = " ".join(capsys.readouterr().out.split())
+    assert "no image digest" in out
+    assert "republishing it enables staleness detection" in out
+    assert "already loaded" in out          # and it still short-circuits, as before
+
+
+def test_a_digest_bearing_package_says_nothing_about_it(tmp_path, monkeypatch, capsys):
+    m = _manifest(tmp_path)
+    m.container.image.digest = "sha256:" + "c" * 64
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "c" * 64)
+    monkeypatch.setattr(container_cli, "_download_weights", lambda ref: Path("/w"))
+    container_cli.pull_container("org/x", None, m, no_weights=True)
+    assert "no image digest" not in capsys.readouterr().out

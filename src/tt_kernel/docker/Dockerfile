@@ -160,6 +160,9 @@ ARG MODEL_REPO
 ARG MODEL_WEIGHTS
 ARG MODEL_ARCH
 ARG MODEL_PROFILES
+ARG MODEL_TT_METAL_SHA
+ARG MODEL_TT_METAL_DESCRIBE
+ARG MODEL_PLUGIN_SHA
 
 # The apt set is the built artifacts' actual link closure (readelf -d), nothing more.
 # libmpi comes from the ULFM OpenMPI COPY below — Ubuntu's libopenmpi3 ships
@@ -285,7 +288,10 @@ LABEL org.tenstorrent.tt-model="${MODEL_NAME}" \
       org.tenstorrent.tt-model.weights="${MODEL_WEIGHTS}" \
       org.tenstorrent.tt-model.arch="${MODEL_ARCH}" \
       org.tenstorrent.tt-model.kind="${TT_MODEL_KIND}" \
-      org.tenstorrent.tt-model.profiles="${MODEL_PROFILES}"
+      org.tenstorrent.tt-model.profiles="${MODEL_PROFILES}" \
+      org.opencontainers.image.revision="${MODEL_TT_METAL_SHA}" \
+      org.tenstorrent.tt-model.tt-metal="${MODEL_TT_METAL_DESCRIBE}" \
+      org.tenstorrent.tt-model.plugin="${MODEL_PLUGIN_SHA}"
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # Overridden by any command given to `docker run`; tt-model always passes one.

@@ -355,7 +355,8 @@ class Staged:
     manifest: ContainerManifest
     ctx: Path                 # docker build context
     out: Path                 # HF repo staging dir
-    image: str                # docker tag
+    image: str                # docker tag (provisional until retag_to_digest)
+    digest: Optional[str] = None  # the image's own config digest, once built
     built: Dict[str, object] = field(default_factory=dict)
     build_args: Dict[str, str] = field(default_factory=dict)
     metal: Optional[MetalSource] = None
@@ -492,7 +493,14 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
     shutil.copy2(pkg_docker / "entrypoint.sh", ctx / "entrypoint.sh")
 
     # -- provenance + image tag ---------------------------------------------------------
-    image = f"tt-model/{m.name}:{(metal.sha or 'dev')[:9]}"
+    # PROVISIONAL tag, used only to name the build output. The published tag is derived
+    # from the image's own digest once it exists (see retag_to_digest): a tag taken from
+    # tt-metal's HEAD is not the image's identity and is wrong in both directions — a
+    # republish that changes the plugin pin, the code allowlist or a serve setting without
+    # moving that sha reuses the tag, so a consumer's `pull` sees the tag present, skips
+    # the load and serves the OLD image while reporting success; and any unrelated commit
+    # in the metal tree mints a new 10 GB tag for byte-identical content.
+    image = f"tt-model/{m.name}:build-{(metal.sha or 'dev')[:9]}"
     built: Dict[str, object] = {
         "image": image,
         # the repo the author named in the manifest, so `push <dir>` can default to it
@@ -555,6 +563,16 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
         "MODEL_WEIGHTS": m.weights_repo,
         "MODEL_ARCH": m.arch,
         "MODEL_PROFILES": ",".join(m.profile_names()),
+        # The tag is the image's digest, which is the right identity but tells a human
+        # nothing. `docker inspect` is where someone triaging a mystery image looks, so the
+        # source commits belong in the labels. org.opencontainers.image.revision is the
+        # standard key for "the commit this was built from".
+        "MODEL_TT_METAL_SHA": metal.sha or "",
+        "MODEL_TT_METAL_DESCRIBE": metal.describe or "",
+        "MODEL_PLUGIN_SHA": str(
+            ((m.runtime.get("plugin") or {}).get("sha")
+             or (m.runtime.get("plugin") or {}).get("version") or "")
+        ),
     }
     if metal.mode == "git":
         build_args["METAL_GIT_REPO"] = metal.git_repo or ""
@@ -760,6 +778,51 @@ def run_build(staged: Staged, echo: Optional[Callable[[str], None]] = None) -> N
             raise BuildError(f"docker build failed (exit {code}); full log: {log_path}")
 
 
+def image_digest(image: str) -> str:
+    """The image's own config digest — what ``docker inspect`` reports as ``.Id``.
+
+    This is the image's identity: it changes if and only if the image changes. Everything
+    that made the old tag unreliable (the plugin pin, the code allowlist, serve settings,
+    the base image) is inside it.
+    """
+    r = subprocess.run(
+        ["docker", "image", "inspect", image, "--format", "{{.Id}}"],
+        capture_output=True, text=True,
+    )
+    digest = r.stdout.strip()
+    if r.returncode != 0 or not digest.startswith("sha256:"):
+        raise BuildError(
+            f"could not read the digest of {image}: {(r.stderr or r.stdout).strip()[:300]}"
+        )
+    return digest
+
+
+def retag_to_digest(staged: "Staged") -> str:
+    """Retag the built image by its digest and return the final tag.
+
+    Done BEFORE the OCI export so the exported layout carries the final name — the tag a
+    consumer's ``docker load`` will produce has to be the one the manifest records, or
+    ``pull`` looks for an image that is present under another name.
+
+    The provisional build tag is dropped afterwards: leaving both would make every build
+    look like two images to ``docker images``.
+    """
+    digest = image_digest(staged.image)
+    final = f"tt-model/{staged.manifest.name}:{digest.split(':', 1)[1][:12]}"
+    if final != staged.image:
+        r = subprocess.run(["docker", "tag", staged.image, final],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise BuildError(f"could not tag {final}: {r.stderr.strip()[:300]}")
+        subprocess.run(["docker", "image", "rm", staged.image],
+                       capture_output=True, text=True)
+    staged.image = final
+    staged.digest = digest
+    staged.built["image"] = final
+    staged.built["image_digest"] = digest
+    return final
+
+
 def freeze_from_image(image: str) -> str:
     """The exact python env inside the built image, as a requirements lock.
 
@@ -875,6 +938,9 @@ def finalize(staged: Staged, *, echo: Optional[Callable[[str], None]] = None) ->
 
     # requirements.lock: from the image when this build resolved live; passed through
     # unchanged when the build installed from an existing lock.
+    # Identity first: the export and the manifest must both name the final tag.
+    retag_to_digest(staged)
+
     lock = staged.ctx / "requirements.lock"
     lock_text = lock.read_text() if lock.exists() else freeze_from_image(staged.image)
     (out / "requirements.lock").write_text(lock_text)
@@ -894,6 +960,7 @@ def finalize(staged: Staged, *, echo: Optional[Callable[[str], None]] = None) ->
     )
     wire = m.to_wire(
         image_tag=staged.image,
+        digest=staged.digest,
         tt_metal_version=str((staged.built.get("tt_metal") or {}).get("scm_version")
                              or "unknown"),
         tt_kernel_version=__version__,
