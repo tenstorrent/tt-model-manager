@@ -187,9 +187,10 @@ automatically on push. See **[docs/self_contained_packages.md](docs/self_contain
 
 ### Repo visibility
 
-`package` / `package-thin` default to `--private`; pass `--public` to publish openly. A push
-never lists your bundle in the community catalog on its own — that is a separate opt-in
-(`--publish`, which requires `--public`, or `tt-model publish` later).
+`push` / `package` / `package-thin` create a new repo `--private` by default; pass `--public`
+to make it public (shared by link) without listing it. A push never lists your bundle in the
+community catalog on its own — that is a separate opt-in (`--publish`, which implies `--public`,
+or `tt-model publish` later).
 
 ## Community catalog
 
@@ -202,12 +203,12 @@ remains under its author's governance.
 Listing is an explicit opt-in, separate from the push:
 
 ```bash
-tt-model package   you/mymodel --public --publish   # push and list in one step
-tt-model publish   you/mymodel                       # list a repo pushed earlier
-tt-model unpublish you/mymodel                        # delist (repo untouched)
+tt-model package   you/mymodel --publish   # push, make public, and list — one step (implies --public)
+tt-model publish   you/mymodel             # list a repo pushed earlier (makes it public if needed)
+tt-model unpublish you/mymodel             # delist (repo stays public)
 ```
 
-`--publish` requires `--public` and adds the `tt-model-catalog` tag
+`--publish` implies `--public` and adds the `tt-model-catalog` tag
 (`TT_MODEL_CATALOG_TAG` in [`tt_kernel/__init__.py`](src/tt_kernel/__init__.py)); the catalog
 indexes only repos carrying it, and reads each repo's `tt_kernel_manifest.json` to render it.
 
