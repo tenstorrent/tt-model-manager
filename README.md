@@ -191,12 +191,13 @@ automatically on push. See **[docs/self_contained_packages.md](docs/self_contain
 never lists your bundle in the community catalog on its own — that is a separate opt-in
 (`--publish`, which requires `--public`, or `tt-model publish` later).
 
-## Community catalog (web front end)
+## Community catalog
 
-`web/` is a static, searchable browser for community-published bundles — like
-`ollama.com/models`, backed entirely by the Hugging Face Hub. It is a **pure index**: it
-hosts and stores nothing, and queries the HF public API live from the visitor's browser.
-Every card is a pointer to a public HF repo that remains under its author's governance.
+Published bundles can opt into a searchable community catalog of community-published models.
+The catalog — its web front end and its indexer — lives in a dedicated repo,
+**[tenstorrent/model-manager-site](https://github.com/tenstorrent/model-manager-site)**
+(formerly the `web/` directory here). Every listing is a pointer to a public HF repo that
+remains under its author's governance.
 
 Listing is an explicit opt-in, separate from the push:
 
@@ -206,9 +207,9 @@ tt-model publish   you/mymodel                       # list a repo pushed earlie
 tt-model unpublish you/mymodel                        # delist (repo untouched)
 ```
 
-`--publish` requires `--public` and adds the `tt-model-catalog` tag; the catalog shows only
-repos carrying it. Deploy the front end by copying `web/` to any static server — no backend,
-no build step. See **[web/README.md](web/README.md)**.
+`--publish` requires `--public` and adds the `tt-model-catalog` tag
+(`TT_MODEL_CATALOG_TAG` in [`tt_kernel/__init__.py`](src/tt_kernel/__init__.py)); the catalog
+indexes only repos carrying it, and reads each repo's `tt_kernel_manifest.json` to render it.
 
 ## How compatibility is checked
 
