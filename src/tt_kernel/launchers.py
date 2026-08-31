@@ -9,7 +9,7 @@ everything that varies arrives through the hooks below, so adding a kind is a ne
 here plus a registration in :data:`KINDS` — no change to the manifest schema, the image
 build, or any command.
 
-Two kinds, named for what they ARE rather than for their age:
+Three kinds, named for what they ARE rather than for their age:
 
 ``vllm-plugin``
     Stock ``vllm==X.Y.Z`` from PyPI (built from sdist with ``VLLM_TARGET_DEVICE=empty``)
@@ -23,9 +23,15 @@ Two kinds, named for what they ARE rather than for their age:
     image. Launched through tt-metal's readiness runner. This is the older arrangement,
     and it is what this repo's own ``install``/``provision`` still set up.
 
-Neither is called plain ``vllm``: a v4 manifest's ``runtime.kind = "vllm"`` already means
-the fork, so reusing the bare word here would give one field two meanings depending on
-which schema you were reading.
+``tt-dit-server``
+    A diffusion transformer served by the ASGI app tt-metal ships beside it under
+    ``models/tt_dit/server/<model>``, launched with uvicorn. There are no tokens, no KV
+    cache and no continuous batching, so vLLM has nothing to do: this kind installs a
+    small HTTP stack instead of an engine, and the serving code is the model's own.
+
+Neither vLLM kind is called plain ``vllm``: a v4 manifest's ``runtime.kind = "vllm"``
+already means the fork, so reusing the bare word here would give one field two meanings
+depending on which schema you were reading.
 
 Two different inputs on purpose:
 
@@ -93,6 +99,10 @@ class VllmPluginLauncher:
     """
 
     name = "vllm-plugin"
+
+    #: serve fields a profile must carry for this kind. max_num_seqs/block_size are
+    #: engine settings the TT backend has no working default for.
+    REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device", "max_num_seqs", "block_size")
 
     #: keys the manifest's ``runtime:`` block may contain for this kind
     RUNTIME_KEYS = ("vllm", "plugin", "extension", "extra_models_dir", "lock",
@@ -346,6 +356,9 @@ class VllmForkLauncher:
     """
 
     name = "vllm-fork"
+
+    #: see VllmPluginLauncher.REQUIRED_SERVE_FIELDS
+    REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device", "max_num_seqs", "block_size")
 
     #: keys the manifest's ``runtime:`` block may contain for this kind
     RUNTIME_KEYS = ("vllm", "extension", "lock", "model_dir")
@@ -617,10 +630,219 @@ def _capability_argv(profile: ServeProfile) -> List[str]:
     return argv
 
 
+class TtDitServerLauncher:
+    """``kind: tt-dit-server`` — a diffusion model served by its own HTTP app.
+
+    Diffusion transformers do not serve through vLLM: there are no tokens, no KV cache
+    and no continuous batching, so the whole engine layer means nothing to them. What
+    they need instead is a warm pipeline behind a small HTTP surface, which tt-metal
+    ships per model under ``models/tt_dit/server/<model>``. This kind installs the HTTP
+    stack and launches that app with uvicorn.
+
+    The serving stack is therefore the model's own code, already inside the image via
+    ``source.code``. That is why ``verify_lines`` imports the app module: an
+    under-shipped allowlist would otherwise only surface on a consumer's first boot.
+    """
+
+    name = "tt-dit-server"
+
+    #: A diffusion server has no continuous-batching engine, so it needs neither
+    #: max_num_seqs nor block_size. It still needs to know its hardware and mesh.
+    REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device")
+
+    #: keys the manifest's ``runtime:`` block may contain for this kind
+    RUNTIME_KEYS = ("app", "packages", "lock", "mesh_shape_env")
+
+    #: Env var carrying the resolved mesh SHAPE, when the manifest does not name one.
+    #: These servers read the shape from the environment under a name they each choose;
+    #: FLUX.2 reads ``FLUX2_MESH_SHAPE``, and it is the default only because it is the
+    #: model this kind was built for. A second diffusion model sets ``mesh_shape_env``
+    #: rather than inheriting a name that means nothing to it.
+    DEFAULT_MESH_SHAPE_ENV = "FLUX2_MESH_SHAPE"
+
+    #: uvicorn logs this once the ASGI lifespan has finished, which for these servers
+    #: means the pipeline is warm and the device is claimed.
+    READY_LINE = "Application startup complete"
+
+    PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+    DEFAULT_PACKAGES = ("fastapi", "uvicorn", "pydantic>=2", "pillow")
+
+    def validate(self, m: "ContainerManifest") -> None:
+        from .container_manifest import ContainerManifestError
+
+        rt = m.runtime
+        for key in rt:
+            if key not in self.RUNTIME_KEYS:
+                raise ContainerManifestError(
+                    f"runtime key {key!r} is not valid for kind {self.name}; allowed: "
+                    + ", ".join(self.RUNTIME_KEYS)
+                )
+
+        app = rt.get("app")
+        if not app or not isinstance(app, str) or ":" not in app:
+            raise ContainerManifestError(
+                f"kind {self.name} requires runtime.app, the ASGI target to serve, as "
+                '"module.path:attribute" — e.g. "models.tt_dit.server.flux2.app:app".'
+            )
+
+        # The app lives in the model's own tree, so it only exists in the image if the
+        # allowlist ships it. Catch a missing prefix here rather than in the image.
+        top = app.split(":", 1)[0].split(".")[0]
+        if not any(c.split("/")[0] == top for c in m.source.code):
+            raise ContainerManifestError(
+                f"runtime.app {app!r} lives under {top!r}, which no source.code entry "
+                "ships. Add the package holding the server to source.code."
+            )
+
+        # The name is interpolated into `docker run --env K=V` and into an `export K=...`
+        # line in the image's default CMD, so a junk one is a broken shell line inside a
+        # built image rather than a load-time error.
+        shape_env = rt.get("mesh_shape_env")
+        if shape_env is not None and (
+            not isinstance(shape_env, str)
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", shape_env)
+        ):
+            raise ContainerManifestError(
+                f"runtime.mesh_shape_env {shape_env!r} is not a valid environment variable "
+                f"name — expected letters, digits and '_', not starting with a digit "
+                f"(default: {self.DEFAULT_MESH_SHAPE_ENV})."
+            )
+
+    # ---- build -----------------------------------------------------------------------
+
+    def install_lines(self, m: "ContainerManifest") -> List[str]:
+        rt = m.runtime
+        if rt.get("lock"):
+            # The lock IS the dependency set: nothing resolves at build time, so two
+            # builds a week apart produce the same environment.
+            return [
+                'uv pip install --python "$VENV/bin/python" -r /ctx/requirements.lock '
+                f"--extra-index-url {self.PYTORCH_CPU_INDEX} --index-strategy unsafe-best-match"
+            ]
+        packages = [str(p) for p in (rt.get("packages") or ())] or list(self.DEFAULT_PACKAGES)
+
+        # Nothing in an HTTP stack depends on torch, and diffusers/transformers declare it
+        # optional — so unlike the vLLM kinds, where torch arrives as an engine dependency,
+        # nothing here pulls it in. ttnn's extension modules are built against tt-metal's
+        # pinned torch, so install exactly that rather than whatever resolves.
+        if not any(re.match(r"^torch\b", p) for p in packages):
+            pin = metal_torch_pin(_local_metal_tree(m))
+            packages.insert(0, f"torch=={pin}" if pin else "torch")
+
+        quoted = " ".join(shlex.quote(p) for p in packages)
+        return [
+            f'uv pip install --python "$VENV/bin/python" {quoted} '
+            f"--extra-index-url {self.PYTORCH_CPU_INDEX} --index-strategy unsafe-best-match"
+        ]
+
+    def verify_lines(self, m: "ContainerManifest") -> List[str]:
+        app = str(m.runtime["app"])
+        module, attr = app.split(":", 1)
+        checks = [
+            "import ttnn",
+            "import fastapi, uvicorn, pydantic",
+            "import torch; assert torch.__version__.endswith('+cpu'), torch.__version__",
+        ]
+        pin = metal_torch_pin(_local_metal_tree(m))
+        if pin:
+            checks.append(
+                f"import torch; v = torch.__version__.split('+')[0]; "
+                f"assert v == {pin!r}, "
+                f"f'torch {{v}} is installed but tt-metal pins {pin}; ttnn extension "
+                f"modules were built against {pin} — pin it via runtime.lock'"
+            )
+        # Import the app itself. This is what makes source.code trustworthy: it resolves
+        # the ASGI attribute the way uvicorn will, so an allowlist missing the server
+        # package fails here, on the author's machine, not on a consumer's first boot.
+        checks.append(
+            f"import importlib; mod = importlib.import_module({module!r}); "
+            f"assert hasattr(mod, {attr!r}), 'imported {module} but it has no {attr}'"
+        )
+        lines = [f'"$VENV/bin/python" -c {shlex.quote("; ".join(checks))}']
+        lines += [f'"$VENV/bin/python" -c {shlex.quote(v)}' for v in m.verify]
+        return lines
+
+    # ---- serve -----------------------------------------------------------------------
+
+    def serve_argv(self, m: Manifest, profile: ServeProfile) -> List[str]:
+        argv = [
+            "python",
+            "-m",
+            "uvicorn",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(profile.port or 8000),
+            "--lifespan",
+            "on",
+        ]
+        argv += profile.flat_args()
+        argv.append(_container_app(m))
+        return argv
+
+    def serve_env(self, m: Manifest, profile: ServeProfile) -> Dict[str, str]:
+        from .container_manifest import parse_mesh_device
+
+        env: Dict[str, str] = {"HF_MODEL": _weights_id(m)}
+        if profile.mesh_device:
+            # The manifest names a SKU ("QB2"); the servers take a shape ("2x2"). Resolve
+            # it here so the two can never drift apart. Which variable carries the shape is
+            # the model's choice, not this kind's — see DEFAULT_MESH_SHAPE_ENV.
+            rows, cols = parse_mesh_device(profile.mesh_device)
+            env["MESH_DEVICE"] = profile.mesh_device
+            env[_mesh_shape_env(m)] = f"{rows}x{cols}"
+        env.update(profile.env)
+        return env
+
+    def ready_probe(self, m: Manifest) -> str:
+        return self.READY_LINE
+
+
+def _mesh_shape_env(m: Manifest) -> str:
+    """Name of the env var carrying the mesh shape, per the published manifest.
+
+    Absent on every manifest published before the key existed, which is why it falls back
+    to the FLUX.2 name rather than emitting nothing: a bundle in the wild carries whatever
+    it was published with, and dropping the variable would leave its server converting
+    against a default mesh with no error anywhere.
+    """
+    container = getattr(m, "container", None)
+    runtime = getattr(container, "runtime", {}) if container is not None else {}
+    return str(runtime.get("mesh_shape_env") or TtDitServerLauncher.DEFAULT_MESH_SHAPE_ENV)
+
+
+def _container_app(m: Manifest) -> str:
+    """The ASGI target recorded on a published manifest."""
+    container = getattr(m, "container", None)
+    runtime = getattr(container, "runtime", {}) if container is not None else {}
+    app = runtime.get("app")
+    if not app:
+        raise LauncherError(
+            f"manifest has no container.runtime.app, so kind "
+            f"{TtDitServerLauncher.name} cannot know what to serve"
+        )
+    return str(app)
+
+
 KINDS: Dict[str, object] = {
     VllmPluginLauncher.name: VllmPluginLauncher(),
     VllmForkLauncher.name: VllmForkLauncher(),
+    TtDitServerLauncher.name: TtDitServerLauncher(),
 }
+
+#: Used when a kind is unknown or predates ``REQUIRED_SERVE_FIELDS``.
+_DEFAULT_REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device", "max_num_seqs", "block_size")
+
+
+def required_serve_fields(kind: str) -> tuple:
+    """Which ``serve:`` fields a profile must carry for ``kind``.
+
+    An unknown kind falls back to the historical set rather than raising: manifest
+    validation reports a bad kind on its own, and that report should not be masked by a
+    confusing complaint about missing engine settings.
+    """
+    launcher = KINDS.get(kind)
+    return tuple(getattr(launcher, "REQUIRED_SERVE_FIELDS", _DEFAULT_REQUIRED_SERVE_FIELDS))
 
 
 def launcher_for(kind: str):

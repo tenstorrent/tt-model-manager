@@ -524,18 +524,34 @@ def hf_cache_dir(repo_id: str) -> Optional[Path]:
     return d if d.is_dir() else None
 
 
+def _tree_size(d: Path) -> str:
+    """Formatted size of a directory tree, for a message about removing or keeping it.
+
+    A cache is only worth a sentence because of how big it is — the converted-weight tree
+    is 105 GB for FLUX.2 — so the number is the message. Broken files are skipped rather
+    than raising: this only ever decorates a note.
+    """
+    total = 0
+    for f in d.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            continue
+    return console.fmt_bytes(total)
+
+
 def _purge_hf(repo_id: str, what: str) -> None:
     d = hf_cache_dir(repo_id)
     if d is None:
         return
-    size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
-    with console.step(f"removing the cached {what} ({console.fmt_bytes(size)})"):
+    with console.step(f"removing the cached {what} ({_tree_size(d)})"):
         shutil.rmtree(d, ignore_errors=True)
 
 
 def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = False,
                      include_weights: bool = False) -> None:
-    """Undo a pull: containers, image, pulled manifest, index entry, JIT cache.
+    """Undo a pull: containers, image, pulled manifest, index entry, both host caches.
 
     ``tt-model rm`` predates this path and could only remove a kernel-cache subtree or a
     vLLM bundle folder, so for a container package it removed the index entry, reported
@@ -551,7 +567,6 @@ def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = Fal
     """
     spec = manifest.container
     assert spec is not None
-    name = manifest.name
 
     # 1. any containers, running or not
     stopped = 0
@@ -580,14 +595,29 @@ def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = Fal
     shutil.rmtree(pull_dir(repo_id), ignore_errors=True)
     localdb.remove(repo_id)
 
-    # 4. the JIT kernel cache — the expensive thing to rebuild, so it is opt-out
+    # 4. the host caches — the expensive things to rebuild, so removal is opt-out.
+    #
+    # Both live under one per-model parent (`cache/` for JIT kernels, `weights/` for
+    # weights converted to device layout), and the parent is what goes. Gate on the PARENT,
+    # not on `cache/`: a boot that converted weights but never wrote a JIT cache has no
+    # `cache/` at all, and gating on it there orphaned the weight tree — 105 GB for
+    # FLUX.2 — with nothing printed, because the note lived inside the same branch.
     cache = container.model_cache_dir(manifest)
+    weights = container.model_weight_cache_dir(manifest)
+    root = cache.parent
     if keep_cache:
-        console.note(f"kernel cache kept at {cache}", marker="○")
-    elif cache.exists():
-        shutil.rmtree(cache.parent, ignore_errors=True)
-        console.note("kernel cache removed — the next boot recompiles (~10 min)",
-                     marker="•")
+        # Naming only the kernel cache here understated this by two orders of magnitude:
+        # the weight tree is kept too, and it is the big one.
+        console.note(f"caches kept at {root} ({_tree_size(root)})", marker="○")
+    elif root.exists():
+        freed = _tree_size(root)
+        had_weights = weights.exists()  # must be read BEFORE the tree goes
+        shutil.rmtree(root, ignore_errors=True)
+        console.note(
+            f"caches removed ({freed}) — the next boot recompiles kernels (~10 min)"
+            + (" and reconverts weights" if had_weights else ""),
+            marker="•",
+        )
 
     # 5. the package's own blobs in the HF cache, so a re-pull really downloads
     _purge_hf(repo_id, "package snapshot")

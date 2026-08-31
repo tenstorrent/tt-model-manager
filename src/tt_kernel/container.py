@@ -187,10 +187,12 @@ def hf_home() -> Path:
 def _safe_name(name: str) -> str:
     """Refuse a name that would escape the managed cache dir when used as a path component.
 
-    ``model_cache_dir`` builds a path from ``manifest.name`` that ``remove_container``
-    deletes with ``rmtree``. Authoring validates the name (see ``ContainerManifest``), but a
-    hand-crafted *pulled* ``tt_kernel_manifest.json`` reaches ``Manifest`` directly, so guard
-    here too — a ``../..`` or absolute name must never drive an rmtree outside the cache root.
+    ``model_cache_dir`` and ``model_weight_cache_dir`` both build a path from
+    ``manifest.name``; ``remove_container`` deletes their shared parent with ``rmtree``, and
+    both are ``mkdir``'d and bind-mounted before a run. Authoring validates the name (see
+    ``ContainerManifest``), but a hand-crafted *pulled* ``tt_kernel_manifest.json`` reaches
+    ``Manifest`` directly, so guard here too — a ``../..`` or absolute name must never drive
+    an rmtree, an mkdir, or a mount outside the cache root.
     """
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", name or ""):
         raise ContainerError(
@@ -205,6 +207,27 @@ def model_cache_dir(m: Manifest) -> Path:
     return Path.home() / ".cache" / "tt-model" / _safe_name(m.name) / "cache"
 
 
+def model_weight_cache_dir(m: Manifest) -> Path:
+    """Host-side converted-weight cache, per model. Survives container removal.
+
+    Distinct from the JIT kernel cache above: this holds weights already converted to
+    device layout. Without it a diffusion model reconverts them on every start. Measured
+    on FLUX.2 (32B transformer + 24B encoder, 2x2 mesh): 291s to ready while writing the
+    cache, 80s reading it.
+
+    It costs disk roughly equal to the weights themselves — 105 GB for FLUX.2, on top of
+    the ~106 GB the HF cache already holds — because converted tensors are stored per
+    checkpoint, parallel config and mesh shape. That is a real tradeoff on a small disk,
+    not a free win. Delete this directory to reclaim it; the next boot reconverts.
+
+    Keyed per model to match ``model_cache_dir`` — same ``_safe_name`` guard, same parent,
+    which is what lets ``remove_container`` drop both in one rmtree; tt_dit keys its own
+    subdirectories by checkpoint, parallel config and mesh shape, so nothing collides
+    inside one tree.
+    """
+    return Path.home() / ".cache" / "tt-model" / _safe_name(m.name) / "weights"
+
+
 def compose_run(
     m: Manifest,
     profile: ServeProfile,
@@ -214,6 +237,7 @@ def compose_run(
     detach: bool = True,
     hf_home_dir: Optional[Path] = None,
     cache_dir: Optional[Path] = None,
+    weight_cache_dir: Optional[Path] = None,
     include_hf_token: Optional[bool] = None,
 ) -> List[str]:
     """The full ``docker run`` argv for one serve profile.
@@ -225,6 +249,7 @@ def compose_run(
     port = profile.port or 8000
     hf = Path(hf_home_dir) if hf_home_dir is not None else hf_home()
     cache = Path(cache_dir) if cache_dir is not None else model_cache_dir(m)
+    weights = Path(weight_cache_dir) if weight_cache_dir is not None else model_weight_cache_dir(m)
     if include_hf_token is None:
         include_hf_token = bool(os.environ.get("HF_TOKEN"))
 
@@ -247,6 +272,11 @@ def compose_run(
         "--env", "HF_HOME=/hf",
         "--volume", f"{cache}:/cache",
         "--env", "TT_METAL_CACHE=/cache",
+        # Converted weights. The variable lives beside its mount on purpose: split
+        # across two files they drift, and a cache dir with no variable pointing at it
+        # is silently ignored — which is exactly how this went unnoticed.
+        "--volume", f"{weights}:/weight-cache",
+        "--env", "TT_DIT_CACHE_DIR=/weight-cache",
         "--publish", f"{port}:{port}",
     ]
     if include_hf_token:
@@ -261,7 +291,8 @@ def compose_run(
 
 
 def ensure_mount_sources(m: Manifest, *, hf_home_dir: Optional[Path] = None,
-                         cache_dir: Optional[Path] = None) -> None:
+                         cache_dir: Optional[Path] = None,
+                         weight_cache_dir: Optional[Path] = None) -> None:
     """Create the bind-mount source dirs, as the host user, before ``docker run``.
 
     If they do not exist the docker daemon creates them itself — owned by ROOT — and the
@@ -273,7 +304,8 @@ def ensure_mount_sources(m: Manifest, *, hf_home_dir: Optional[Path] = None,
     """
     hf = Path(hf_home_dir) if hf_home_dir is not None else hf_home()
     cache = Path(cache_dir) if cache_dir is not None else model_cache_dir(m)
-    for d in (hf, cache):
+    weights = Path(weight_cache_dir) if weight_cache_dir is not None else model_weight_cache_dir(m)
+    for d in (hf, cache, weights):
         d.mkdir(parents=True, exist_ok=True)
 
 
