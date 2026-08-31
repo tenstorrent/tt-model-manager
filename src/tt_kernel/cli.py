@@ -1205,6 +1205,7 @@ def serve(
             container_cli.serve_container(
                 cmani, profile_name=profile, print_only=print_only, follow=follow,
                 extra_args=extra_args, source=src, port=port, target=repo_id,
+                local_only=local_only,
             )
         except (container_cli.ContainerCliError, container.ContainerError) as e:
             raise _err(str(e))

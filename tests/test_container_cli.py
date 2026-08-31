@@ -1170,3 +1170,72 @@ def test_serve_does_not_refresh_under_local_only(tmp_path, monkeypatch):
                         lambda *a, **k: pytest.fail("--local-only must not hit the Hub"))
     assert runner.invoke(
         cli.app, ["serve", "org/x", "--refresh", "--local-only"]).exit_code == 0
+
+
+# ------------------------------------- missing image on an installed pulled package
+#
+# A pulled package keeps ONLY the manifest: pull_container loads the image from a
+# TemporaryDirectory and lets the multi-GB layout go, so docker's store is the sole local
+# copy. `docker image rm` / `docker system prune` then leaves an installed record pointing
+# at nothing, and serve's layout self-heal cannot fire (no `image/` beside the manifest).
+
+
+def _image_gone(monkeypatch):
+    monkeypatch.setattr(container, "is_running", lambda n: False)
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(True, 1.0, None))
+
+
+def test_a_deleted_image_is_re_pulled_at_the_recorded_revision(tmp_path, monkeypatch):
+    """The repair must not smuggle in an update: --refresh is the only opt-in for moving to
+    the Hub tip, so this re-pulls the revision the install recorded."""
+    _image_gone(monkeypatch)
+    monkeypatch.setattr(container_cli.localdb, "get",
+                        lambda r: {"repo_id": r, "revision": "cafe1234"})
+    calls = []
+
+    def fake_pull(repo_id, revision, manifest, *, no_weights=False):
+        calls.append((repo_id, revision, no_weights))
+        monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
+
+    monkeypatch.setattr(container_cli, "pull_container", fake_pull)
+    container_cli.serve_container(_manifest(tmp_path), target="org/m")
+    assert calls == [("org/m", "cafe1234", True)], calls
+
+
+def test_local_only_does_not_re_pull_a_deleted_image(tmp_path, monkeypatch):
+    """--local-only means "do not touch the network", and a repair is still network."""
+    _image_gone(monkeypatch)
+    monkeypatch.setattr(container_cli.localdb, "get",
+                        lambda r: {"repo_id": r, "revision": "cafe1234"})
+    monkeypatch.setattr(container_cli, "pull_container",
+                        lambda *a, **k: pytest.fail("re-pulled under --local-only"))
+    with pytest.raises(container_cli.ContainerCliError, match="not loaded in docker"):
+        container_cli.serve_container(_manifest(tmp_path), target="org/m",
+                                      local_only=True)
+
+
+def test_a_repair_that_does_not_produce_the_image_fails_loudly(tmp_path, monkeypatch):
+    """A re-pull reporting success while the image is still absent must not fall through to
+    a docker run that would fail with something unrelated."""
+    _image_gone(monkeypatch)
+    monkeypatch.setattr(container_cli.localdb, "get",
+                        lambda r: {"repo_id": r, "revision": "cafe1234"})
+    monkeypatch.setattr(container_cli, "pull_container", lambda *a, **k: None)
+    with pytest.raises(container_cli.ContainerCliError, match="still not loaded"):
+        container_cli.serve_container(_manifest(tmp_path), target="org/m")
+
+
+def test_the_hint_names_the_actual_target_not_a_placeholder(tmp_path, monkeypatch):
+    """With nothing installed there is no baseline to repair from, so the message stands —
+    but it must name what the user typed rather than <namespace/name>."""
+    _image_gone(monkeypatch)
+    monkeypatch.setattr(container_cli.localdb, "get", lambda r: None)
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_manifest(tmp_path), target="org/m")
+    assert "tt-model pull org/m" in str(e.value)

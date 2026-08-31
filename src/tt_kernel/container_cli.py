@@ -391,7 +391,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     extra_args: Optional[List[str]] = None,
                     source: Optional[Path] = None,
                     port: Optional[int] = None,
-                    target: Optional[str] = None) -> None:
+                    target: Optional[str] = None,
+                    local_only: bool = False) -> None:
     """Run one serve profile.
 
     ``source`` is the staged/pulled dir the manifest came from, used to reload the image
@@ -449,14 +450,42 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                 with console.step(f"docker load {ref} (image was not loaded)"):
                     oci.load(layout, expect_tag=ref)
             else:
-                raise ContainerCliError(
-                    f"image {ref} is not loaded in docker.\n"
-                    f"  → if you have the staged package dir:  tt-model serve "
-                    f"<dir>/{MANIFEST_NAME}\n"
-                    f"  → if it was published:                 tt-model pull <namespace/name>\n"
-                    f"  → otherwise rebuild it:                tt-model package --container "
-                    f"<manifest.yaml>"
+                # A PULLED package keeps only the manifest: pull_container loads the image
+                # from a TemporaryDirectory and lets the multi-GB layout go, so docker's
+                # store is the only local copy. An ordinary `docker image rm` / `system
+                # prune` therefore leaves an installed record pointing at nothing, and the
+                # self-heal above cannot fire (there is no `image/` beside the manifest).
+                # Re-fetch rather than dead-ending. This is NOT an update check -- those
+                # stay opt-in behind --refresh -- so it re-pulls the RECORDED revision,
+                # reproducing the image this manifest describes rather than the Hub tip.
+                entry = localdb.get(target) if target else None
+                repairable = (
+                    bool(target) and not local_only and spec.image.is_hub_hosted
+                    and bool(entry) and not Path(str(target)).exists()
                 )
+                if repairable:
+                    console.note(
+                        f"image {ref} is missing from docker (deleted or pruned); "
+                        f"re-pulling it from {target}",
+                        marker="↻",
+                    )
+                    pull_container(str(target), (entry or {}).get("revision"), manifest,
+                                   no_weights=True)
+                    if container.loaded_digest(ref) is None:
+                        raise ContainerCliError(
+                            f"re-pulled {target} but image {ref} is still not loaded; "
+                            f"rebuild it with `tt-model package --container <manifest.yaml>`"
+                        )
+                else:
+                    hint = target if target and "/" in str(target) else "<namespace/name>"
+                    raise ContainerCliError(
+                        f"image {ref} is not loaded in docker.\n"
+                        f"  → if you have the staged package dir:  tt-model serve "
+                        f"<dir>/{MANIFEST_NAME}\n"
+                        f"  → if it was published:                 tt-model pull {hint}\n"
+                        f"  → otherwise rebuild it:                tt-model package "
+                        f"--container <manifest.yaml>"
+                    )
 
     launcher = launcher_for(spec.kind)
     argv = launcher.serve_argv(manifest, profile) + list(extra_args or [])
