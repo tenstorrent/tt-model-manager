@@ -187,10 +187,12 @@ def hf_home() -> Path:
 def _safe_name(name: str) -> str:
     """Refuse a name that would escape the managed cache dir when used as a path component.
 
-    ``model_cache_dir`` builds a path from ``manifest.name`` that ``remove_container``
-    deletes with ``rmtree``. Authoring validates the name (see ``ContainerManifest``), but a
-    hand-crafted *pulled* ``tt_kernel_manifest.json`` reaches ``Manifest`` directly, so guard
-    here too — a ``../..`` or absolute name must never drive an rmtree outside the cache root.
+    ``model_cache_dir`` and ``model_weight_cache_dir`` both build a path from
+    ``manifest.name``; ``remove_container`` deletes their shared parent with ``rmtree``, and
+    both are ``mkdir``'d and bind-mounted before a run. Authoring validates the name (see
+    ``ContainerManifest``), but a hand-crafted *pulled* ``tt_kernel_manifest.json`` reaches
+    ``Manifest`` directly, so guard here too — a ``../..`` or absolute name must never drive
+    an rmtree, an mkdir, or a mount outside the cache root.
     """
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", name or ""):
         raise ContainerError(
@@ -218,10 +220,12 @@ def model_weight_cache_dir(m: Manifest) -> Path:
     checkpoint, parallel config and mesh shape. That is a real tradeoff on a small disk,
     not a free win. Delete this directory to reclaim it; the next boot reconverts.
 
-    Keyed per model to match ``model_cache_dir``; tt_dit keys its own subdirectories by
-    checkpoint, parallel config and mesh shape, so nothing collides inside one tree.
+    Keyed per model to match ``model_cache_dir`` — same ``_safe_name`` guard, same parent,
+    which is what lets ``remove_container`` drop both in one rmtree; tt_dit keys its own
+    subdirectories by checkpoint, parallel config and mesh shape, so nothing collides
+    inside one tree.
     """
-    return Path.home() / ".cache" / "tt-model" / m.name / "weights"
+    return Path.home() / ".cache" / "tt-model" / _safe_name(m.name) / "weights"
 
 
 def compose_run(
