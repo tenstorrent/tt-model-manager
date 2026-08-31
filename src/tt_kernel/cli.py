@@ -935,36 +935,151 @@ def _warn_if_update_available(repo_id: str, entry: dict) -> None:
         )
 
 
-def _refresh_self_contained(repo_id: str, entry: dict, *, force: bool, arch: Optional[str]) -> None:
+def _refresh_install(
+    repo_id, snapshot, manifest, *, force, arch, dest: Path, with_weights,
+    revision=None, resolved_revision=None,
+) -> None:
+    """Install a refreshed bundle over an existing one WITHOUT destroying the working install
+    until the new one is proven good.
+
+    Runs the same compat/wheel gates as ``_install_self_contained``, then renames the current
+    install aside, materializes the new tree and builds its venv **at the final ``dest``**, and
+    only records the new revision once the venv build (and optional weight fetch) succeed. Any
+    failure rmtrees the half-built new tree and moves the original back, so a refresh that breaks
+    leaves the user exactly where they started.
+
+    Why build at ``dest`` and not in a sibling we rename in: a venv is not relocatable (its
+    scripts and ``pyvenv.cfg`` hardcode absolute paths), so the interpreter must be built at the
+    path we record. Renaming the *old* tree aside first gives us the same safety (original intact
+    and restorable) without moving the fresh venv after it is built.
+    """
+    env = metal.local_env(arch_override=arch)
+    report = compare(manifest, env)
+    _print_report(report)
+    if report.has_fatal:
+        raise _err("Refusing to refresh: fatal incompatibility (see above).")
+    if report.issues and not force:
+        raise _err("Refusing to refresh: re-run with --force to override the warnings above.")
+    if manifest.bundled is not None:
+        bad = packaging.host_incompatible_wheels(manifest.bundled)
+        if bad:
+            for b in bad:
+                typer.secho(f"  ! {b}", fg=typer.colors.YELLOW)
+            if not force:
+                raise _err("Shipped wheel(s) not built for this interpreter/platform; "
+                           "--force to attempt anyway (likely to fail at pip install).")
+
+    aside = dest.parent / f"{dest.name}.old-{os.getpid()}"
+    if aside.exists():
+        shutil.rmtree(aside)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    moved_aside = False
+    if dest.exists():
+        os.rename(dest, aside)  # move the working install aside — restored on any failure below
+        moved_aside = True
+    try:
+        shutil.copytree(snapshot, dest)
+        typer.echo("Installing shipped wheels + deps into a fresh venv (downloads torch/deps) ...")
+        try:
+            venv_python = runtime.install_self_contained(dest, dest / "venv")
+        except subprocess.CalledProcessError as exc:
+            raise _err(f"install.sh failed (exit {exc.returncode}). See output above.")
+        except FileNotFoundError as exc:
+            raise _err(str(exc))
+
+        weights_path: Optional[Path] = None
+        if with_weights and manifest.weights:
+            # The user pre-staged weights; keep them across the refresh (resumable from the HF
+            # cache) instead of silently dropping them and refetching at load time.
+            typer.echo(f"Downloading weights {manifest.weights.repo_id} ...")
+            weights_path = runtime.download_weights(manifest.weights, dest / "weights")
+
+        run_script = dest / ((manifest.bundled.run_script if manifest.bundled else None) or "run.sh")
+        localdb.record(repo_id, {
+            "repo_id": repo_id,
+            "self_contained": True,
+            "install_dir": str(dest),
+            "bundle_path": str(dest),
+            "python": str(venv_python),
+            "run_script": str(run_script),
+            "arch": manifest.arch,
+            "weights": manifest.weights.repo_id if manifest.weights else None,
+            "weights_path": str(weights_path) if weights_path else None,
+            "revision": resolved_revision,
+            "pinned": revision is not None,
+        })
+    except BaseException:  # noqa: BLE001 — roll back: drop the half-built new tree, restore original
+        shutil.rmtree(dest, ignore_errors=True)
+        if moved_aside:
+            os.rename(aside, dest)
+        raise
+    if moved_aside:
+        shutil.rmtree(aside, ignore_errors=True)  # new install proven good; drop the old copy
+    typer.secho(f"✓ refreshed self-contained bundle -> {dest}", fg=typer.colors.GREEN)
+
+
+def _refresh_self_contained(
+    repo_id: str, entry: dict, *, force: bool, arch: Optional[str],
+    revision: Optional[str], print_only: bool,
+) -> None:
     """Opt-in (``serve --refresh``): if the Hub tip is newer than the installed revision, re-pull
     and re-install the bundle IN PLACE before serving, so a republished source doesn't get served
-    with stale launch params. Never blocks a serve: if the tip can't be resolved (offline) or is
-    already what's installed, this is a no-op and we serve the installed bundle as-is.
+    with stale launch params.
 
-    Skips a pinned install (the user chose that ``@revision`` — don't move it off it). The actual
-    reuse-vs-reinstall decision is left to ``_install_self_contained``, which rmtrees + reinstalls
-    only when the resolved sha differs from the recorded one (a plain, non-``--force`` update).
+    Safe and non-fatal by construction — a refresh must never leave the user unserved:
+
+    - Skips a pinned install and one with no recorded ``revision`` (no honest baseline), mirroring
+      the advisory: never wipe an install we can't compare.
+    - Bounds the tip resolution with the same short timeout the advisory uses — a half-open network
+      must not hang a serve.
+    - Under ``--print`` does nothing at all (no Hub request, no rmtree, no rebuild) so the printed
+      command stays side-effect-free and pasteable; it just notes on stderr that it was skipped.
+    - Installs into ``entry["install_dir"]`` (honoring a custom ``--models-dir``) via the
+      non-destructive ``_refresh_install`` (stage/rollback), and threads an explicit ``@revision``
+      through so ``serve id@rev --refresh`` installs exactly that rev and re-pins it.
+    - Wraps the whole download+install so ANY failure (network, missing manifest, wrong schema,
+      compat/wheel gate, failed rebuild) warns once and returns — control then falls back to
+      serving the still-intact installed bundle.
     """
     if entry.get("pinned"):
         return
     installed = entry.get("revision")
-    latest = hub.latest_revision(repo_id, timeout=None)  # None => Hub unreachable; leave install as-is
+    if not installed:
+        # No recorded baseline (every install predating the revision field, or an offline install):
+        # there is no honest version to compare against, so never wipe/rebuild it.
+        return
+    if print_only:
+        # --print must stay side-effect-free and its stdout a pasteable command: do NOT hit the
+        # Hub, rmtree, or rebuild. Just say (on stderr) that the refresh would run under a real serve.
+        typer.secho("○ --refresh skipped under --print (no re-pull/rebuild); printing the "
+                    f"installed bundle's command. Run `tt-model serve {repo_id} --refresh` to "
+                    "actually refresh.", fg=typer.colors.CYAN, err=True)
+        return
+    latest = hub.latest_revision(repo_id, revision, timeout=3.0)  # bounded: a serve must not hang
     if not latest or latest == installed:
         return
-    typer.secho(f"↻ refreshing {repo_id}: {(installed or '?')[:8]} → {latest[:8]}", fg=typer.colors.CYAN)
-    with tempfile.TemporaryDirectory() as td:
-        snapshot = _hub(lambda: hub.download_bundle(repo_id, latest, dest=td),
-                        repo_id, what="Refresh",
-                        consequence="Kept the installed bundle; serving it as-is.")
-        manifest_path = snapshot / MANIFEST_NAME
-        if not manifest_path.is_file():
-            raise _err(f"{repo_id} is not a tt-model bundle (no {MANIFEST_NAME}).")
-        mani = Manifest.from_json(manifest_path.read_text())
-        if not mani.has_own_venv:
-            raise _err(f"{repo_id} is not a self-contained bundle (schema {mani.schema_version}).")
-        _install_self_contained(repo_id, snapshot, mani, force=force, arch=arch,
-                                models_dir=None, with_weights=False,
-                                revision=None, resolved_revision=latest)
+    dest = Path(entry.get("install_dir") or runtime.resolve_models_dir(None, repo_id))
+    typer.secho(f"↻ refreshing {repo_id}: {installed[:8]} → {latest[:8]}", fg=typer.colors.CYAN)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            snapshot = hub.download_bundle(repo_id, latest, dest=td)
+            manifest_path = snapshot / MANIFEST_NAME
+            if not manifest_path.is_file():
+                raise _err(f"{repo_id} is not a tt-model bundle (no {MANIFEST_NAME}).")
+            mani = Manifest.from_json(manifest_path.read_text())
+            if not mani.has_own_venv:
+                raise _err(f"{repo_id} is not a self-contained bundle (schema {mani.schema_version}).")
+            _refresh_install(
+                repo_id, snapshot, mani, force=force, arch=arch, dest=dest,
+                with_weights=bool(entry.get("weights_path")),
+                revision=revision, resolved_revision=latest,
+            )
+    except BaseException as exc:  # noqa: BLE001 — a refresh must never be fatal to the serve
+        if console.is_verbose():
+            raise
+        why = "" if isinstance(exc, typer.Exit) else f" ({type(exc).__name__})"
+        typer.secho(f"! refresh of {repo_id} failed{why}; serving the installed bundle as-is.",
+                    fg=typer.colors.YELLOW, err=True)
 
 
 def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional[List[str]] = None) -> None:
@@ -1013,8 +1128,9 @@ def serve(
                                "warnings when the pull happens here."),
     arch: Optional[str] = typer.Option(None, "--arch", help="Override arch/machine detection."),
     no_update_check: bool = typer.Option(
-        False, "--no-update-check", help="Skip the best-effort check for a newer published "
-        "bundle revision (that check makes one short, timeout-bounded Hub request)."
+        False, "--no-update-check", help="Skip the best-effort advisory check for a newer "
+        "published bundle revision (that check makes one short, timeout-bounded Hub request). "
+        "Ignored when --refresh is given: --refresh is the explicit opt-in and still hits the Hub."
     ),
     profile: Optional[str] = typer.Option(
         None, "--profile", help="For a container package: which serve profile to launch "
@@ -1099,8 +1215,12 @@ def serve(
     entry = localdb.get(repo_id)
     if entry and entry.get("self_contained"):
         if not local_only and refresh:
-            # Opt-in: re-pull + re-install if a newer revision exists, then serve the fresh one.
-            _refresh_self_contained(repo_id, entry, force=force, arch=arch)
+            # Opt-in and the ONLY thing that hits the Hub here: re-pull + re-install if a newer
+            # revision exists, then serve the fresh one. It overrides --no-update-check (the
+            # explicit opt-in wins) but degrades to serving the installed bundle on any failure,
+            # and does nothing under --print. --local-only still suppresses it entirely.
+            _refresh_self_contained(repo_id, entry, force=force, arch=arch,
+                                    revision=revision, print_only=print_only)
             entry = localdb.get(repo_id) or entry  # re-read: the refresh may have updated the record
         elif not local_only and not no_update_check:
             _warn_if_update_available(repo_id, entry)
