@@ -411,8 +411,10 @@ def loaded_digest(ref: str) -> Optional[str]:
     usually enough, but a hand-tagged or hand-loaded image can sit under the right name and
     be the wrong image — so where correctness matters, compare digests.
     """
-    out = run_or_empty(["docker", "image", "inspect", ref, "--format", "{{.Id}}"]).strip()
-    return out or None
+    r = _run(["docker", "image", "inspect", ref, "--format", "{{.Id}}"],
+             capture_output=True, text=True)
+    out = r.stdout.strip() if r.returncode == 0 else ""
+    return out if out.startswith("sha256:") else None
 
 
 def remove_image(ref: str) -> bool:
