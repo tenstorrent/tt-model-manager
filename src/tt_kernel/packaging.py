@@ -535,6 +535,11 @@ def stage_package(
 
     try:
         shutil.copytree(metal_dir, staged / METAL_DIR, symlinks=True, ignore=_ignore)
+        # Make the staged tree self-contained: drop dangling links, materialize any that escape it.
+        # Inside the try (not after it) so its own unlink/copy2/copytree failures — EACCES/ENOSPC,
+        # or a shutil.Error from the recursive copy — surface as a StagingError with context too,
+        # rather than the raw traceback this function exists to prevent.
+        _normalize_staged_symlinks(staged / METAL_DIR)
     except shutil.Error as exc:  # per-entry failures accumulated across the whole walk
         details = []
         for item in (exc.args[0] if exc.args else []):
@@ -551,9 +556,6 @@ def stage_package(
         raise StagingError(
             f"Failed to stage the embedded metal tree from {metal_dir}: {exc}", [str(where)]
         ) from exc
-
-    # Make the staged tree self-contained: drop dangling links, materialize any that escape it.
-    _normalize_staged_symlinks(staged / METAL_DIR)
 
     # requirements.txt: prefer the metal tree's, else a minimal note.
     req_src = metal_dir / "requirements.txt"

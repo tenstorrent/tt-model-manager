@@ -262,6 +262,34 @@ def test_stage_package_special_file_raises_styled_error(tmp_path):
     assert "metal tree" in res.output
 
 
+def test_stage_package_normalize_failure_surfaces_as_staging_error(tmp_path, monkeypatch):
+    """A failure inside the symlink-normalization pass (its own unlink/copy2/copytree can hit
+    EACCES/ENOSPC) must surface as a styled StagingError, not a raw traceback — i.e. the call is
+    inside the same try/except as the initial copytree, not after it."""
+    import pytest
+
+    wheels = tmp_path / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
+    metal = tmp_path / "metal_src"
+    metal.mkdir()
+    (metal / "requirements.txt").write_text("torch==2.11.0\n")
+
+    # copytree succeeds; the normalization pass then blows up (simulate an ENOSPC/EACCES).
+    def _boom(root):
+        raise OSError("[Errno 28] No space left on device: normalize")
+
+    monkeypatch.setattr(packaging, "_normalize_staged_symlinks", _boom)
+
+    vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
+    with pytest.raises(packaging.StagingError) as ei:
+        packaging.stage_package(
+            tmp_path / "staged", name="m", arch="blackhole", ttnn_wheel=ttnn,
+            metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
+        )
+    assert "metal tree" in str(ei.value)  # wrapped with staging context, not a bare OSError
+
+
 def test_cli_package_stage_only(tmp_path):
     """`tt-model package ... --out <dir>` (no repo_id) stages the folder, no network."""
     wheels = tmp_path / "w"
