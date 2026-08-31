@@ -1239,3 +1239,87 @@ def test_the_hint_names_the_actual_target_not_a_placeholder(tmp_path, monkeypatc
     with pytest.raises(container_cli.ContainerCliError) as e:
         container_cli.serve_container(_manifest(tmp_path), target="org/m")
     assert "tt-model pull org/m" in str(e.value)
+
+# ------------------------------------------------- weights notice on the serve path
+#
+# Only serve-that-auto-pulls fetches weights. An already-installed package and the
+# missing-image repair both skip them, and the model then downloads them itself inside the
+# container -- supported, but silent and slow, so serve says so.
+
+
+def _serving_ok(monkeypatch):
+    monkeypatch.setattr(container, "is_running", lambda n: False)
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(True, 1.0, None))
+
+
+def test_serve_warns_when_the_weights_are_not_cached(tmp_path, monkeypatch, capsys):
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m")
+    out = capsys.readouterr().out
+    assert "not in your local HF cache" in out
+    assert "tt-model pull org/m --with-weights" in out
+    assert "hf download org/w" in out
+
+
+def test_serve_is_quiet_when_the_weights_are_cached(tmp_path, monkeypatch, capsys):
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: Path("/hf/x"))
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m")
+    assert "not in your local HF cache" not in capsys.readouterr().out
+
+
+def test_the_notice_names_the_pinned_revision(tmp_path, monkeypatch, capsys):
+    """A revision is the difference between the validated weights and today's tip, so the
+    hint must reproduce the pin rather than fetching whatever is current."""
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
+    container_cli.serve_container(
+        _manifest(tmp_path, weights={"repo": "org/w", "revision": "abcdef1234"}),
+        target="org/m")
+    out = capsys.readouterr().out
+    assert "org/w@abcdef12" in out
+    assert "--revision abcdef1234" in out
+
+
+def test_a_broken_weights_probe_never_fails_the_serve(tmp_path, monkeypatch):
+    """This drives ONE advisory line, so no failure in it may stop a serve that would
+    otherwise have worked."""
+    def boom(ref):
+        raise RuntimeError("hub exploded")
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "weights_cached", boom)
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m")  # must not raise
+
+
+def test_the_notice_is_suppressed_under_print(tmp_path, monkeypatch, capsys):
+    """--print composes an argv for scripting; it must stay free of advisory chatter."""
+    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m", print_only=True)
+    assert "not in your local HF cache" not in capsys.readouterr().out
+
+
+def test_weights_cached_is_offline_and_swallows_failures(monkeypatch, tmp_path):
+    """It must never reach the network on the serve path."""
+    import huggingface_hub
+    seen = {}
+
+    def fake(**kw):
+        seen.update(kw)
+        raise OSError("not cached")
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake)
+    m = _manifest(tmp_path, weights={"repo": "org/w", "revision": "deadbeef"})
+    assert container_cli.weights_cached(m.weights) is None
+    assert seen["local_files_only"] is True
+    assert seen["repo_id"] == "org/w" and seen["revision"] == "deadbeef"

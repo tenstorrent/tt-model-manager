@@ -301,6 +301,21 @@ fires when nothing is installed yet) does fetch them, so the two entry points di
 
 If weights can't be fetched the image still loads and the model fetches them at first boot.
 
+Because those three rows differ, `serve` checks the host HF cache before launching (offline —
+`snapshot_download(..., local_files_only=True)`, so "complete" honours the author's
+`allow_patterns`) and says so when the weights are absent:
+
+```
+⚠ weights org/Weights-7B@a1b2c3d4 are not in your local HF cache; the model will download
+  them inside the container at first load (slower, and no progress is shown here)
+→ to fetch them first instead:  tt-model pull org/name --with-weights
+→ or directly:  hf download org/Weights-7B --revision a1b2c3d4
+```
+
+It is advisory only: booting without them is supported (the cache is bind-mounted, so the
+bytes land on the host and are reused), and the check can never fail a serve that would
+otherwise have worked. Suppressed under `--print`.
+
 `serve` also reloads the image from the staged `image/` layout if docker no longer has it —
 but note this only helps a package you **built** locally. A *pulled* package keeps just
 `tt_kernel_manifest.json` (`pull_container` loads the image from a temporary snapshot and

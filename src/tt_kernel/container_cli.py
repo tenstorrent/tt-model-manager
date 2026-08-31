@@ -280,6 +280,58 @@ def _download_weights(ref) -> Path:
     ))
 
 
+def weights_cached(ref) -> Optional[Path]:
+    """The cached snapshot path if the pinned weights are already complete, else None.
+
+    Mirrors :func:`_download_weights` argument for argument, with ``local_files_only`` — so
+    "complete" means complete *for this spec* (the author's ``allow_patterns`` included), not
+    merely "some revision of this repo is in the cache". Never touches the network, so it is
+    safe on the serve path.
+
+    Returns None on ANY failure. This only drives an advisory note: a false "not cached"
+    costs the user one unnecessary line, while a raise here would fail a serve that would
+    otherwise have worked.
+    """
+    from huggingface_hub import snapshot_download
+
+    try:
+        return Path(snapshot_download(
+            repo_id=ref.repo_id,
+            revision=ref.revision,
+            allow_patterns=ref.allow_patterns,
+            ignore_patterns=ref.ignore_patterns,
+            local_files_only=True,
+        ))
+    except Exception:  # noqa: BLE001 — absent, incomplete, or unresolvable offline
+        return None
+
+
+def _weights_notice(manifest: Manifest, target: Optional[str]) -> None:
+    """Say so when serve is about to boot without the weights on the host.
+
+    Only ``serve``-that-auto-pulls fetches weights; an already-installed package and the
+    missing-image repair both skip them by design, and the model then downloads them itself
+    inside the container. That is a supported path -- the HF cache is bind-mounted, so the
+    bytes land on the host and are reused -- but it is silent, slow, and hidden behind the
+    readiness probe, which is a bad thing to discover as an unexplained multi-minute boot.
+    """
+    ref = manifest.weights
+    if ref is None or weights_cached(ref) is not None:
+        return
+    at = f"@{ref.revision[:8]}" if ref.revision else ""
+    console.note(
+        f"weights {ref.repo_id}{at} are not in your local HF cache; the model will "
+        f"download them inside the container at first load (slower, and no progress is "
+        f"shown here)",
+        marker="⚠", style="warning",
+    )
+    if target:
+        console.note(f"to fetch them first instead:  tt-model pull {target} --with-weights",
+                     marker="→")
+    rev = f" --revision {ref.revision}" if ref.revision else ""
+    console.note(f"or directly:  hf download {ref.repo_id}{rev}", marker="→")
+
+
 # --------------------------------------------------------------------------- refresh
 
 
@@ -486,6 +538,12 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                         f"  → otherwise rebuild it:                tt-model package "
                         f"--container <manifest.yaml>"
                     )
+
+    if not print_only:
+        try:
+            _weights_notice(manifest, target)
+        except Exception:  # noqa: BLE001 — one advisory line, never a reason not to serve
+            pass
 
     launcher = launcher_for(spec.kind)
     argv = launcher.serve_argv(manifest, profile) + list(extra_args or [])
