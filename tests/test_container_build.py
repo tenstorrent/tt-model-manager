@@ -296,8 +296,10 @@ def test_a_missing_digest_is_a_clear_error(tmp_path, monkeypatch):
 
 
 def _built(**over):
-    b = {"tt_metal": {"sha": "a" * 40, "dirty": False, "scm_version": "0.72.1"},
-         "vllm": {"repo": "r", "sha": "b" * 40},
+    b = {"tt_metal": {"sha": "a" * 40, "dirty": False, "scm_version": "0.72.1",
+                      "pushed": True,
+                      "remote": "https://github.com/tenstorrent/tt-metal"},
+         "vllm": {"repo": "https://github.com/tenstorrent/vllm", "sha": "b" * 40},
          "code_sha256": "c" * 64, "created_at": "2026-01-01T00:00:00+00:00",
          "tt_model_version": "0.1.0"}
     b.update(over)
@@ -367,7 +369,7 @@ def test_the_card_deep_links_every_pushed_pin():
     assert "| plugin |" not in card
 
 
-def test_the_card_never_links_an_unpushed_or_pathless_pin():
+def test_a_commit_that_is_not_public_is_not_shown_at_all():
     from tt_kernel.container_manifest import ContainerManifest
 
     m = ContainerManifest.model_validate(json.loads(json.dumps(BASE)))
@@ -377,9 +379,10 @@ def test_the_card_never_links_an_unpushed_or_pathless_pin():
         plugin={"sha": "d" * 40, "path": "/home/me/vllm-tt-plugin", "dirty": True},
     )
     card = build.render_model_card(m, built)
-    assert f"commit/{'a' * 40}" not in card  # a link to a 404 is worse than no link
-    assert "commit not on any remote" in card
-    assert f"commit/{'d' * 40}" not in card
+    # not the sha, not a link to it — the cell says the commit is unpublished instead
+    assert "a" * 40 not in card
+    assert "d" * 40 not in card
+    assert "commit not published" in card
     assert "dirty tree" in card
 
 

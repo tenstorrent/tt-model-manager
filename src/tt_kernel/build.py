@@ -855,11 +855,16 @@ def _https_repo_url(repo: str) -> Optional[str]:
     return repo.rstrip("/") if repo.startswith(("https://", "http://")) else None
 
 
-def _pinned_sha(sha: str, repo: Optional[str], *, flags: str = "") -> str:
-    """A provenance cell: the full sha, deep-linked to the commit when the repo is
-    browsable — a bare sha is something to stare at; a link is something to read."""
-    url = _https_repo_url(repo) if repo else None
-    cell = f"[`{sha}`]({url}/commit/{sha})" if url else f"`{sha}`"
+def _pinned_sha(sha: str, repo: Optional[str], *, public: bool = True,
+                flags: str = "") -> str:
+    """A provenance cell. The sha appears ONLY as a working public link: a commit a
+    reader cannot fetch (not pushed, or from a local path) is not shown at all — the
+    cell says where the build came from instead."""
+    url = _https_repo_url(repo) if (repo and public) else None
+    if url and sha and sha != "unknown":
+        cell = f"[`{sha}`]({url}/commit/{sha})"
+    else:
+        cell = "a local checkout — commit not published"
     return cell + (f" {flags}" if flags else "")
 
 
@@ -934,17 +939,14 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         "| --- | --- |",
     ]
 
-    # tt-metal: the sha, deep-linked to the commit when it is actually reachable there.
+    # tt-metal: the commit, shown only as a working public link.
     metal_sha = str(tt_metal.get("sha") or "unknown")
-    metal_flags = []
-    if tt_metal.get("dirty"):
-        metal_flags.append("*(dirty tree — the image includes uncommitted changes)*")
-    if tt_metal.get("pushed") is False:
-        metal_flags.append("*(commit not on any remote)*")
-    metal_repo = None if tt_metal.get("pushed") is False else tt_metal.get("remote")
+    dirty_flag = "*(dirty tree — the image includes uncommitted changes)*"
     lines.append(
         "| tt-metal | "
-        + _pinned_sha(metal_sha, metal_repo, flags=" ".join(metal_flags)) + " |"
+        + _pinned_sha(metal_sha, tt_metal.get("remote"),
+                      public=tt_metal.get("pushed") is not False,
+                      flags=dirty_flag if tt_metal.get("dirty") else "") + " |"
     )
 
     # vLLM: a released version, the author's own wheel, or a pinned checkout (the cell's
