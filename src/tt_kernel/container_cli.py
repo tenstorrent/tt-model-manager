@@ -280,6 +280,58 @@ def _download_weights(ref) -> Path:
     ))
 
 
+def weights_cached(ref) -> Optional[Path]:
+    """The cached snapshot path if the pinned weights are already complete, else None.
+
+    Mirrors :func:`_download_weights` argument for argument, with ``local_files_only`` — so
+    "complete" means complete *for this spec* (the author's ``allow_patterns`` included), not
+    merely "some revision of this repo is in the cache". Never touches the network, so it is
+    safe on the serve path.
+
+    Returns None on ANY failure. This only drives an advisory note: a false "not cached"
+    costs the user one unnecessary line, while a raise here would fail a serve that would
+    otherwise have worked.
+    """
+    from huggingface_hub import snapshot_download
+
+    try:
+        return Path(snapshot_download(
+            repo_id=ref.repo_id,
+            revision=ref.revision,
+            allow_patterns=ref.allow_patterns,
+            ignore_patterns=ref.ignore_patterns,
+            local_files_only=True,
+        ))
+    except Exception:  # noqa: BLE001 — absent, incomplete, or unresolvable offline
+        return None
+
+
+def _weights_notice(manifest: Manifest, target: Optional[str]) -> None:
+    """Say so when serve is about to boot without the weights on the host.
+
+    Only ``serve``-that-auto-pulls fetches weights; an already-installed package and the
+    missing-image repair both skip them by design, and the model then downloads them itself
+    inside the container. That is a supported path -- the HF cache is bind-mounted, so the
+    bytes land on the host and are reused -- but it is silent, slow, and hidden behind the
+    readiness probe, which is a bad thing to discover as an unexplained multi-minute boot.
+    """
+    ref = manifest.weights
+    if ref is None or weights_cached(ref) is not None:
+        return
+    at = f"@{ref.revision[:8]}" if ref.revision else ""
+    console.note(
+        f"weights {ref.repo_id}{at} are not in your local HF cache; the model will "
+        f"download them inside the container at first load (slower, and no progress is "
+        f"shown here)",
+        marker="⚠", style="warning",
+    )
+    if target:
+        console.note(f"to fetch them first instead:  tt-model pull {target} --with-weights",
+                     marker="→")
+    rev = f" --revision {ref.revision}" if ref.revision else ""
+    console.note(f"or directly:  hf download {ref.repo_id}{rev}", marker="→")
+
+
 # --------------------------------------------------------------------------- refresh
 
 
@@ -391,7 +443,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     extra_args: Optional[List[str]] = None,
                     source: Optional[Path] = None,
                     port: Optional[int] = None,
-                    target: Optional[str] = None) -> None:
+                    target: Optional[str] = None,
+                    local_only: bool = False) -> None:
     """Run one serve profile.
 
     ``source`` is the staged/pulled dir the manifest came from, used to reload the image
@@ -449,14 +502,48 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                 with console.step(f"docker load {ref} (image was not loaded)"):
                     oci.load(layout, expect_tag=ref)
             else:
-                raise ContainerCliError(
-                    f"image {ref} is not loaded in docker.\n"
-                    f"  → if you have the staged package dir:  tt-model serve "
-                    f"<dir>/{MANIFEST_NAME}\n"
-                    f"  → if it was published:                 tt-model pull <namespace/name>\n"
-                    f"  → otherwise rebuild it:                tt-model package --container "
-                    f"<manifest.yaml>"
+                # A PULLED package keeps only the manifest: pull_container loads the image
+                # from a TemporaryDirectory and lets the multi-GB layout go, so docker's
+                # store is the only local copy. An ordinary `docker image rm` / `system
+                # prune` therefore leaves an installed record pointing at nothing, and the
+                # self-heal above cannot fire (there is no `image/` beside the manifest).
+                # Re-fetch rather than dead-ending. This is NOT an update check -- those
+                # stay opt-in behind --refresh -- so it re-pulls the RECORDED revision,
+                # reproducing the image this manifest describes rather than the Hub tip.
+                entry = localdb.get(target) if target else None
+                repairable = (
+                    bool(target) and not local_only and spec.image.is_hub_hosted
+                    and bool(entry) and not Path(str(target)).exists()
                 )
+                if repairable:
+                    console.note(
+                        f"image {ref} is missing from docker (deleted or pruned); "
+                        f"re-pulling it from {target}",
+                        marker="↻",
+                    )
+                    pull_container(str(target), (entry or {}).get("revision"), manifest,
+                                   no_weights=True)
+                    if container.loaded_digest(ref) is None:
+                        raise ContainerCliError(
+                            f"re-pulled {target} but image {ref} is still not loaded; "
+                            f"rebuild it with `tt-model package --container <manifest.yaml>`"
+                        )
+                else:
+                    hint = target if target and "/" in str(target) else "<namespace/name>"
+                    raise ContainerCliError(
+                        f"image {ref} is not loaded in docker.\n"
+                        f"  → if you have the staged package dir:  tt-model serve "
+                        f"<dir>/{MANIFEST_NAME}\n"
+                        f"  → if it was published:                 tt-model pull {hint}\n"
+                        f"  → otherwise rebuild it:                tt-model package "
+                        f"--container <manifest.yaml>"
+                    )
+
+    if not print_only:
+        try:
+            _weights_notice(manifest, target)
+        except Exception:  # noqa: BLE001 — one advisory line, never a reason not to serve
+            pass
 
     launcher = launcher_for(spec.kind)
     argv = launcher.serve_argv(manifest, profile) + list(extra_args or [])

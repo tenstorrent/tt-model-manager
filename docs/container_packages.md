@@ -1,13 +1,12 @@
 # Container (v5.1) model packages
 
-> **Status.** This documents the v5.1 container path proposed in
-> [PR #37](https://github.com/tenstorrent/tt-model-manager/pull/37)
-> (`raahem/oci-models-path`). It is **in progress** and needs a rebase onto the current
-> `main` (which carries only the v5 and v6 paths). The design is additive — `container` is
-> a new optional block on the existing manifest and `compare()` early-returns before the v5
-> branch, so v3/v4/v5/v6 are untouched — but until the rebase lands, treat this as the
-> reference for the branch, not for `main`. A few items are called out below as **planned**;
-> everything else is implemented on the branch.
+> **Status.** The v5.1 container path is **merged and on `main`**
+> ([PR #37](https://github.com/tenstorrent/tt-model-manager/pull/37), with
+> [#50](https://github.com/tenstorrent/tt-model-manager/pull/50) adding the `tt-dit-server`
+> kind and [#51](https://github.com/tenstorrent/tt-model-manager/pull/51) making the image
+> digest its identity). The design is additive: `container` is a new optional block on the
+> existing manifest, so v5/v6 are untouched. A few items are called out below as
+> **planned**; everything else is implemented.
 
 A **container package** ships the whole platform *inside an OCI image*: Ubuntu, the built
 tt-metal tree, vLLM, the Tenstorrent vLLM plugin, and the model's own code — all pinned,
@@ -27,10 +26,11 @@ tt-metal and vLLM all have to cooperate — most of `packaging.py`, `provision.p
 `toolchain.py` exist to negotiate that. v6 trims the payload to a pinned spec but still
 resolves a venv on the consumer's box. **v5.1 moves the assembly to the author**: the image
 is built once, and nothing about the consumer's host can matter because there is no host
-interpreter or host platform in the picture. `compare()` reflects this — for a container
-package it checks only the two facts the image cannot carry: the **arch** its binaries were
-built for (fatal) and whether the box has **enough chips** for the chosen profile
-(forceable). Wheel interpreter/platform tags are not checked at all.
+interpreter or host platform in the picture. `compare()` needed no container branch at
+all: it already checked only the two facts an image cannot carry — the **arch** its binaries
+were built for (fatal) and whether the box has **enough chips** for the chosen profile
+(forceable). Wheel interpreter/platform tags are checked separately at install, on the v5
+path only.
 
 ## Weights stay a pointer
 
@@ -70,6 +70,21 @@ tt-model publish   you/my-model                     # list one pushed earlier
 tt-model unpublish you/my-model                     # delist (repo untouched)
 ```
 
+### Writing the YAML with Claude Code
+
+You do not have to write `tt-model.yaml` from scratch. This repo ships a skill that reads a
+model directory in a tt-metal checkout, works out its import closure and serve recipe, and
+interviews you for what the directory cannot tell you (hardware label, mesh, context length,
+tool-call parsers):
+
+```bash
+/tt-model-yaml models/demos/blackhole/my_model
+```
+
+It is scoped to v5.1 **only** — v5 "fat" and v6 "thin" bundles are authored with CLI flags
+and have no manifest file, so the skill declines those rather than emitting a YAML they
+cannot read. Source: [`.claude/skills/tt-model-yaml/`](../.claude/skills/tt-model-yaml/).
+
 Validation is front-loaded: everything knowable without hardware — arch, kind, the mesh vs
 hardware chip-count cross-check, required launch fields, that `runtime.extra_models_dir` is
 covered by the `source.code` allowlist, that every `source.code` path actually exists — is
@@ -86,7 +101,7 @@ Fields, from `src/tt_kernel/container_manifest.py`:
 | `repo` | the namespaced HF id `push` publishes to, e.g. `you/my-model`. |
 | `name` | the model name; also the default image repository. |
 | `weights` | an HF id **or** a `{repo, revision, allow_patterns, ignore_patterns}` mapping. A pointer — never baked in. Pin a revision so a consumer gets the weights you validated, not whatever the default branch points at today. |
-| `kind` | the serving stack + launch command: `vllm-plugin` (default) or `vllm-fork`. See below. |
+| `kind` | the serving stack + launch command: `vllm-plugin` (default), `vllm-fork`, or `tt-dit-server`. See below. |
 | `arch` | `blackhole` or `wormhole_b0` — fixed by the build; every profile shares it. |
 | `source.tt_metal` | a local checkout path (default, hermetic — packages exactly the tree you validated, uncommitted work included) or `{repo, ref}` to clone in CI. |
 | `source.code` | an **allowlist** (min one entry) of paths, relative to the tt-metal tree, that are **exactly** what ships. Staged to `code/`, uploaded to HF as browsable files, and `COPY`'d into the image as the *only* `models` package. Under-listing fails the image's own build-time import check, on the author's machine. |
@@ -217,7 +232,7 @@ The authored YAML is deliberately *not* the published document. `ContainerManife
 renders a `schema_version: "5.1"` `Manifest` — the same `tt_kernel_manifest.json` filename
 every command already resolves — and *that* JSON lands on the Hub. Two reasons for the split:
 
-- `Manifest.from_json` gates on `SUPPORTED_SCHEMAS` (`{"3", "4", "5", "5.1"}`), which is what
+- `Manifest.from_json` gates on `SUPPORTED_SCHEMAS` (`{"5", "5.1", "6"}`), which is what
   makes an older tt-model refuse a newer package loudly instead of half-reading it. Adding
   the v5.1 path required adding `"5.1"` to that set.
 - YAML is a better *authoring* surface (comments, block scalars, no commas); JSON is a better
@@ -268,15 +283,45 @@ run on a build host; a later `serve` starts the container. Around them:
 - `tt-model stop you/my-model` — a clean `SIGTERM` closes the mesh; a `SIGKILL` would leave
   the devices needing `tt-smi -r`.
 - `tt-model rm you/my-model` — removes a *pulled* container package, including its HF
-  snapshot.
+  snapshot. `--keep-cache` keeps the JIT/weight caches for a fast re-pull;
+  `--include-weights` also deletes the weights from the HF cache (off by default — they
+  are shared and can be tens of GB to re-download).
 
 `pull` loads the image into the local docker daemon (or `docker pull`s it from a real
-registry), records the package in the local db, and downloads the weights into the host HF
-cache honouring whatever revision/patterns the author pinned. If weights can't be fetched
-the image still loads and the model fetches them at first boot. `serve` reloads the image
-from the staged/pulled `image/` layout if docker no longer has it, refuses to point at the
-*authoring* YAML (it needs the built package), and — with `--follow` — waits on the
-launcher's readiness probe before reporting the endpoint.
+registry) and records the package in the local db. **It does not fetch weights unless you
+pass `--with-weights`** — the flag defaults to off, so a bare `pull` moves the image only and
+the model downloads its weights at first load instead. `serve`'s *auto*-pull (the one that
+fires when nothing is installed yet) does fetch them, so the two entry points differ:
+
+| | image | weights |
+|---|---|---|
+| `tt-model pull org/name` | yes | **no** |
+| `tt-model pull org/name --with-weights` | yes | yes |
+| `tt-model serve org/name` (nothing installed) | yes | yes |
+
+If weights can't be fetched the image still loads and the model fetches them at first boot.
+
+Because those three rows differ, `serve` checks the host HF cache before launching (offline —
+`snapshot_download(..., local_files_only=True)`, so "complete" honours the author's
+`allow_patterns`) and says so when the weights are absent:
+
+```
+⚠ weights org/Weights-7B@a1b2c3d4 are not in your local HF cache; the model will download
+  them inside the container at first load (slower, and no progress is shown here)
+→ to fetch them first instead:  tt-model pull org/name --with-weights
+→ or directly:  hf download org/Weights-7B --revision a1b2c3d4
+```
+
+It is advisory only: booting without them is supported (the cache is bind-mounted, so the
+bytes land on the host and are reused), and the check can never fail a serve that would
+otherwise have worked. Suppressed under `--print`.
+
+`serve` also reloads the image from the staged `image/` layout if docker no longer has it —
+but note this only helps a package you **built** locally. A *pulled* package keeps just
+`tt_kernel_manifest.json` (`pull_container` loads the image from a temporary snapshot and
+lets the multi-GB layout go).
+Finally, `serve` refuses to point at the *authoring* YAML (it needs the built package), and
+— with `--follow` — waits on the launcher's readiness probe before reporting the endpoint.
 
 ### How the container runs
 
@@ -343,11 +388,11 @@ cache perms, and a tqdm stand-in that would have silently downloaded nothing.
 
 ## Testing
 
-The container path has ~680 offline tests — no hardware, no daemon, no network. `oci.py` runs
-against a fake `docker` on PATH; argv composition is pure so `serve --print` exercises every
-flag; the manifest's front-loaded validation is checkable on a machine that does not have the
-author's tt-metal tree. This is docs-only work on a mid-rebase branch, so run the container
-tests specifically rather than the full suite.
+The suite is 581 offline tests — no hardware, no daemon, no network — and a large share of
+them cover this path. `oci.py` runs against a fake `docker` on PATH; argv composition is pure
+so `serve --print` exercises every flag; the manifest's front-loaded validation is checkable
+on a machine that does not have the author's tt-metal tree. Run the whole suite with
+`pytest -q`.
 
 ## Not covered yet (planned)
 

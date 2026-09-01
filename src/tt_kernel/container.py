@@ -184,6 +184,33 @@ def hf_home() -> Path:
     return Path(os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface")))
 
 
+def _is_within(child: Path, parent: Path) -> bool:
+    """Is ``child`` inside ``parent``? Resolved, so a symlinked cache is judged by where it
+    actually lands rather than by how it was spelled."""
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def hub_cache() -> Path:
+    """Where ``snapshot_download`` actually writes, resolved the way huggingface_hub does.
+
+    Normally this is ``<HF_HOME>/hub`` and therefore already inside the ``/hf`` mount. But
+    ``HF_HUB_CACHE`` can point it somewhere else entirely (a big scratch disk), and it is a
+    documented HF variable that ``hf_home()`` alone cannot see. Ask the library rather than
+    re-deriving the precedence: getting it wrong means the host downloads weights to one
+    place and the container looks in another, and the model silently re-downloads them.
+    """
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        return Path(HF_HUB_CACHE)
+    except Exception:  # noqa: BLE001 — old/absent hub: the documented default
+        return hf_home() / "hub"
+
+
 def _safe_name(name: str) -> str:
     """Refuse a name that would escape the managed cache dir when used as a path component.
 
@@ -238,18 +265,28 @@ def compose_run(
     hf_home_dir: Optional[Path] = None,
     cache_dir: Optional[Path] = None,
     weight_cache_dir: Optional[Path] = None,
+    hub_cache_dir: Optional[Path] = None,
     include_hf_token: Optional[bool] = None,
 ) -> List[str]:
     """The full ``docker run`` argv for one serve profile.
 
-    Pure: the only environment it reads is ``HF_HOME``/``HF_TOKEN``, and both can be
-    overridden by the caller so tests never depend on the developer's shell.
+    Pure: the only environment it reads is ``HF_HOME``/``HF_HUB_CACHE``/``HF_TOKEN``, and
+    all can be overridden by the caller so tests never depend on the developer's shell.
     """
     _require_container(m)
     port = profile.port or 8000
     hf = Path(hf_home_dir) if hf_home_dir is not None else hf_home()
     cache = Path(cache_dir) if cache_dir is not None else model_cache_dir(m)
     weights = Path(weight_cache_dir) if weight_cache_dir is not None else model_weight_cache_dir(m)
+    # Derived from an explicitly-passed hf_home_dir rather than the environment: a caller
+    # that pins the HF root has pinned the whole story, and reading the real HF_HUB_CACHE
+    # here would make composition depend on the developer's shell.
+    if hub_cache_dir is not None:
+        hub = Path(hub_cache_dir)
+    elif hf_home_dir is not None:
+        hub = hf / "hub"
+    else:
+        hub = hub_cache()
     if include_hf_token is None:
         include_hf_token = bool(os.environ.get("HF_TOKEN"))
 
@@ -279,6 +316,17 @@ def compose_run(
         "--env", "TT_DIT_CACHE_DIR=/weight-cache",
         "--publish", f"{port}:{port}",
     ]
+    # HF_HOME=/hf makes the container resolve its hub cache to /hf/hub, which is already
+    # inside the mount above -- so in the default and HF_HOME-only setups there is nothing
+    # more to do. Only when HF_HUB_CACHE points OUTSIDE HF_HOME does the container need a
+    # second mount, and its own HF_HUB_CACHE, to reach the weights the host just wrote.
+    # Mounted at a sibling path rather than nested under /hf/hub so the result never
+    # depends on how the daemon orders overlapping bind mounts.
+    if not _is_within(hub, hf):
+        cmd += [
+            "--volume", f"{hub}:/hf-hub",
+            "--env", "HF_HUB_CACHE=/hf-hub",
+        ]
     if include_hf_token:
         # name only: the value is inherited from the caller's environment rather than
         # being written into an argv that `--print` would display and `ps` would leak.
@@ -292,7 +340,8 @@ def compose_run(
 
 def ensure_mount_sources(m: Manifest, *, hf_home_dir: Optional[Path] = None,
                          cache_dir: Optional[Path] = None,
-                         weight_cache_dir: Optional[Path] = None) -> None:
+                         weight_cache_dir: Optional[Path] = None,
+                         hub_cache_dir: Optional[Path] = None) -> None:
     """Create the bind-mount source dirs, as the host user, before ``docker run``.
 
     If they do not exist the docker daemon creates them itself — owned by ROOT — and the
@@ -305,7 +354,13 @@ def ensure_mount_sources(m: Manifest, *, hf_home_dir: Optional[Path] = None,
     hf = Path(hf_home_dir) if hf_home_dir is not None else hf_home()
     cache = Path(cache_dir) if cache_dir is not None else model_cache_dir(m)
     weights = Path(weight_cache_dir) if weight_cache_dir is not None else model_weight_cache_dir(m)
-    for d in (hf, cache, weights):
+    if hub_cache_dir is not None:
+        hub = Path(hub_cache_dir)
+    elif hf_home_dir is not None:
+        hub = hf / "hub"
+    else:
+        hub = hub_cache()
+    for d in (hf, cache, weights, hub):
         d.mkdir(parents=True, exist_ok=True)
 
 
