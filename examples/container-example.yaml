@@ -167,4 +167,4 @@ verify:                         # build-time assertions run INSIDE the finished 
 card:
   quickstart: |
     ### Use with your client
-    Point it at `http://127.0.0.1:8000` once the server is up.
+    Point it at `http://127.0.0.1:20000` once the server is up (or the port `tt-model serve` printed).

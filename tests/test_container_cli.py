@@ -537,6 +537,9 @@ def test_port_moves_the_publish_mapping_and_the_server_together(tmp_path, monkey
 
 def test_without_the_flag_the_manifest_port_is_used(tmp_path, monkeypatch):
     ran, _ = _argv_of(monkeypatch)
+    # Hermetic: the free-port walk must not make this depend on what happens to be
+    # listening on the machine running the tests.
+    monkeypatch.setattr(container, "port_is_free", lambda p: True)
     container_cli.serve_container(_manifest(tmp_path))
     argv = ran[0]
     assert argv[argv.index("--publish") + 1] == "8000:8000"
@@ -571,6 +574,39 @@ def test_the_endpoint_hint_reports_the_overridden_port(tmp_path, monkeypatch, ca
     _argv_of(monkeypatch)
     container_cli.serve_container(_manifest(tmp_path), port=8001)
     assert "127.0.0.1:8001" in capsys.readouterr().out
+
+
+def test_a_busy_default_port_walks_upward_in_both_places(tmp_path, monkeypatch, capsys):
+    """No --port and the profile's port is taken: increment past it (the Next.js
+    behavior), keeping --publish and the server's --port in lockstep — and say so."""
+    ran, _ = _argv_of(monkeypatch)
+    monkeypatch.setattr(container, "port_is_free", lambda p: p != 8000)
+    container_cli.serve_container(_manifest(tmp_path))
+    argv = ran[0]
+    assert argv[argv.index("--publish") + 1] == "8001:8001"
+    assert argv[argv.index("--port") + 1] == "8001"
+    out = capsys.readouterr().out
+    assert "8000 is in use" in out
+    assert "127.0.0.1:8001" in out  # the endpoint hint follows the walked port
+
+
+def test_an_explicit_port_is_never_walked(tmp_path, monkeypatch):
+    """--port means exactly that port: a busy one fails loudly (docker's "already
+    allocated") rather than silently serving somewhere the user did not ask for."""
+    ran, _ = _argv_of(monkeypatch)
+    monkeypatch.setattr(container, "port_is_free", lambda p: False)
+    container_cli.serve_container(_manifest(tmp_path), port=8000)
+    argv = ran[0]
+    assert argv[argv.index("--publish") + 1] == "8000:8000"
+    assert argv[argv.index("--port") + 1] == "8000"
+
+
+def test_print_never_scans_ports(tmp_path, monkeypatch):
+    """--print composes a deterministic command anywhere; the free-port walk would make
+    its output depend on what happens to be listening."""
+    monkeypatch.setattr(container, "port_is_free",
+                        lambda p: pytest.fail("--print must not probe ports"))
+    container_cli.serve_container(_manifest(tmp_path), print_only=True)
 
 
 def test_the_cli_accepts_port_before_the_target(tmp_path, monkeypatch):

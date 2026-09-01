@@ -24,7 +24,7 @@ from . import MANIFEST_NAME, console, container, hub, localdb, oci
 from .build import BuildError, build_log_path, finalize, run_build, stage
 from .container_manifest import ContainerManifestError
 from .launchers import launcher_for
-from .manifest import Manifest
+from .manifest import DEFAULT_PORT, Manifest
 
 PHASES = ["Resolve", "Stage", "Build", "Export"]
 
@@ -479,8 +479,20 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         raise ContainerCliError(str(e)) from None
     if port is not None:
         # Override BEFORE composition, so --publish and the launcher's --port are both
-        # derived from the same value and cannot diverge.
+        # derived from the same value and cannot diverge. Explicit means exact: a busy
+        # port the user asked for by name fails (docker's "already allocated") rather
+        # than silently moving the endpoint.
         profile = profile.model_copy(update={"port": port})
+    elif not print_only:
+        # No explicit --port: start at the profile's port (or 20000) and walk upward
+        # past busy ports — 20000 taken → 20001 → 20002 ... — instead of failing.
+        # Skipped under --print, which must stay pure and deterministic.
+        preferred = profile.port or DEFAULT_PORT
+        chosen = container.pick_free_port(preferred)
+        if chosen != preferred:
+            console.note(f"port {preferred} is in use; serving on {chosen} instead",
+                         marker="•")
+        profile = profile.model_copy(update={"port": chosen})
     if profile_name is None and len(spec.serve_profiles) > 1:
         console.note(
             f"profile {profile.name!r} (the author's default; "
@@ -580,7 +592,7 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
             container.remove(name, force=True)
         raise
 
-    port = profile.port or 8000
+    port = profile.port or DEFAULT_PORT
     console.milestone(f"{name} started")
     if follow:
         console.note("waiting for the server to become ready (a cold boot JIT-compiles "
