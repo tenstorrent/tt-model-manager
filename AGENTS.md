@@ -108,6 +108,11 @@ This section is for an AI agent *using* `tt-model` for a user — taking a model
 It is about **running the flow**, not changing the tool; to change the code, follow the rest of
 this file (draft PR, one concern, regression test, never push to `main`).
 
+For the **container (v5.1)** path this repo ships two skills (under `.claude/skills/`, mirrored
+for Codex under `.codex/skills/`): `tt-model-yaml` authors the manifest from a validated
+bring-up; `tt-model-package-test` builds it, serves it on hardware, proves the API works (tool
+calling included), and pushes. Prefer them over improvising the flow.
+
 There are **two authoring paths**, both self-contained (a consumer needs only a TT card +
 firmware). Pick the one the user's box supports:
 
