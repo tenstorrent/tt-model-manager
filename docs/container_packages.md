@@ -175,8 +175,44 @@ source:
   code:                               # EXACTLY what ships
     - models/common
     - models/autoports/my_model       # must cover runtime.extra_models_dir
+  extra_code:                         # optional; code from OUTSIDE the tt-metal tree
+    - root: {repo: https://github.com/org/my-model, ref: v1.2.0}
+      paths: [my_model_pkg]
   ubuntu: "22.04"
   python: "3.12"
+
+### Code that does not live in tt-metal
+
+`source.code` is relative to `source.tt_metal`. That is right for a model whose code *is*
+a tt-metal file and wrong for one that is not — and `kind: tt-dit-server` made the second
+case real, because a diffusion server's ASGI app need not be a tt-metal module at all.
+
+`source.extra_code` ships from other trees. Each entry takes the same two forms as
+`tt_metal` itself — a local checkout (hermetic: exactly the tree you validated) or a
+`{repo, ref}` to clone (reproducible from a sha, CI-friendly) — and the same allowlist
+rule, relative to *its own* root:
+
+```yaml
+source:
+  tt_metal: {repo: https://github.com/tenstorrent/tt-metal, ref: v0.78.0}
+  code: [models/common]
+  extra_code:
+    - root: {repo: https://github.com/tenstorrent/tt-animatediff, ref: v0.10.0}
+      paths: [animatediff_ttnn]
+
+runtime:
+  kind: tt-dit-server
+  app: animatediff_ttnn.server.app:app   # covered by extra_code above
+```
+
+Everything staged lands in the **same** `code/` tree and is COPY'd to the same place in
+the image, so a path here and a path in `code` are indistinguishable downstream — only the
+root differs. That is why `runtime.app` resolves either way, and why the allowlist checks
+(`extra_models_dir`, `model_dir`, `app`) consult both.
+
+Prefer the `{repo, ref}` form for anything you publish. A package whose code can only be
+staged from one person's working copy is not reproducible by the consumer reading it,
+which is the same reason `tt_metal` accepts a GitSource.
 
 runtime:
   vllm: {version: "0.24.0"}                 # or {wheel: ...} / {path: ...}
