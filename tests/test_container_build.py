@@ -315,9 +315,43 @@ def _card(**over):
     return build.render_model_card(m, _built())
 
 
-def test_the_card_lists_every_profile_and_marks_the_default():
+def test_a_single_profile_card_states_the_hardware_up_front_with_no_table():
     card = _card()
-    assert "`p150x4`" in card and "*(default)*" in card
+    assert "Runs on **p150x4**" in card
+    assert "--profile" not in card
+    assert "## Serve profiles" not in card
+
+
+def test_a_multi_profile_card_lists_every_profile_and_marks_the_default():
+    profiles = [
+        {"name": "p150x2", "hardware": "p150x2", "mesh_device": "P150x2",
+         "max_num_seqs": 8, "max_model_len": 65536},
+        {"name": "p150x4", "hardware": "p150x4", "mesh_device": "P150x4",
+         "max_num_seqs": 32, "max_model_len": 131072},
+    ]
+    card = _card(serve_profiles=profiles, default_profile="p150x4")
+    assert "`p150x2`" in card and "`p150x4` *(default)*" in card
+    assert "--profile" in card
+    assert "Runs on **p150x2** or **p150x4**" in card
+
+
+def test_the_card_names_the_tool_and_schema_and_links_the_repo():
+    card = _card()
+    assert "https://github.com/tenstorrent/tt-model-manager" in card
+    assert "manifest schema 5.1" in card
+    assert "0.1.0" in card  # the tt-model version that built it
+
+
+def test_the_card_leads_with_the_authors_description():
+    card = _card(card={"description": "Intended for agentic coding."})
+    assert card.index("Intended for agentic coding.") < card.index("## Quickstart")
+
+
+def test_the_quickstart_sets_expectations():
+    card = _card()
+    assert "tt-model pull" in card and "tt-model serve" in card
+    assert "several minutes" in card
+    assert "Application startup complete" in card
 
 
 def test_the_card_pins_provenance():
@@ -335,7 +369,7 @@ def test_the_card_flags_a_dirty_build():
 
 
 def test_the_card_says_weights_are_not_baked_in():
-    assert "never baked into the image" in _card()
+    assert "not in the image" in _card()
 
 
 def test_the_card_includes_the_authors_quickstart():
@@ -386,10 +420,11 @@ def test_a_commit_that_is_not_public_is_not_shown_at_all():
     assert "dirty tree" in card
 
 
-def test_the_card_has_no_shipped_code_listing():
+def test_the_card_has_no_shipped_code_listing_and_no_what_is_inside():
     card = _card()
     assert "Shipped code" not in card
-    assert "`code/`" in card  # the byte-identity fact lives in "What is inside"
+    assert "What is inside" not in card
+    assert "byte-identical" in card  # the fact moved into Provenance
 
 
 # ------------------------------------------------------------------ interrupt guard

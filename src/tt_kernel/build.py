@@ -868,16 +868,19 @@ def _pinned_sha(sha: str, repo: Optional[str], *, public: bool = True,
     return cell + (f" {flags}" if flags else "")
 
 
+TT_MODEL_MANAGER_URL = "https://github.com/tenstorrent/tt-model-manager"
+
+
 def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     """The generated README.md for the HF repo.
 
-    The serve-profile table travels WITH the model instead of living in a quickstart doc
-    someone has to find. Provenance names each component by its official name and
-    deep-links every pin to the actual repo, so a reader can open what the image was
-    built from rather than stare at a sha. The shipped code itself is not listed: it is
-    `code/` in this very repo, one click away.
+    The order is the reader's order: what the model is and what hardware it needs
+    first, then how to run it, then (only when there is a choice) the profile table,
+    then provenance. Provenance names each component by its official name and shows a
+    commit only as a working public link.
     """
     from . import TT_MODEL_TAG
+    from .launchers import launcher_for
 
     tt_metal = built.get("tt_metal") or {}
     tags = sorted({TT_MODEL_TAG, m.arch, m.kind, "tt-model-container"})
@@ -889,51 +892,74 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         "",
         f"# {m.name}",
         "",
-        "A **tt-model container package**: the serving platform ships as a Docker image, "
-        "so a consumer needs only Docker and a Tenstorrent card — no tt-metal, no vLLM, "
-        "no venv on the host.",
+    ]
+    if m.card and m.card.description:
+        lines += [m.card.description.rstrip(), ""]
+
+    # Hardware requirement, up front. One profile: the whole launch config in a
+    # sentence. Several: the targets here, the details in the table below.
+    profiles = [m.resolve_profile(n) for n in m.profile_names()]
+    if len(profiles) == 1:
+        p = profiles[0]
+        detail = []
+        if p.max_model_len:
+            detail.append(f"{p.max_model_len:,}-token context")
+        if p.max_num_seqs:
+            detail.append(f"up to {p.max_num_seqs} concurrent sequences")
+        lines += [
+            f"Runs on **{p.hardware}** (mesh `{p.mesh_device}`)"
+            + (" — " + ", ".join(detail) if detail else "") + ".",
+            "",
+        ]
+    else:
+        targets = " or ".join(f"**{p.hardware}**" for p in profiles if p.hardware)
+        lines += [f"Runs on {targets} — see the serve profiles below.", ""]
+
+    lines += [
+        f"Packaged and published with [tt-model-manager]({TT_MODEL_MANAGER_URL}) "
+        f"{built.get('tt_model_version', '')} (manifest schema {m.schema_version}).",
         "",
-        "## Serve it",
+        "## Quickstart",
         "",
         "```bash",
         f"tt-model pull  {m.repo}",
         f"tt-model serve {m.repo}",
         "```",
         "",
+        f"`pull` downloads the Docker image and the "
+        f"[`{m.weights_repo}`](https://huggingface.co/{m.weights_repo}) weights"
+        + (f" at `{m.weights_ref.revision}`" if m.weights_ref.revision else "")
+        + " (into your HF cache; they are not in the image). `serve` starts an "
+        f"OpenAI-compatible server on port {m.serve.port or 8000}; the first start "
+        "compiles kernels for your device, which takes several minutes, and the "
+        f"server is ready when it logs `{launcher_for(m.kind).READY_LINE}`.",
+        "",
     ]
     if m.card and m.card.quickstart:
-        lines += ["## Quickstart", "", m.card.quickstart.rstrip(), ""]
+        lines += [m.card.quickstart.rstrip(), ""]
+    if len(profiles) > 1:
+        lines += [
+            "## Serve profiles",
+            "",
+            "One image serves every profile below; pick one with `--profile`.",
+            "",
+            "| profile | hardware | mesh | max_num_seqs | max_model_len |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        default = m.resolved_default()
+        for name in m.profile_names():
+            p = m.resolve_profile(name)
+            label = f"`{name}`" + (" *(default)*" if name == default else "")
+            lines.append(
+                f"| {label} | {p.hardware or ''} | {p.mesh_device or ''} | "
+                f"{p.max_num_seqs or ''} | {p.max_model_len or ''} |"
+            )
+        lines.append("")
     lines += [
-        "## Serve profiles",
-        "",
-        "One image serves every profile below; pick one with `--profile`.",
-        "",
-        "| profile | hardware | mesh | max_num_seqs | max_model_len |",
-        "| --- | --- | --- | --- | --- |",
-    ]
-    default = m.resolved_default()
-    for name in m.profile_names():
-        p = m.resolve_profile(name)
-        label = f"`{name}`" + (" *(default)*" if name == default else "")
-        lines.append(
-            f"| {label} | {p.hardware or ''} | {p.mesh_device or ''} | "
-            f"{p.max_num_seqs or ''} | {p.max_model_len or ''} |"
-        )
-    lines += [
-        "",
-        "## What is inside",
-        "",
-        f"- **weights**: [`{m.weights_repo}`](https://huggingface.co/{m.weights_repo})"
-        + (f" at `{m.weights_ref.revision}`" if m.weights_ref.revision else "")
-        + " — "
-        "downloaded to *your* HF cache at pull time, never baked into the image",
-        f"- **arch**: {m.arch}",
-        "- **code**: `code/` in this repo — the model code inside the image, "
-        "byte-identical to what runs (digest below)",
-        "",
         "## Provenance",
         "",
-        "The exact sources the image was built from:",
+        "The exact sources the image was built from — `code/` in this repo is "
+        "byte-identical to the model code inside the image:",
         "",
         "| component | built from |",
         "| --- | --- |",
