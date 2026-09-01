@@ -595,7 +595,11 @@ def package(
             shutil.rmtree(upload_from)
     else:
         upload_from = Path(tempfile.mkdtemp(prefix="tt-model-pkg-")) / "bundle"
-    manifest = _stage(upload_from)
+    try:
+        manifest = _stage(upload_from)
+    except packaging.StagingError as e:
+        detail = "\n".join(f"  - {p}" for p in e.paths)
+        raise _err(f"{e}" + (f"\n{detail}" if detail else "")) from e
     if vendor_deps:
         _vendor_dependencies(upload_from, manifest)
     _report(manifest, upload_from)
