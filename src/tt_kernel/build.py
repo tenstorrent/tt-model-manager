@@ -843,12 +843,34 @@ def freeze_from_image(image: str) -> str:
     return r.stdout
 
 
-def render_model_card(m: ContainerManifest, built: Dict[str, object],
-                      code_tree: List[str]) -> str:
+def _https_repo_url(repo: str) -> Optional[str]:
+    """A git remote in any common spelling -> a browsable https URL, or None."""
+    if repo.startswith("git@"):  # git@github.com:org/repo(.git)
+        host, sep, path = repo[4:].partition(":")
+        if not sep:
+            return None
+        repo = f"https://{host}/{path}"
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    return repo.rstrip("/") if repo.startswith(("https://", "http://")) else None
+
+
+def _pinned_sha(sha: str, repo: Optional[str], *, flags: str = "") -> str:
+    """A provenance cell: the full sha, deep-linked to the commit when the repo is
+    browsable — a bare sha is something to stare at; a link is something to read."""
+    url = _https_repo_url(repo) if repo else None
+    cell = f"[`{sha}`]({url}/commit/{sha})" if url else f"`{sha}`"
+    return cell + (f" {flags}" if flags else "")
+
+
+def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     """The generated README.md for the HF repo.
 
     The serve-profile table travels WITH the model instead of living in a quickstart doc
-    someone has to find, and the provenance block is the pinned truth of what was built.
+    someone has to find. Provenance names each component by its official name and
+    deep-links every pin to the actual repo, so a reader can open what the image was
+    built from rather than stare at a sha. The shipped code itself is not listed: it is
+    `code/` in this very repo, one click away.
     """
     from . import TT_MODEL_TAG
 
@@ -901,31 +923,70 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object],
         + " — "
         "downloaded to *your* HF cache at pull time, never baked into the image",
         f"- **arch**: {m.arch}",
-        f"- **serving stack**: `{m.kind}`",
+        "- **code**: `code/` in this repo — the model code inside the image, "
+        "byte-identical to what runs (digest below)",
         "",
         "## Provenance",
         "",
-        "Everything below is pinned; the image was built from exactly these.",
+        "The exact sources the image was built from:",
         "",
-        "| component | pinned to |",
+        "| component | built from |",
         "| --- | --- |",
-        f"| tt-metal | `{tt_metal.get('sha') or 'unknown'}`"
-        + (" *(dirty tree)*" if tt_metal.get("dirty") else "") + " |",
     ]
-    for key in ("vllm", "plugin"):
-        entry = built.get(key)
-        if isinstance(entry, dict):
-            lines.append(f"| {key} | `{entry.get('sha')}` |")
+
+    # tt-metal: the sha, deep-linked to the commit when it is actually reachable there.
+    metal_sha = str(tt_metal.get("sha") or "unknown")
+    metal_flags = []
+    if tt_metal.get("dirty"):
+        metal_flags.append("*(dirty tree — the image includes uncommitted changes)*")
+    if tt_metal.get("pushed") is False:
+        metal_flags.append("*(commit not on any remote)*")
+    metal_repo = None if tt_metal.get("pushed") is False else tt_metal.get("remote")
+    lines.append(
+        "| tt-metal | "
+        + _pinned_sha(metal_sha, metal_repo, flags=" ".join(metal_flags)) + " |"
+    )
+
+    # vLLM: a released version, the author's own wheel, or a pinned checkout (the cell's
+    # link names the actual source — upstream release or the tenstorrent/vllm fork).
+    vllm_built = built.get("vllm")
+    vllm_rt = m.runtime.get("vllm") or {}
+    if isinstance(vllm_built, dict) and vllm_built.get("wheel"):
+        lines.append(f"| vLLM | `{vllm_built['wheel']}` — a wheel the author built |")
+    elif isinstance(vllm_built, dict) and vllm_built.get("sha"):
+        cell = _pinned_sha(
+            str(vllm_built["sha"]), vllm_built.get("repo"),
+            flags="*(dirty tree)*" if vllm_built.get("dirty") else "",
+        )
+        lines.append(f"| vLLM | {cell} |")
+    elif vllm_rt.get("version"):
+        v = vllm_rt["version"]
+        lines.append(
+            f"| vLLM | [`v{v}`](https://github.com/vllm-project/vllm/releases/tag/v{v}) |"
+        )
+
+    # The Tenstorrent platform plugin, by its official name — never just "plugin".
+    plugin_built = built.get("plugin")
+    plugin_rt = m.runtime.get("plugin") or {}
+    if isinstance(plugin_built, dict) and plugin_built.get("sha"):
+        cell = _pinned_sha(
+            str(plugin_built["sha"]), plugin_built.get("repo"),
+            flags="*(dirty tree — the image includes uncommitted changes)*"
+            if plugin_built.get("dirty") else "",
+        )
+        lines.append(f"| vllm-tt-plugin | {cell} |")
+    elif plugin_rt.get("version"):
+        v = plugin_rt["version"]
+        lines.append(
+            f"| vllm-tt-plugin | [`v{v}`](https://pypi.org/project/vllm-tt-plugin/{v}/) |"
+        )
+
     lines += [
-        f"| code digest | `{str(built.get('code_sha256', ''))[:16]}` |",
+        f"| `code/` digest | `{str(built.get('code_sha256', ''))[:16]}` (sha256, "
+        "first 16 hex digits) |",
         f"| built | {built.get('created_at', '')} by tt-model {built.get('tt_model_version', '')} |",
         "",
-        "## Shipped code",
-        "",
-        "`code/` in this repo is byte-identical to what runs inside the image.",
-        "",
     ]
-    lines += [f"- `{e}`" for e in code_tree]
     return "\n".join(lines) + "\n"
 
 
@@ -956,7 +1017,7 @@ def finalize(staged: Staged, *, echo: Optional[Callable[[str], None]] = None) ->
     oci.save(staged.image, out / "image")
 
     (out / "README.md").write_text(
-        render_model_card(m, staged.built, staged.code_tree)
+        render_model_card(m, staged.built)
     )
     wire = m.to_wire(
         image_tag=staged.image,

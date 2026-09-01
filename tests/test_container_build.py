@@ -310,7 +310,7 @@ def _card(**over):
     raw = json.loads(json.dumps(BASE))
     raw.update(over)
     m = ContainerManifest.model_validate(raw)
-    return build.render_model_card(m, _built(), ["models/common/"])
+    return build.render_model_card(m, _built())
 
 
 def test_the_card_lists_every_profile_and_marks_the_default():
@@ -328,7 +328,7 @@ def test_the_card_flags_a_dirty_build():
 
     m = ContainerManifest.model_validate(json.loads(json.dumps(BASE)))
     card = build.render_model_card(
-        m, _built(tt_metal={"sha": "a" * 40, "dirty": True}), [])
+        m, _built(tt_metal={"sha": "a" * 40, "dirty": True}))
     assert "dirty tree" in card
 
 
@@ -338,6 +338,55 @@ def test_the_card_says_weights_are_not_baked_in():
 
 def test_the_card_includes_the_authors_quickstart():
     assert "point it here" in _card(card={"quickstart": "point it here"}).lower()
+
+
+def test_the_card_never_shows_the_internal_kind_slug_as_prose():
+    card = _card()
+    assert "serving stack" not in card
+    assert "**serving stack**" not in card
+
+
+def test_the_card_deep_links_every_pushed_pin():
+    from tt_kernel.container_manifest import ContainerManifest
+
+    m = ContainerManifest.model_validate(json.loads(json.dumps(BASE)))
+    built = _built(
+        tt_metal={"sha": "a" * 40, "dirty": False, "pushed": True,
+                  "remote": "git@github.com:tenstorrent/tt-metal.git"},
+        plugin={"sha": "d" * 40,
+                "repo": "https://github.com/tenstorrent/vllm-tt-plugin"},
+        vllm=None,  # no built entry -> the row falls back to runtime.vllm.version
+    )
+    card = build.render_model_card(m, built)
+    # ssh remotes are normalized to browsable https commit URLs
+    assert f"https://github.com/tenstorrent/tt-metal/commit/{'a' * 40}" in card
+    assert f"https://github.com/tenstorrent/vllm-tt-plugin/commit/{'d' * 40}" in card
+    # a released vLLM links to the actual release, and the plugin is named officially
+    assert "https://github.com/vllm-project/vllm/releases/tag/v0.24.0" in card
+    assert "vllm-tt-plugin" in card
+    assert "| plugin |" not in card
+
+
+def test_the_card_never_links_an_unpushed_or_pathless_pin():
+    from tt_kernel.container_manifest import ContainerManifest
+
+    m = ContainerManifest.model_validate(json.loads(json.dumps(BASE)))
+    built = _built(
+        tt_metal={"sha": "a" * 40, "dirty": False, "pushed": False,
+                  "remote": "https://github.com/tenstorrent/tt-metal"},
+        plugin={"sha": "d" * 40, "path": "/home/me/vllm-tt-plugin", "dirty": True},
+    )
+    card = build.render_model_card(m, built)
+    assert f"commit/{'a' * 40}" not in card  # a link to a 404 is worse than no link
+    assert "commit not on any remote" in card
+    assert f"commit/{'d' * 40}" not in card
+    assert "dirty tree" in card
+
+
+def test_the_card_has_no_shipped_code_listing():
+    card = _card()
+    assert "Shipped code" not in card
+    assert "`code/`" in card  # the byte-identity fact lives in "What is inside"
 
 
 # ------------------------------------------------------------------ interrupt guard
