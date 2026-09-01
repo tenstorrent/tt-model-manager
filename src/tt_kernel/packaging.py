@@ -92,6 +92,27 @@ _METAL_IGNORE_ROOT_ONLY = frozenset(
 )
 
 
+def _metal_ignore(anchor: Path):
+    """A ``copytree`` ``ignore`` callable that drops junk at every depth (``_METAL_IGNORE_ANYWHERE``)
+    plus the regenerable root-only caches/build output (``_METAL_IGNORE_ROOT_ONLY``) at ``anchor``
+    — the top of the tree being copied — mirroring tt-metal's root-anchored ``.gitignore``.
+
+    The same filter is used for the initial metal-tree copy AND for materializing a symlink that
+    escapes the tree: an escaping ``build -> /outside`` would otherwise re-import that outside dir's
+    ``.git`` / ``__pycache__`` / ``python_env`` / build output verbatim — exactly what the exclude
+    list exists to remove (and what the pre-``symlinks=True`` copy filtered via the followed link).
+    """
+    anchor = anchor.resolve()
+
+    def _ignore(src, names):
+        ignored = set(_METAL_IGNORE_ANYWHERE(src, names))
+        if Path(src).resolve() == anchor:  # root-anchored only, mirroring tt-metal's .gitignore
+            ignored |= _METAL_IGNORE_ROOT_ONLY.intersection(names)
+        return ignored
+
+    return _ignore
+
+
 def _normalize_staged_symlinks(root: Path) -> None:
     """Make the staged ``metal/`` tree self-contained after a ``symlinks=True`` copytree.
 
@@ -122,7 +143,11 @@ def _normalize_staged_symlinks(root: Path) -> None:
             pass  # points outside -> materialize below so the host path never ships
         link.unlink()
         if target.is_dir():
-            shutil.copytree(target, link, symlinks=True)
+            # Filter the materialized copy the same way the initial staging copy is filtered,
+            # anchored at THIS target's root — otherwise an escaping dir re-imports the very
+            # caches/VCS/build output the exclude list removes (the regression the copytree with
+            # no ``ignore=`` introduced when it stopped following the link through the main filter).
+            shutil.copytree(target, link, symlinks=True, ignore=_metal_ignore(target))
             _walk(link)  # the fresh copy may itself carry links that escape the tree
         else:
             shutil.copy2(target, link)
@@ -525,16 +550,9 @@ def stage_package(
     # copytree raise. The root-anchored excludes (.cpmcache/python_env/tt_cache/build/...)
     # are regenerable multi-GB caches + build output — embedding them defeats the point
     # of shipping wheels. _normalize_staged_symlinks then makes the tree self-contained.
-    metal_root = metal_dir.resolve()
-
-    def _ignore(src, names):
-        ignored = set(_METAL_IGNORE_ANYWHERE(src, names))
-        if Path(src).resolve() == metal_root:  # root-anchored only, mirroring tt-metal's .gitignore
-            ignored |= _METAL_IGNORE_ROOT_ONLY.intersection(names)
-        return ignored
-
     try:
-        shutil.copytree(metal_dir, staged / METAL_DIR, symlinks=True, ignore=_ignore)
+        shutil.copytree(metal_dir, staged / METAL_DIR, symlinks=True,
+                        ignore=_metal_ignore(metal_dir))
         # Make the staged tree self-contained: drop dangling links, materialize any that escape it.
         # Inside the try (not after it) so its own unlink/copy2/copytree failures — EACCES/ENOSPC,
         # or a shutil.Error from the recursive copy — surface as a StagingError with context too,

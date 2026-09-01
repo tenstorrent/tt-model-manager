@@ -230,6 +230,54 @@ def test_stage_package_dangling_symlink_and_cache_excludes(tmp_path):
     assert not any(p.is_symlink() and not p.exists() for p in dst_metal.rglob("*"))
 
 
+def test_stage_package_materialized_escaping_dir_is_filtered(tmp_path):
+    """Regression: materializing a symlink that escapes the tree and points at a real directory
+    must apply the SAME exclude filter as the initial staging copy, anchored at that dir's own
+    root. Otherwise the materialization re-imports exactly the junk the exclude list removes —
+    empirically, an escaping `build -> <outside dir>` shipped `.git/HEAD`, `__pycache__/junk.pyc`,
+    and `python_env/huge.bin`. (Pre-`symlinks=True`, the followed link was filtered too.)
+    """
+    wheels = tmp_path / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
+
+    # A real OUTSIDE directory a metal symlink escapes into — full of what the excludes remove.
+    outside = tmp_path / "outside_build"
+    outside.mkdir()
+    (outside / "wanted.txt").write_text("real content the author wants\n")
+    (outside / ".git").mkdir()
+    (outside / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (outside / "__pycache__").mkdir()
+    (outside / "__pycache__" / "junk.pyc").write_bytes(b"\x00junk")
+    (outside / "python_env").mkdir()  # a ROOT-ONLY exclude, at the materialized root
+    (outside / "python_env" / "huge.bin").write_bytes(b"x" * 64)
+    # A nested python_env DEEPER than the materialized root must survive (same root-anchoring).
+    (outside / "pkg" / "python_env").mkdir(parents=True)
+    (outside / "pkg" / "python_env" / "keep.txt").write_text("nested, kept\n")
+
+    metal = tmp_path / "metal_src"
+    metal.mkdir()
+    (metal / "requirements.txt").write_text("torch==2.11.0\n")
+    (metal / "escapes").symlink_to(outside)  # the escaping directory link
+
+    vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
+    staged = tmp_path / "staged"
+    packaging.stage_package(
+        staged, name="m", arch="blackhole", ttnn_wheel=ttnn,
+        metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
+    )
+
+    mat = staged / "metal" / "escapes"
+    assert mat.is_dir() and not mat.is_symlink()  # materialized, not a leaked link
+    assert (mat / "wanted.txt").read_text() == "real content the author wants\n"
+    # The junk the exclude list exists to remove must NOT have been re-imported:
+    assert not (mat / ".git").exists()          # _METAL_IGNORE_ANYWHERE (VCS)
+    assert not (mat / "__pycache__").exists()   # _METAL_IGNORE_ANYWHERE (byte-cache)
+    assert not (mat / "python_env").exists()    # _METAL_IGNORE_ROOT_ONLY at the materialized root
+    # ...but a python_env nested below the materialized root is kept (root-anchoring, not a blanket drop).
+    assert (mat / "pkg" / "python_env" / "keep.txt").read_text() == "nested, kept\n"
+
+
 def test_stage_package_special_file_raises_styled_error(tmp_path):
     """A copytree abort (here a fifo → SpecialFileError) surfaces as StagingError with the path,
     not a raw traceback; the CLI renders it via _err (non-zero exit, no crash)."""
