@@ -155,10 +155,44 @@ class _FakeProc:
 def test_wait_ready_honours_timeout_on_a_silent_container(monkeypatch):
     monkeypatch.setattr(container.subprocess, "Popen", lambda *a, **k: _FakeProc())
     t0 = time.monotonic()
-    r = container.wait_ready("tt-model-x", "APP READY", timeout_s=1, echo=lambda *_: None)
+    r = container.wait_ready("tt-model-x", "APP READY", timeout_s=1, on_line=lambda *_: None)
     elapsed = time.monotonic() - t0
     assert r.ready is False
     # A silent container is still RUNNING — the distinction the caller needs to tell
     # "slow boot" from "crashed".
     assert r.exited is False
     assert elapsed < 5, f"wait_ready hung past its timeout ({elapsed:.1f}s)"
+
+
+# ---- 5. wait_ready survives what docker logs actually emits -----------------------------
+
+class _FragmentStdout:
+    """tqdm writes `\r`-separated fragments and tt-metal can emit bytes that are not UTF-8.
+    Text mode with universal newlines splits the fragments; errors="replace" must keep the
+    reader alive so the EOF sentinel is still queued."""
+    def __init__(self, chunks):
+        self._it = iter(chunks)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._it)
+
+
+def test_wait_ready_hands_tqdm_fragments_to_on_line_and_returns_on_eof(monkeypatch):
+    seen = []
+    chunks = [" 12%|█▎ | 4/32 [00:12<01:22]\n", " 25%|██▌ | 8/32\n", "bad \ufffd byte\n"]
+    proc = _FakeProc()
+    proc.stdout = _FragmentStdout(chunks)
+    popen_kwargs = {}
+
+    def fake_popen(*a, **k):
+        popen_kwargs.update(k)
+        return proc
+
+    monkeypatch.setattr(container.subprocess, "Popen", fake_popen)
+    r = container.wait_ready("tt-model-x", "APP READY", timeout_s=5, on_line=seen.append)
+    assert r.exited is True and r.ready is False
+    assert seen == [c.rstrip("\n") for c in chunks]
+    assert popen_kwargs.get("errors") == "replace", "an undecodable byte would hang the wait"

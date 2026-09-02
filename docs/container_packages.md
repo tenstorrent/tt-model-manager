@@ -56,7 +56,7 @@ code (recommended, but it can live anywhere). There are no per-field flags:
 
 ```bash
 tt-model package --container tt-model.yaml          # builds the image, stages the repo dir
-tt-model serve   build/my-model/tt_kernel_manifest.json --follow   # prove it locally
+tt-model serve   build/my-model/tt_kernel_manifest.json   # prove it locally
 tt-model push    build/my-model --private           # publish to the Hub
 ```
 
@@ -267,8 +267,32 @@ tt-model (k8s, CI).
 On any box with Docker and a card:
 
 ```bash
-tt-model serve you/my-model --follow          # auto-pulls the image + weights, then serves
+tt-model serve you/my-model                   # auto-pulls the image + weights, then serves
 ```
+
+`serve` starts the container and then watches it boot, as a short checklist of the boot's
+landmarks parsed out of the container log — never the log itself:
+
+```
+  ✓ host ready  docker 28.1 · /dev/tenstorrent · hugepages
+  ✓ image tt-model/my-model:7c2773460298
+  ✓ container started  1.4s
+  ✓ engine initialised  vLLM 0.24.0
+  ✓ Tenstorrent device opened  2 chips · mesh (1, 2)  4.6s
+  ✓ weights loaded  32/32  1m 21s
+  ✓ KV cache configured  133,120 tokens
+  ⠹ warming up the model  0:42
+```
+
+A percentage appears only where the log states a real total (weight shards, per-layer KV
+allocation); everything else shows its running time. When the server reports ready the list
+is erased and replaced by one `✓ you/my-model ready  4m 12s` line and a card with the
+endpoint, a `tt-model curl` example, and the `logs`/`stop` hints. A boot that fails leaves
+the list in place, marks the step it died in, and renders a diagnosis card (the cause,
+one log line of evidence, what to try) instead of dumping the log. `-v` keeps every row;
+a piped run prints each row once with no escape codes. Pass `--detach` to return as soon
+as the container is started, as the old default did (`--follow` is now a hidden no-op).
+Ctrl-C stops the watching only — the container keeps booting.
 
 Or split it — `tt-model pull you/my-model` moves bytes only and needs **no card**, so it can
 run on a build host; a later `serve` starts the container. Around them:
@@ -321,7 +345,8 @@ but note this only helps a package you **built** locally. A *pulled* package kee
 `tt_kernel_manifest.json` (`pull_container` loads the image from a temporary snapshot and
 lets the multi-GB layout go).
 Finally, `serve` refuses to point at the *authoring* YAML (it needs the built package), and
-— with `--follow` — waits on the launcher's readiness probe before reporting the endpoint.
+waits on the launcher's readiness probe before reporting the endpoint (see the boot
+checklist above; `--detach` skips the wait).
 
 ### How the container runs
 
