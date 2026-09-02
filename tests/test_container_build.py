@@ -74,6 +74,21 @@ def _no_network(monkeypatch):
     monkeypatch.setattr(build, "resolve_git_ref", lambda repo, ref: "s" * 40)
 
 
+def _git_repo(root: Path, *files: str) -> Path:
+    """A real, local git repo — so resolve_git_ref and `git clone` can run for real
+    against it, with no network involved."""
+    for f in files:
+        p = root / f
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, env=env)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "i"], check=True, env=env)
+    return root
+
+
 # ------------------------------------------------------------------ provenance
 
 
@@ -114,6 +129,46 @@ def test_runtime_refs_are_pinned_to_shas(tmp_path, monkeypatch):
 
 def test_a_full_sha_needs_no_remote_lookup():
     assert build.resolve_git_ref("https://x/y", "b" * 40) == "b" * 40
+
+
+def test_extra_code_git_root_is_pinned_to_a_sha(tmp_path, monkeypatch):
+    """A branch name in source.extra_code becomes a sha in the published manifest, the
+    same guarantee runtime.plugin/vllm already get — a moving ref must not silently drift
+    under a validated model."""
+    metal = _fake_metal(tmp_path)
+    extra = _git_repo(tmp_path / "adiff", "animatediff_ttnn/__init__.py")
+    head = subprocess.run(["git", "-C", str(extra), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, check=True).stdout.strip()
+
+    real_resolve = build.resolve_git_ref
+    monkeypatch.setattr(
+        build, "resolve_git_ref",
+        lambda repo, ref: real_resolve(repo, ref) if repo == str(extra) else "a" * 40,
+    )
+    src = dict(BASE["source"], tt_metal=str(metal), code=["models/common"],
+               extra_code=[{"root": {"repo": str(extra), "ref": "HEAD"},
+                            "paths": ["animatediff_ttnn"]}])
+    staged = build.stage(_manifest_file(tmp_path, metal, source=src), out_root=tmp_path / "out")
+
+    assert staged.manifest.source.extra_code[0].root.sha == head
+    assert (staged.ctx / "code" / "animatediff_ttnn" / "__init__.py").exists()
+
+
+def test_temporary_clones_are_cleaned_up_even_when_staging_fails(tmp_path, monkeypatch):
+    """A failed build must not leave multi-GB clones sitting under ctx/."""
+    metal = _fake_metal(tmp_path)
+    extra = _git_repo(tmp_path / "adiff", "animatediff_ttnn/__init__.py")
+    monkeypatch.setattr(build, "resolve_git_ref", lambda repo, ref: "HEAD")
+    src = dict(BASE["source"], tt_metal=str(metal), code=["models/common"],
+               # a path that does not exist under the cloned root, so stage_code raises
+               # AFTER the clone has already landed under ctx/
+               extra_code=[{"root": {"repo": str(extra), "ref": "HEAD"},
+                            "paths": ["does_not_exist"]}])
+    out = tmp_path / "out"
+    with pytest.raises(BuildError, match="does not exist under"):
+        build.stage(_manifest_file(tmp_path, metal, source=src), out_root=out)
+
+    assert not (out / "my-model" / "ctx" / "extra-code-0").exists()
 
 
 def test_an_unresolvable_ref_is_an_error(tmp_path, monkeypatch):

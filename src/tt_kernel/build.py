@@ -354,7 +354,7 @@ def stage_code(m: ContainerManifest, metal: Path, dest: Path,
     if len(extra_roots) != len(m.source.extra_code):
         raise BuildError(
             f"stage_code got {len(extra_roots)} resolved extra root(s) for "
-            f"{len(m.source.extra_code)} source.extra_code entr(ies); a root that was "
+            f"{len(m.source.extra_code)} source.extra_code entries; a root that was "
             "never resolved would silently ship nothing"
         )
     for extra, root in zip(m.source.extra_code, extra_roots):
@@ -493,7 +493,8 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
     code_dir = ctx / "code"
 
     def _clone_for_code(repo: str, ref: str, into: Path) -> Path:
-        """Shallow-clone a tree only to stage code/ from it (the image build re-clones)."""
+        """Partial-clone (blobless) a tree only to stage code/ from it (the image build
+        re-clones)."""
         subprocess.run(
             ["git", "clone", "--filter=blob:none", repo, str(into)], check=True
         )
@@ -505,26 +506,33 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
     # repo that caused it, rather than partway through a copy.
     temporary: List[Path] = []
     extra_roots: List[Path] = []
-    for i, extra in enumerate(m.source.extra_code):
-        if isinstance(extra.root, GitSource):
-            tmp_extra = ctx / f"extra-code-{i}"
-            extra_roots.append(
-                _clone_for_code(extra.root.repo, extra.root.sha or extra.root.ref, tmp_extra)
-            )
-            temporary.append(tmp_extra)
-        else:
-            extra_roots.append(Path(extra.root))
+    try:
+        for i, extra in enumerate(m.source.extra_code):
+            if isinstance(extra.root, GitSource):
+                # Pinned to a resolved sha BEFORE cloning, same as runtime.vllm/plugin
+                # above: "ref: main" is a moving target, and the manifest should record
+                # the commit that was actually staged, not the branch name that pointed
+                # at it.
+                extra.root.sha = resolve_git_ref(extra.root.repo, extra.root.ref)
+                tmp_extra = ctx / f"extra-code-{i}"
+                extra_roots.append(_clone_for_code(extra.root.repo, extra.root.sha, tmp_extra))
+                temporary.append(tmp_extra)
+            else:
+                extra_roots.append(Path(extra.root).expanduser())
 
-    if metal.mode == "local":
-        staged_code = stage_code(m, metal.origin, code_dir, extra_roots)
-    else:
-        # git mode: shallow-clone just to stage code/ (the image build re-clones)
-        tmp = ctx / "metal-for-code"
-        _clone_for_code(metal.git_repo, metal.sha, tmp)
-        staged_code = stage_code(m, tmp, code_dir, extra_roots)
-        temporary.append(tmp)
-    for d in temporary:
-        shutil.rmtree(d)
+        if metal.mode == "local":
+            staged_code = stage_code(m, metal.origin, code_dir, extra_roots)
+        else:
+            # git mode: partial-clone just to stage code/ (the image build re-clones)
+            tmp = ctx / "metal-for-code"
+            _clone_for_code(metal.git_repo, metal.sha, tmp)
+            staged_code = stage_code(m, tmp, code_dir, extra_roots)
+            temporary.append(tmp)
+    finally:
+        # Cleaned up even when cloning or stage_code() raises -- otherwise a failed
+        # build leaves multi-GB clones sitting under ctx/ with nothing to remove them.
+        for d in temporary:
+            shutil.rmtree(d, ignore_errors=True)
 
     # -- lock ------------------------------------------------------------------------
     lock_name = m.runtime.get("lock")

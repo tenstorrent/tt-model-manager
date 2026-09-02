@@ -475,7 +475,7 @@ class ContainerManifest(BaseModel):
         consumer reading a published package, or the test suite.
         """
         if not isinstance(self.source.tt_metal, GitSource):
-            base = Path(root) if root is not None else Path(self.source.tt_metal)
+            base = Path(root) if root is not None else Path(self.source.tt_metal).expanduser()
             missing = [c for c in self.source.code if not (base / c).exists()]
             if missing:
                 raise ContainerManifestError(
@@ -492,7 +492,7 @@ class ContainerManifest(BaseModel):
         for extra in self.source.extra_code:
             if isinstance(extra.root, GitSource):
                 continue
-            ebase = Path(extra.root)
+            ebase = Path(extra.root).expanduser()
             emissing = [c for c in extra.paths if not (ebase / c).exists()]
             if emissing:
                 raise ContainerManifestError(
