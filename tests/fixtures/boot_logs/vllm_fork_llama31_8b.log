@@ -1,0 +1,398 @@
+INFO 09-02 17:34:09 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 09-02 17:34:09 [__init__.py:46] - tt -> vllm_tt_plugin.entrypoints:platform_plugin
+INFO 09-02 17:34:09 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 09-02 17:34:10 [__init__.py:235] Platform plugin tt is activated
+INFO 09-02 17:34:13 [importing.py:44] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 09-02 17:34:13 [importing.py:68] Triton not installed or not compatible; certain GPU-related functions will not be available.
+2026-09-02 17:34:13,558 - __main__ - INFO - Loading all model specs from MODEL_SPECS_JSON_PATH: /home/container_app_user/model_specs/model_spec.json
+2026-09-02 17:34:13,561 - __main__ - INFO - Using default interface: found model spec for --model=meta-llama/Llama-3.1-8B-Instruct, --device=P300, --engine=None, --impl=None
+2026-09-02 17:34:13,562 - __main__ - INFO - Set MESH_DEVICE to P300
+2026-09-02 17:34:13,562 - __main__ - INFO - Set TT_CACHE_PATH to /home/container_app_user/cache_root/tt_metal_cache/cache_Llama-3.1-8B-Instruct/P300
+2026-09-02 17:34:13,562 - __main__ - INFO - Using model spec: id_tt-transformers_Llama-3.1-8B-Instruct_p300
+2026-09-02 17:34:13,562 - __main__ - INFO - Set TT_METAL_OPERATION_TIMEOUT_SECONDS=5.0
+2026-09-02 17:34:13,562 - __main__ - INFO - Set TT_METAL_DISPATCH_TIMEOUT_COMMAND_TO_EXECUTE=/home/container_app_user/tt-metal/python_env/bin/python /home/container_app_user/tt-metal/tools/triage/triage.py --disable-progress > /home/container_app_user/logs/tt-triage-$(date +%Y%m%d-%H%M%S).log 2>&1
+2026-09-02 17:34:13,562 - __main__ - WARNING - env var MESH_DEVICE is already set to P300, overriding with P300
+2026-09-02 17:34:13,562 - __main__ - INFO - setting env var: MESH_DEVICE=P300
+2026-09-02 17:34:13,562 - __main__ - WARNING - env var ARCH_NAME is already set to wormhole_b0, overriding with blackhole
+2026-09-02 17:34:13,562 - __main__ - INFO - setting env var: ARCH_NAME=blackhole
+2026-09-02 17:34:13,562 - __main__ - INFO - setting env var: VLLM_CONFIGURE_LOGGING=1
+2026-09-02 17:34:13,562 - __main__ - INFO - setting env var: VLLM_RPC_TIMEOUT=900000
+2026-09-02 17:34:13,562 - __main__ - WARNING - env var VLLM_TARGET_DEVICE is already set to tt, overriding with tt
+2026-09-02 17:34:13,562 - __main__ - INFO - setting env var: VLLM_TARGET_DEVICE=tt
+2026-09-02 17:34:13,562 - __main__ - INFO - setting env var: TORCHDYNAMO_DISABLE=1
+2026-09-02 17:34:13,562 - __main__ - INFO - using model: id_tt-transformers_Llama-3.1-8B-Instruct_p300
+2026-09-02 17:34:13,562 - __main__ - INFO - HF_TOKEN is set
+2026-09-02 17:34:13,562 - __main__ - INFO - JWT_SECRET is set: HTTP requests to vLLM API require bearer token in 'Authorization' header. See docs for how to get bearer token.
+2026-09-02 17:34:13,562 - root - INFO - MODEL_WEIGHTS_DIR: /home/container_app_user/readonly_weights_mount/Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659
+2026-09-02 17:34:13,562 - root - INFO - TT_CACHE_PATH: /home/container_app_user/cache_root/tt_metal_cache/cache_Llama-3.1-8B-Instruct/P300
+2026-09-02 17:34:13,565 - __main__ - INFO - setting vllm logging config at: /home/container_app_user/cache_root/logs/vllm_logging_config.json
+2026-09-02 17:34:13,565 - __main__ - INFO - setting vllm logging file at: /home/container_app_user/cache_root/logs/vllm_2026-09-02_17-34-13.log
+2026-09-02 17:34:13,565 - root - INFO - HF model setup for meta-llama/Llama-3.1-8B-Instruct
+2026-09-02 17:34:13,565 - __main__ - INFO - setting dynamic runtime environment variables:
+2026-09-02 17:34:13,565 - __main__ - INFO - setting env var: VLLM_LOGGING_CONFIG_PATH=/home/container_app_user/cache_root/logs/vllm_logging_config.json
+2026-09-02 17:34:13,565 - __main__ - INFO - setting env var: HF_MODEL=/home/container_app_user/cache_root/model_file_symlinks_map/Llama-3.1-8B-Instruct
+2026-09-02 17:34:13,565 - __main__ - INFO - vLLM command:
+vllm serve \
+  --enable-auto-tool-choice \
+  --tool-call-parser llama3_json \
+  --port 7000 \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --block_size 64 \
+  --max_model_len 131072 \
+  --max_num_seqs 32 \
+  --max_num_batched_tokens 131072 \
+  --max-log-len 32 \
+  --seed 9472 \
+  --override_tt_config '{"sample_on_device_mode": "decode_only", "trace_region_size": 56000000}'
+2026-09-02 17:34:13,565 - __main__ - INFO - Starting background trace capture process...
+2026-09-02 17:34:13,579 - __main__ - INFO - Background trace capture process started (PID: 53, max_context: 131072)
+2026-09-02 17:34:13,580 - utils.prompt_client - INFO - Starting background trace capture process...
+2026-09-02 17:34:13,580 - utils.prompt_client - INFO - Using 11 trace context lengths (max_context=131072)
+2026-09-02 17:34:13,580 - utils.prompt_client - INFO - Waiting for vLLM service to become healthy (base timeout: 1200.0s)
+2026-09-02 17:34:13,581 - utils.cache_monitor - INFO - 🔍 No cache content found - treating as first run
+2026-09-02 17:34:13,581 - utils.prompt_client - INFO - ⏰ Using tensor_cache_timeout:=1200.0s for first-run tensor cache generation
+2026-09-02 17:34:13,582 - utils.prompt_client - INFO - 📁 First-run cache directory is still empty; waiting for tensor cache activity
+2026-09-02 17:34:13,584 - utils.prompt_client - INFO - ⏳ First-run tensor cache warmup detected. Waited 0.0s, waiting 10.0s before polling (timeout: 1200.0s)
+DEBUG 09-02 17:34:14 utils.py:171] Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'
+DEBUG 09-02 17:34:14 __init__.py:44] Available plugins for group vllm.general_plugins:
+DEBUG 09-02 17:34:14 __init__.py:46] - tt_model_registry -> vllm_tt_plugin.entrypoints:register
+DEBUG 09-02 17:34:14 __init__.py:46] - lora_filesystem_resolver -> vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver
+DEBUG 09-02 17:34:14 __init__.py:46] - lora_hf_hub_resolver -> vllm.plugins.lora_resolvers.hf_hub_resolver:register_hf_hub_resolver
+DEBUG 09-02 17:34:14 __init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+(APIServer pid=1) INFO 09-02 17:34:14 utils.py:287] vLLM server version 0.1.dev14152+g7678b7040, serving model meta-llama/Llama-3.1-8B-Instruct
+(APIServer pid=1) INFO 09-02 17:34:14 utils.py:223] non-default args: {'port': 7000, 'enable_auto_tool_choice': True, 'tool_call_parser': 'llama3_json', 'max_log_len': 32, 'model': 'meta-llama/Llama-3.1-8B-Instruct', 'seed': 9472, 'max_model_len': 131072, 'override_tt_config': {'sample_on_device_mode': 'decode_only', 'trace_region_size': 56000000}, 'block_size': 64, 'max_num_batched_tokens': 131072, 'max_num_seqs': 32}
+(APIServer pid=1) DEBUG 09-02 17:34:15 registry.py:717] Cached model info file for class vllm.model_executor.models.llama.LlamaForCausalLM not found
+(APIServer pid=1) DEBUG 09-02 17:34:15 registry.py:777] Cache model info for class vllm.model_executor.models.llama.LlamaForCausalLM miss. Loading model instead.
+(APIServer pid=1) DEBUG 09-02 17:34:23 registry.py:787] Loaded model info for class vllm.model_executor.models.llama.LlamaForCausalLM
+(APIServer pid=1) DEBUG 09-02 17:34:23 flashinfer.py:55] FlashInfer unavailable since package was not found
+(APIServer pid=1) DEBUG 09-02 17:34:23 log_time.py:29] Registry inspect model class: Elapsed time 7.5625335 secs
+(APIServer pid=1) INFO 09-02 17:34:23 model.py:531] Resolved architecture: LlamaForCausalLM
+(APIServer pid=1) INFO 09-02 17:34:23 model.py:1559] Using max model len 131072
+(APIServer pid=1) DEBUG 09-02 17:34:23 model.py:1624] Generative models support chunked prefill.
+(APIServer pid=1) DEBUG 09-02 17:34:23 model.py:1682] Generative models support prefix caching.
+(APIServer pid=1) DEBUG 09-02 17:34:23 arg_utils.py:1965] Enabling chunked prefill by default
+(APIServer pid=1) DEBUG 09-02 17:34:23 arg_utils.py:1995] Enabling prefix caching by default
+(APIServer pid=1) INFO 09-02 17:34:23 arg_utils.py:2013] Chunked prefill is not yet supported for TT devices; disabling it for V1 backend.
+(APIServer pid=1) INFO 09-02 17:34:23 arg_utils.py:1612] Using host IP 172.17.0.2 as TT data parallel address
+(APIServer pid=1) DEBUG 09-02 17:34:23 parallel.py:766] Disabled the custom all-reduce kernel because it is not supported on current platform.
+(APIServer pid=1) DEBUG 09-02 17:34:23 parallel.py:766] Disabled the custom all-reduce kernel because it is not supported on current platform.
+(APIServer pid=1) INFO 09-02 17:34:23 vllm.py:698] Asynchronous scheduling is enabled.
+(APIServer pid=1) WARNING 09-02 17:34:23 vllm.py:743] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(APIServer pid=1) DEBUG 09-02 17:34:23 __init__.py:36] No plugins for group vllm.stat_logger_plugins found.
+(APIServer pid=1) DEBUG 09-02 17:34:23 registry.py:51] Loading HfRenderer for renderer_mode='hf'
+2026-09-02 17:34:23,590 - utils.cache_monitor - INFO - 🔍 No cache content found - treating as first run
+2026-09-02 17:34:23,591 - utils.prompt_client - INFO - ⏳ First-run tensor cache warmup detected. Waited 10.0s, waiting 10.0s before polling (timeout: 1200.0s)
+(APIServer pid=1) DEBUG 09-02 17:34:24 __init__.py:33] No IOProcessor plugins requested by the model
+INFO 09-02 17:34:26 __init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 09-02 17:34:26 __init__.py:46] - tt -> vllm_tt_plugin.entrypoints:platform_plugin
+INFO 09-02 17:34:26 __init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+DEBUG 09-02 17:34:26 __init__.py:37] Checking if TPU platform is available.
+DEBUG 09-02 17:34:26 __init__.py:56] TPU platform is not available because: No module named 'libtpu'
+DEBUG 09-02 17:34:26 __init__.py:62] Checking if CUDA platform is available.
+DEBUG 09-02 17:34:26 __init__.py:89] Exception happens when checking CUDA platform: NVML Shared Library Not Found
+DEBUG 09-02 17:34:26 __init__.py:106] CUDA platform is not available because: NVML Shared Library Not Found
+DEBUG 09-02 17:34:26 __init__.py:113] Checking if ROCm platform is available.
+DEBUG 09-02 17:34:26 __init__.py:127] ROCm platform is not available because: No module named 'amdsmi'
+DEBUG 09-02 17:34:26 __init__.py:134] Checking if XPU platform is available.
+DEBUG 09-02 17:34:26 __init__.py:156] Checking if CPU platform is available.
+DEBUG 09-02 17:34:26 __init__.py:180] Checking if TT platform is available.
+DEBUG 09-02 17:34:27 __init__.py:186] Confirmed TT platform is available because ttnn is found.
+INFO 09-02 17:34:27 __init__.py:235] Platform plugin tt is activated
+INFO 09-02 17:34:29 importing.py:44] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 09-02 17:34:29 importing.py:68] Triton not installed or not compatible; certain GPU-related functions will not be available.
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:34:30 core.py:1006] Waiting for init message from front-end.
+(APIServer pid=1) DEBUG 09-02 17:34:30 utils.py:1165] HELLO from local core engine process 0.
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:34:30 core.py:1017] Received init message: EngineHandshakeMetadata(addresses=EngineZmqAddresses(inputs=['ipc:///tmp/12cf8a5c-507d-4e88-9580-1993741fb209'], outputs=['ipc:///tmp/cbf95650-061e-42a0-a3c8-3c73ecd6d503'], coordinator_input=None, coordinator_output=None, frontend_stats_publish_address=None), parallel_config={})
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:34:30 core.py:821] Has DP Coordinator: False, stats publish address: None
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:34:30 __init__.py:44] Available plugins for group vllm.general_plugins:
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:34:30 __init__.py:46] - tt_model_registry -> vllm_tt_plugin.entrypoints:register
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:34:30 __init__.py:46] - lora_filesystem_resolver -> vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:34:30 __init__.py:46] - lora_hf_hub_resolver -> vllm.plugins.lora_resolvers.hf_hub_resolver:register_hf_hub_resolver
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:34:30 __init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+(EngineCore_DP0 pid=97) INFO 09-02 17:34:30 core.py:134] Initializing a V1 LLM engine (v0.1.dev14152+g7678b7040) with config: model='meta-llama/Llama-3.1-8B-Instruct', speculative_config=None, tokenizer='meta-llama/Llama-3.1-8B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=131072, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=None, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=9472, served_model_name=meta-llama/Llama-3.1-8B-Instruct, enable_prefix_caching=True, enable_chunked_prefill=False, pooler_config=None, override_tt_config={'sample_on_device_mode': 'decode_only', 'trace_region_size': 56000000}, compilation_config={'level': None, 'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'eager', 'custom_ops': ['all'], 'splitting_ops': ['vllm::unified_attention', 'vllm::unified_attention_with_output', 'vllm::unified_mla_attention', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::unified_kv_cache_update'], 'compile_mm_encoder': False, 'compile_sizes': None, 'compile_ranges_split_points': [131072], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:34:30 flashinfer.py:55] FlashInfer unavailable since package was not found
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:30,525 - vllm_tt_plugin.platform - INFO - Automatic prefix caching is enabled
+2026-09-02 17:34:30.525 | info     |             UMD | Creating TopologyDiscovery for architecture: blackhole (topology_discovery.cpp:73)
+2026-09-02 17:34:30.528 | warning  |             UMD | Low power mode is disabled while UMD holds open file descriptors. The device will return to low power mode once all file descriptors are closed. (topology_discovery.cpp:141)
+2026-09-02 17:34:30.529 | info     |             UMD | Established firmware bundle version: 19.13.1 (topology_discovery.cpp:545)
+2026-09-02 17:34:30.529 | info     |             UMD | Firmware bundle version 19.13.1 on the system is newer than the latest fully tested version 19.5.0 for blackhole architecture. Newest features may not be supported. (topology_discovery.cpp:577)
+2026-09-02 17:34:30.532 | warning  |             UMD | Low power mode is disabled while UMD holds open file descriptors. The device will return to low power mode once all file descriptors are closed. (topology_discovery.cpp:141)
+2026-09-02 17:34:30.535 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:225)
+2026-09-02 17:34:30.535 | info     |             UMD | Creating TopologyDiscovery for architecture: blackhole (topology_discovery.cpp:73)
+2026-09-02 17:34:30.537 | warning  |             UMD | Low power mode is disabled while UMD holds open file descriptors. The device will return to low power mode once all file descriptors are closed. (topology_discovery.cpp:141)
+2026-09-02 17:34:30.538 | info     |             UMD | Established firmware bundle version: 19.13.1 (topology_discovery.cpp:545)
+2026-09-02 17:34:30.538 | info     |             UMD | Firmware bundle version 19.13.1 on the system is newer than the latest fully tested version 19.5.0 for blackhole architecture. Newest features may not be supported. (topology_discovery.cpp:577)
+2026-09-02 17:34:30.541 | warning  |             UMD | Low power mode is disabled while UMD holds open file descriptors. The device will return to low power mode once all file descriptors are closed. (topology_discovery.cpp:141)
+2026-09-02 17:34:30.542 | info     |             UMD | Harvesting masks for Chip 0: Tensix: 0x204 DRAM: 0x0 ETH: 0x120 PCIe: 0x1 L2CPU: 0x0 (cluster.cpp:270)
+2026-09-02 17:34:30.542 | info     |             UMD | Initializing iommu for sysmem (size: 0x40000000). (silicon_sysmem_manager.cpp:337)
+2026-09-02 17:34:30.542 | info     |             UMD | Allocating sysmem for IOMMU (size: 0x40000000). (silicon_sysmem_manager.cpp:343)
+2026-09-02 17:34:30.567 | info     |             UMD | Harvesting masks for Chip 1: Tensix: 0x1010 DRAM: 0x0 ETH: 0x120 PCIe: 0x2 L2CPU: 0x0 (cluster.cpp:270)
+2026-09-02 17:34:30.568 | info     |             UMD | Initializing iommu for sysmem (size: 0x40000000). (silicon_sysmem_manager.cpp:337)
+2026-09-02 17:34:30.568 | info     |             UMD | Allocating sysmem for IOMMU (size: 0x40000000). (silicon_sysmem_manager.cpp:343)
+2026-09-02 17:34:30.594 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {} (cluster.cpp:159)
+2026-09-02 17:34:30.594 | info     |             UMD | IOMMU: enabled (cluster.cpp:133)
+2026-09-02 17:34:30.594 | info     |             UMD | KMD version: 2.8.0 (cluster.cpp:136)
+2026-09-02 17:34:30.596 | info     |             UMD | Starting devices in cluster (cluster.cpp:1040)
+2026-09-02 17:34:30.596 | info     |             UMD | Mapped sysmem without hugepages to IOVA 0xffffffff00000000; NOC address 0x1000000000000000 (silicon_sysmem_manager.cpp:394)
+2026-09-02 17:34:30.597 | info     |             UMD | Mapped sysmem without hugepages to IOVA 0xffffffff00000000; NOC address 0x1000000000000000 (silicon_sysmem_manager.cpp:394)
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:30,811 - vllm_tt_plugin.worker - INFO - Attempting to open mesh device with grid shape (1, 2)
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:30,811 - vllm_tt_plugin.worker - INFO - Setting fabric config: FabricConfig.FABRIC_1D, reliability mode: FabricReliabilityMode.STRICT_INIT
+2026-09-02 17:34:30.812 | info     |     Distributed | Using auto discovery to generate mesh graph. (metal_env.cpp:332)
+2026-09-02 17:34:30.812 | info     |     Distributed | Constructing control plane using auto-discovery (no mesh graph descriptor). (metal_env.cpp:394)
+2026-09-02 17:34:30.812 | info     |             UMD | Creating TopologyDiscovery for architecture: blackhole (topology_discovery.cpp:73)
+2026-09-02 17:34:30.813 | warning  |             UMD | Low power mode is disabled while UMD holds open file descriptors. The device will return to low power mode once all file descriptors are closed. (topology_discovery.cpp:141)
+2026-09-02 17:34:30.814 | info     |             UMD | Established firmware bundle version: 19.13.1 (topology_discovery.cpp:545)
+2026-09-02 17:34:30.814 | info     |             UMD | Firmware bundle version 19.13.1 on the system is newer than the latest fully tested version 19.5.0 for blackhole architecture. Newest features may not be supported. (topology_discovery.cpp:577)
+2026-09-02 17:34:30.815 | warning  |             UMD | Low power mode is disabled while UMD holds open file descriptors. The device will return to low power mode once all file descriptors are closed. (topology_discovery.cpp:141)
+2026-09-02 17:34:30.818 | warning  |          Always | Unknown motherboard 'B850M-C' for chip_id=0 (bus_id=0x1) — defaulting tray_id to 0. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:62)
+2026-09-02 17:34:30.818 | warning  |          Always | Unknown motherboard 'B850M-C' for chip_id=1 (bus_id=0x2) — defaulting tray_id to 0. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:62)
+2026-09-02 17:34:30.818 | warning  |          Always | Unknown motherboard 'B850M-C' for chip_id=0 (bus_id=0x1) — defaulting tray_id to 0. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:62)
+2026-09-02 17:34:30.818 | warning  |          Always | Unknown motherboard 'B850M-C' for chip_id=1 (bus_id=0x2) — defaulting tray_id to 0. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:62)
+2026-09-02 17:34:30.818 | info     |          Fabric | TopologyMapper: Logical Multi-Mesh Adjacency Map: (topology_mapper.cpp:1474)
+2026-09-02 17:34:30.818 | info     |          Fabric | 
+=== Logical Mesh-Level Graph Adjacency Map ===
+Total nodes: 1
+Degree histogram: {0:1}
+ (topology_solver.tpp:91)
+2026-09-02 17:34:30.818 | info     |          Fabric | 
+=== Logical Mesh 0 Internal Graph Adjacency Map ===
+Total nodes: 2
+Degree histogram: {1:2}
+ (topology_solver.tpp:91)
+2026-09-02 17:34:30.818 | info     |          Fabric | TopologyMapper: Physical Multi-Mesh Adjacency Map: (topology_mapper.cpp:1485)
+2026-09-02 17:34:30.818 | info     |          Fabric | 
+=== Physical Mesh-Level Graph Adjacency Map ===
+Total nodes: 1
+Degree histogram: {0:1}
+ (topology_solver.tpp:91)
+2026-09-02 17:34:30.818 | info     |          Fabric | 
+=== Physical Mesh 0 Internal Graph Adjacency Map ===
+Total nodes: 2
+Degree histogram: {1:2}
+ (topology_solver.tpp:91)
+2026-09-02 17:34:30.818 | info     |          Fabric | Starting multi-mesh mapping: 1 logical mesh(es) to 1 physical mesh(es) (topology_mapper_utils.cpp:1469)
+2026-09-02 17:34:30.818 | info     |          Fabric | Multi-mesh mapping attempt 1/2: Trying inter-mesh mapping (topology_mapper_utils.cpp:1510)
+2026-09-02 17:34:30.818 | info     |          Fabric | Attempt 1: Inter-mesh mapping succeeded, found 1 mesh pair(s) (topology_mapper_utils.cpp:1539)
+2026-09-02 17:34:30.818 | info     |          Fabric | Attempt 1: Mapping 1 mesh pair(s) (topology_mapper_utils.cpp:1547)
+2026-09-02 17:34:30.818 | info     |          Fabric | Attempt 1: Mapping mesh 0 -> 0 (topology_mapper_utils.cpp:1554)
+2026-09-02 17:34:30.818 | info     |          Fabric | Multi-mesh mapping succeeded after 1 attempt(s): 1 mesh pair(s) mapped (topology_mapper_utils.cpp:1686)
+2026-09-02 17:34:30.825 | info     |    BuildKernels | Using pre-compiled firmware from: /home/container_app_user/tt-metal/tt_metal/pre-compiled/14402584024359349515/ (build_env_manager.cpp:260)
+2026-09-02 17:34:30.825 | info     |    BuildKernels | Using pre-compiled firmware from: /home/container_app_user/tt-metal/tt_metal/pre-compiled/14402584024359349515/ (build_env_manager.cpp:260)
+2026-09-02 17:34:30.854 | info     |           Metal | Initializing Fabric (fabric_firmware_initializer.cpp:287)
+2026-09-02 17:34:32.596 | info     |           Metal | Fabric initialized on Device 0 (device.cpp:413)
+2026-09-02 17:34:32.597 | info     |           Metal | Fabric initialized on Device 1 (device.cpp:413)
+2026-09-02 17:34:32.597 | info     |           Metal | Fabric initialized on 2 devices (fabric_firmware_initializer.cpp:415)
+2026-09-02 17:34:32.597 | info     |           Metal | Fabric Initialized with config FabricConfig::FABRIC_1D (fabric_firmware_initializer.cpp:290)
+2026-09-02 17:34:33,600 - utils.cache_monitor - INFO - 🔍 No cache content found - treating as first run
+2026-09-02 17:34:33,602 - utils.prompt_client - INFO - ⏳ First-run tensor cache warmup detected. Waited 20.0s, waiting 10.0s before polling (timeout: 1200.0s)
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35,169 - vllm_tt_plugin.worker - INFO - multidevice with 2 devices and grid (1, 2) is created
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35,169 - vllm_tt_plugin.model_runner - INFO - TTModelRunner: trace_mode=all, sample_on_device_mode=decode_only, enable_model_warmup=True
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:34:35 __init__.py:63] No logitsprocs plugins installed (group vllm.logits_processors).
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35.181 | INFO     | models.tt_transformers.tt.model_config:__init__:509 - Inferring device name: P300
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35.182 | INFO     | models.tt_transformers.tt.model_config:__init__:562 - Checkpoint directory: /home/container_app_user/cache_root/model_file_symlinks_map/Llama-3.1-8B-Instruct
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35.182 | INFO     | models.tt_transformers.tt.model_config:__init__:563 - Tokenizer file: /home/container_app_user/cache_root/model_file_symlinks_map/Llama-3.1-8B-Instruct/tokenizer.model
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35.182 | INFO     | models.tt_transformers.tt.model_config:__init__:564 - Cache directory: /home/container_app_user/cache_root/tt_metal_cache/cache_Llama-3.1-8B-Instruct/P300/P300
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35.182 | INFO     | models.tt_transformers.tt.model_config:__init__:565 - Model name: Llama-3.1-8B-Instruct
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35.184 | INFO     | models.tt_transformers.tt.model_config:_set_params_from_dict:2642 - Model name from config: Llama-3.1-8B-Instruct
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35.184 | WARNING  | models.tt_transformers.tt.model_config:get_max_prefill_chunk_size:2351 - Unknown model Llama-3.1-8B-Instruct on device P300, setting MAX_PREFILL_CHUNK_SIZE to 4 for compatibility
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35.184 | WARNING  | models.tt_transformers.tt.model_config:get_max_prefill_chunk_size:2354 - Try setting MAX_PREFILL_CHUNK_SIZE to larger powers of 2 up to e.g. 128 for faster performance (if you run out of L1 memory it was too high)
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35.185 | INFO     | models.tt_transformers.tt.model_config:_precision_factory:4380 - Model Llama-3.1-8B-Instruct requires specific TensorPrecision and OpFidelity configuration, using /home/container_app_user/tt-metal/models/tt_transformers/model_params/Llama-3.1-8B-Instruct/performance_decoder_config.json
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35.185 | INFO     | models.tt_transformers.tt.model_config:create_tokenizer:3461 - Tokenizer path: /home/container_app_user/cache_root/model_file_symlinks_map/Llama-3.1-8B-Instruct
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35.185 | INFO     | models.tt_transformers.tt.model_config:create_tokenizer:3462 - Model name: Llama-3.1-8B-Instruct
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35.185 | INFO     | models.tt_transformers.tt.model_config:create_tokenizer:3463 - Base model name: Llama-3.1-8B
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:35.667 | INFO     | models.tt_transformers.tt.model_config:create_tokenizer:3474 - Successfully loaded tokenizer from /home/container_app_user/cache_root/model_file_symlinks_map/Llama-3.1-8B-Instruct
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:36.212 | INFO     | models.tt_transformers.tt.model_config:create_processor:3545 - Successfully loaded processor from /home/container_app_user/cache_root/model_file_symlinks_map/Llama-3.1-8B-Instruct
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:36.213 | INFO     | models.tt_transformers.tt.model_config:__init__:1070 - Attention grid: ttnn.CoreGrid(x=8, y=4)
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:36.213 | INFO     | models.tt_transformers.tt.model_config:__init__:1071 - MLP grid: ttnn.CoreGrid(x=8, y=4)
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:36.213 | INFO     | models.tt_transformers.tt.model_config:__init__:1072 - MLP prefill grids @ 32: w1/w3: (8, 8), w2: (8, 8)
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:36.213 | INFO     | models.tt_transformers.tt.model_config:__init__:1073 - MLP prefill grids @ max_seq_len(131072): w1/w3: (8, 8), w2: (8, 8)
+(EngineCore_DP0 pid=97) 2026-09-02 17:34:36.213 | INFO     | models.tt_transformers.tt.model_config:__init__:1076 - LM head grid: ttnn.CoreGrid(x=8, y=8)
+(EngineCore_DP0 pid=97) `torch_dtype` is deprecated! Use `dtype` instead!
+(EngineCore_DP0 pid=97) 
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]
+Loading checkpoint shards: 100%|██████████| 4/4 [00:00<00:00, 192.75it/s]
+2026-09-02 17:34:40.181 | warning  |              Op | ttnn::tilize: Using input shard spec for output tensor because the legacy sharded optimized program factory is being used (tilize_device_operation.cpp:147)
+(APIServer pid=1) DEBUG 09-02 17:34:40 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+(EngineCore_DP0 pid=97) 
+  0%|          | 0/32 [00:00<?, ?it/s]2026-09-02 17:34:43,613 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 30.0s, next check in 10.0s (timeout: 1200.0s, no progress: 0.0s)
+(APIServer pid=1) DEBUG 09-02 17:34:50 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+  3%|▎         | 1/32 [00:03<01:51,  3.60s/it]
+  6%|▋         | 2/32 [00:07<01:47,  3.57s/it]
+  9%|▉         | 3/32 [00:10<01:34,  3.26s/it]2026-09-02 17:34:53,619 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 40.0s, next check in 10.0s (timeout: 1200.0s, no progress: 0.0s)
+(APIServer pid=1) DEBUG 09-02 17:35:00 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+ 12%|█▎        | 4/32 [00:12<01:22,  2.96s/it]
+ 16%|█▌        | 5/32 [00:15<01:15,  2.80s/it]
+ 19%|█▉        | 6/32 [00:17<01:10,  2.70s/it]
+ 22%|██▏       | 7/32 [00:20<01:06,  2.65s/it]2026-09-02 17:35:03,629 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 50.0s, next check in 10.0s (timeout: 1200.0s, no progress: 0.0s)
+(APIServer pid=1) DEBUG 09-02 17:35:10 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+ 25%|██▌       | 8/32 [00:22<01:01,  2.58s/it]
+ 28%|██▊       | 9/32 [00:25<00:58,  2.55s/it]
+ 31%|███▏      | 10/32 [00:27<00:55,  2.53s/it]
+ 34%|███▍      | 11/32 [00:30<00:53,  2.54s/it]2026-09-02 17:35:13,638 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress - tracking 104 file(s), 3094238520 total bytes
+2026-09-02 17:35:13,639 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 60.1s, next check in 10.0s (timeout: 1200.0s, no progress: 0.0s)
+(APIServer pid=1) DEBUG 09-02 17:35:20 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+ 38%|███▊      | 12/32 [00:32<00:50,  2.51s/it]
+ 41%|████      | 13/32 [00:35<00:47,  2.50s/it]
+ 44%|████▍     | 14/32 [00:37<00:44,  2.49s/it]
+ 47%|████▋     | 15/32 [00:39<00:42,  2.49s/it]2026-09-02 17:35:23,649 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 70.1s, next check in 10.0s (timeout: 1200.0s, no progress: 0.0s)
+(APIServer pid=1) DEBUG 09-02 17:35:30 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+ 50%|█████     | 16/32 [00:42<00:39,  2.49s/it]
+ 53%|█████▎    | 17/32 [00:44<00:37,  2.48s/it]
+ 56%|█████▋    | 18/32 [00:47<00:34,  2.47s/it]
+ 59%|█████▉    | 19/32 [00:49<00:32,  2.48s/it]2026-09-02 17:35:33,659 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 80.1s, next check in 10.0s (timeout: 1200.0s, no progress: 0.0s)
+(APIServer pid=1) DEBUG 09-02 17:35:40 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+ 62%|██████▎   | 20/32 [00:52<00:29,  2.49s/it]
+ 66%|██████▌   | 21/32 [00:54<00:27,  2.48s/it]
+ 69%|██████▉   | 22/32 [00:57<00:24,  2.48s/it]
+ 72%|███████▏  | 23/32 [00:59<00:22,  2.47s/it]2026-09-02 17:35:43,670 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 90.1s, next check in 10.0s (timeout: 1200.0s, no progress: 0.0s)
+(APIServer pid=1) DEBUG 09-02 17:35:50 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+ 75%|███████▌  | 24/32 [01:02<00:19,  2.46s/it]
+ 78%|███████▊  | 25/32 [01:04<00:17,  2.46s/it]
+ 81%|████████▏ | 26/32 [01:07<00:14,  2.47s/it]
+ 84%|████████▍ | 27/32 [01:09<00:12,  2.48s/it]2026-09-02 17:35:53,680 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 100.1s, next check in 10.0s (timeout: 1200.0s, no progress: 0.0s)
+(APIServer pid=1) DEBUG 09-02 17:36:00 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+ 88%|████████▊ | 28/32 [01:12<00:09,  2.49s/it]
+ 91%|█████████ | 29/32 [01:14<00:07,  2.50s/it]
+ 94%|█████████▍| 30/32 [01:17<00:04,  2.49s/it]
+ 97%|█████████▋| 31/32 [01:19<00:02,  2.49s/it]
+100%|██████████| 32/32 [01:21<00:00,  2.44s/it]
+100%|██████████| 32/32 [01:21<00:00,  2.56s/it]
+2026-09-02 17:36:03,698 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 110.1s, next check in 10.0s (timeout: 1200.0s, no progress: 0.0s)
+(APIServer pid=1) DEBUG 09-02 17:36:10 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:10,354 - vllm_tt_plugin.worker - WARNING - Setting max_tokens_all_users=131072 for number of blocks in KV cache using rules in `get_num_available_blocks_tt`.
+(EngineCore_DP0 pid=97) INFO 09-02 17:36:10 kv_cache_utils.py:820] Overriding num_gpu_blocks=70368744177664 with num_gpu_blocks_override=2080
+(EngineCore_DP0 pid=97) INFO 09-02 17:36:10 kv_cache_utils.py:1308] GPU KV cache size: 133,120 tokens
+(EngineCore_DP0 pid=97) INFO 09-02 17:36:10 kv_cache_utils.py:1313] Maximum concurrency for 131,072 tokens per request: 1.02x
+(EngineCore_DP0 pid=97) 
+Allocating TT kv caches for each layer (submesh 1):   0%|          | 0/32 [00:00<?, ?it/s]
+Allocating TT kv caches for each layer (submesh 1):   3%|▎         | 1/32 [00:00<00:24,  1.26it/s]
+Allocating TT kv caches for each layer (submesh 1):  22%|██▏       | 7/32 [00:00<00:02, 10.05it/s]
+Allocating TT kv caches for each layer (submesh 1):  41%|████      | 13/32 [00:01<00:01, 18.49it/s]
+Allocating TT kv caches for each layer (submesh 1):  59%|█████▉    | 19/32 [00:01<00:00, 25.78it/s]
+Allocating TT kv caches for each layer (submesh 1):  75%|███████▌  | 24/32 [00:01<00:00, 30.91it/s]
+Allocating TT kv caches for each layer (submesh 1):  91%|█████████ | 29/32 [00:01<00:00, 35.25it/s]
+Allocating TT kv caches for each layer (submesh 1): 100%|██████████| 32/32 [00:01<00:00, 22.86it/s]
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:11.773 | INFO     | models.tt_transformers.tt.generator:warmup_model_prefill:178 - Warming up prefill for sequence length: 128 for batch size: 1 with sampling params: None
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:11.778 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:600 - Prefilling User 1 up to 128 tokens
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:11.778 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:641 - Prefill seq len: 128, max_prefill_chunk_size: 4096, trace: False
+2026-09-02 17:36:13,701 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress - tracking 297 file(s), 7350098952 total bytes
+2026-09-02 17:36:13,702 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 120.1s, next check in 10.0s (timeout: 1200.0s, no progress: 0.0s)
+(APIServer pid=1) DEBUG 09-02 17:36:20 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+2026-09-02 17:36:23,714 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 130.1s, next check in 10.0s (timeout: 1200.0s, no progress: 10.0s)
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:26.923 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:919 - Finished prefill for all users up to 128 tokens, Starting decode...
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:26.924 | INFO     | models.tt_transformers.tt.generator:warmup_model_prefill:178 - Warming up prefill for sequence length: 1024 for batch size: 1 with sampling params: None
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:26.924 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:600 - Prefilling User 1 up to 1024 tokens
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:26.924 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:641 - Prefill seq len: 1024, max_prefill_chunk_size: 4096, trace: False
+(APIServer pid=1) DEBUG 09-02 17:36:30 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+2026-09-02 17:36:33,724 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 140.1s, next check in 10.0s (timeout: 1200.0s, no progress: 20.0s)
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:38.348 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:919 - Finished prefill for all users up to 1024 tokens, Starting decode...
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:38.348 | INFO     | models.tt_transformers.tt.generator:warmup_model_prefill:178 - Warming up prefill for sequence length: 2048 for batch size: 1 with sampling params: None
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:38.348 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:600 - Prefilling User 1 up to 2048 tokens
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:38.348 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:641 - Prefill seq len: 2048, max_prefill_chunk_size: 4096, trace: False
+(APIServer pid=1) DEBUG 09-02 17:36:40 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+2026-09-02 17:36:43,735 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 150.2s, next check in 10.0s (timeout: 1200.0s, no progress: 30.0s)
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:48.906 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:919 - Finished prefill for all users up to 2048 tokens, Starting decode...
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:48.907 | INFO     | models.tt_transformers.tt.generator:warmup_model_prefill:178 - Warming up prefill for sequence length: 4096 for batch size: 1 with sampling params: None
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:48.907 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:600 - Prefilling User 1 up to 4096 tokens
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:48.907 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:641 - Prefill seq len: 4096, max_prefill_chunk_size: 4096, trace: False
+(APIServer pid=1) DEBUG 09-02 17:36:50 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+2026-09-02 17:36:53,753 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 160.2s, next check in 10.0s (timeout: 1200.0s, no progress: 40.1s)
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:59.426 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:919 - Finished prefill for all users up to 4096 tokens, Starting decode...
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:59.426 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:100 - Starting decode warmup
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:59.427 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:101 - Tokens shape: torch.Size([32, 1])
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:59.427 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:102 - Start pos shape: torch.Size([32])
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:59.427 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:103 - Page table shape: torch.Size([32, 2048])
+(EngineCore_DP0 pid=97) 2026-09-02 17:36:59.427 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:106 - Warming up decode for sampling params: SamplingParams(temperature=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], top_k=[10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10], top_p=[0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9], presence_penalty=[1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2], frequency_penalty=[1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2], repetition_penalty=[1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5], seed=None, enable_log_probs=[True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True], num_logprobs=0)
+(APIServer pid=1) DEBUG 09-02 17:37:00 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+2026-09-02 17:37:03,754 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 170.2s, next check in 10.0s (timeout: 1200.0s, no progress: 50.1s)
+(APIServer pid=1) DEBUG 09-02 17:37:10 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+2026-09-02 17:37:13,764 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress - tracking 297 file(s), 7350098952 total bytes
+2026-09-02 17:37:13,765 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 180.2s, next check in 10.0s (timeout: 1200.0s, no progress: 60.1s)
+(APIServer pid=1) DEBUG 09-02 17:37:20 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+2026-09-02 17:37:23,775 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 190.2s, next check in 10.0s (timeout: 1200.0s, no progress: 70.1s)
+(APIServer pid=1) DEBUG 09-02 17:37:30 utils.py:1054] Waiting for 1 local, 0 remote core engine proc(s) to start.
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:32.517 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:106 - Warming up decode for sampling params: SamplingParams(temperature=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], top_k=[10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10], top_p=[0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9], presence_penalty=[1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2], frequency_penalty=[1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2], repetition_penalty=[1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5], seed=None, enable_log_probs=[False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False], num_logprobs=0)
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:32.624 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:106 - Warming up decode for sampling params: SamplingParams(temperature=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], top_k=[10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10], top_p=[0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9], presence_penalty=None, frequency_penalty=None, repetition_penalty=None, seed=None, enable_log_probs=[True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True], num_logprobs=0)
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:32.728 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:106 - Warming up decode for sampling params: SamplingParams(temperature=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], top_k=[10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10], top_p=[0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9], presence_penalty=None, frequency_penalty=None, repetition_penalty=None, seed=None, enable_log_probs=[False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False], num_logprobs=0)
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:32.833 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:106 - Warming up decode for sampling params: SamplingParams(temperature=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], top_k=[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], top_p=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, seed=None, enable_log_probs=False, num_logprobs=0)
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:32.937 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:106 - Warming up decode for sampling params: None
+2026-09-02 17:37:33,785 - utils.prompt_client - INFO - 🔄 Tensor cache generation in progress. Waited 200.2s, next check in 10.0s (timeout: 1200.0s, no progress: 80.1s)
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.014 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:117 - Decode warmup completed
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.015 | INFO     | models.tt_transformers.tt.generator:warmup_model_prefill:137 - Using batch-1-only traced prefill warmup; runtime batched prefill remains enabled
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.015 | INFO     | models.tt_transformers.tt.generator:warmup_model_prefill:178 - Warming up prefill for sequence length: 128 for batch size: 1 with sampling params: None
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.015 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:600 - Prefilling User 1 up to 128 tokens
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.015 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:641 - Prefill seq len: 128, max_prefill_chunk_size: 4096, trace: True
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.070 | INFO     | models.tt_transformers.tt.generator:_capture_trace_prefill:293 - Done Compiling Model
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.155 | INFO     | models.tt_transformers.tt.generator:_capture_trace_prefill:308 - Done Capturing Prefill Trace
+2026-09-02 17:37:35.156 | warning  |           Metal | Allocating device buffers is unsafe due to the existence of an active trace. These buffers may be corrupted once a trace is executed. (allocator.cpp:108)
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.190 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:919 - Finished prefill for all users up to 128 tokens, Starting decode...
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.190 | INFO     | models.tt_transformers.tt.generator:warmup_model_prefill:178 - Warming up prefill for sequence length: 1024 for batch size: 1 with sampling params: None
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.190 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:600 - Prefilling User 1 up to 1024 tokens
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.190 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:641 - Prefill seq len: 1024, max_prefill_chunk_size: 4096, trace: True
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.277 | INFO     | models.tt_transformers.tt.generator:_capture_trace_prefill:293 - Done Compiling Model
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.363 | INFO     | models.tt_transformers.tt.generator:_capture_trace_prefill:308 - Done Capturing Prefill Trace
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.455 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:919 - Finished prefill for all users up to 1024 tokens, Starting decode...
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.456 | INFO     | models.tt_transformers.tt.generator:warmup_model_prefill:178 - Warming up prefill for sequence length: 2048 for batch size: 1 with sampling params: None
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.456 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:600 - Prefilling User 1 up to 2048 tokens
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.456 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:641 - Prefill seq len: 2048, max_prefill_chunk_size: 4096, trace: False
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.616 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:919 - Finished prefill for all users up to 2048 tokens, Starting decode...
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.616 | INFO     | models.tt_transformers.tt.generator:warmup_model_prefill:178 - Warming up prefill for sequence length: 4096 for batch size: 1 with sampling params: None
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.616 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:600 - Prefilling User 1 up to 4096 tokens
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.617 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:641 - Prefill seq len: 4096, max_prefill_chunk_size: 4096, trace: False
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.942 | INFO     | models.tt_transformers.tt.generator:prefill_forward_text:919 - Finished prefill for all users up to 4096 tokens, Starting decode...
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.943 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:100 - Starting decode warmup
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.943 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:101 - Tokens shape: torch.Size([32, 1])
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.943 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:102 - Start pos shape: torch.Size([32])
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.943 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:103 - Page table shape: torch.Size([32, 2048])
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:35.943 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:106 - Warming up decode for sampling params: SamplingParams(temperature=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], top_k=[10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10], top_p=[0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9], presence_penalty=[1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2], frequency_penalty=[1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2], repetition_penalty=[1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5], seed=None, enable_log_probs=[True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True], num_logprobs=0)
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:36.030 | INFO     | models.tt_transformers.tt.generator:_capture_decode_trace_text:1233 - Done Compiling Model
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:36.162 | INFO     | models.tt_transformers.tt.generator:_capture_decode_trace_text:1271 - Done Capturing Decode Trace
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:36.192 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:106 - Warming up decode for sampling params: SamplingParams(temperature=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], top_k=[10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10], top_p=[0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9], presence_penalty=[1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2], frequency_penalty=[1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2], repetition_penalty=[1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5], seed=None, enable_log_probs=[False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False], num_logprobs=0)
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:36.224 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:106 - Warming up decode for sampling params: SamplingParams(temperature=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], top_k=[10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10], top_p=[0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9], presence_penalty=None, frequency_penalty=None, repetition_penalty=None, seed=None, enable_log_probs=[True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True], num_logprobs=0)
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:36.255 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:106 - Warming up decode for sampling params: SamplingParams(temperature=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], top_k=[10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10], top_p=[0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9], presence_penalty=None, frequency_penalty=None, repetition_penalty=None, seed=None, enable_log_probs=[False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False, False], num_logprobs=0)
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:36.284 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:106 - Warming up decode for sampling params: SamplingParams(temperature=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], top_k=[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], top_p=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, seed=None, enable_log_probs=False, num_logprobs=0)
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:36.312 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:106 - Warming up decode for sampling params: None
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:36.398 | INFO     | models.tt_transformers.tt.generator:_capture_decode_trace_text:1233 - Done Compiling Model
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:36.526 | INFO     | models.tt_transformers.tt.generator:_capture_decode_trace_text:1271 - Done Capturing Decode Trace
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:36.574 | INFO     | models.common.warmup.warmup_utils:warmup_model_decode:117 - Decode warmup completed
+(EngineCore_DP0 pid=97) INFO 09-02 17:37:36 core.py:328] init engine (profile, create kv cache, warmup model) took 86.22 seconds
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:37:36 registry.py:66] Loading CachedHfTokenizer for tokenizer_mode='hf'
+(EngineCore_DP0 pid=97) WARNING 09-02 17:37:37 scheduler.py:175] Using custom scheduler class vllm_tt_plugin.scheduler.TTScheduler. This scheduler interface is not public and compatibility may not be maintained.
+(EngineCore_DP0 pid=97) INFO 09-02 17:37:37 core.py:162] Scheduler class: TTScheduler, async_scheduling=True
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:37:37 core.py:228] Batch queue is enabled with size 2
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:37:37 gc_utils.py:40] GC Debug Config. enabled:False,top_objects:-1
+(APIServer pid=1) DEBUG 09-02 17:37:37 utils.py:1165] READY from local core engine process 0.
+(EngineCore_DP0 pid=97) 2026-09-02 17:37:37,791 - vllm_tt_plugin.platform - INFO - Automatic prefix caching is enabled
+(EngineCore_DP0 pid=97) INFO 09-02 17:37:37 vllm.py:698] Asynchronous scheduling is enabled.
+(EngineCore_DP0 pid=97) WARNING 09-02 17:37:37 vllm.py:743] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:37:37 core.py:1152] EngineCore waiting for work.
+(APIServer pid=1) DEBUG 09-02 17:37:37 loggers.py:273] Engine 000: vllm cache_config_info with initialization after num_gpu_blocks is: 2080
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:37:37 core.py:1152] EngineCore waiting for work.
+(EngineCore_DP0 pid=97) DEBUG 09-02 17:37:37 core.py:1152] EngineCore waiting for work.
+(APIServer pid=1) INFO 09-02 17:37:37 api_server.py:495] Supported tasks: ['generate']
+(APIServer pid=1) INFO 09-02 17:37:38 parser_manager.py:202] "auto" tool choice has been enabled.
+(APIServer pid=1) WARNING 09-02 17:37:38 model.py:1360] Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 0.6, 'top_p': 0.9}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+(APIServer pid=1) INFO 09-02 17:37:38 parser_manager.py:202] "auto" tool choice has been enabled.
+(APIServer pid=1) INFO 09-02 17:37:38 serving.py:185] Warming up chat template processing...
+(APIServer pid=1) INFO 09-02 17:37:39 hf.py:318] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
+(APIServer pid=1) INFO 09-02 17:37:39 serving.py:210] Chat template warmup completed in 770.0ms
+(APIServer pid=1) INFO 09-02 17:37:39 parser_manager.py:202] "auto" tool choice has been enabled.
+(APIServer pid=1) INFO 09-02 17:37:39 api_server.py:500] Starting vLLM API server 0 on http://0.0.0.0:7000
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:38] Available routes are:
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /openapi.json, Methods: HEAD, GET
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /docs, Methods: HEAD, GET
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /docs/oauth2-redirect, Methods: HEAD, GET
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /redoc, Methods: HEAD, GET
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /tokenize, Methods: POST
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /detokenize, Methods: POST
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /load, Methods: GET
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /version, Methods: GET
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /health, Methods: GET
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /metrics, Methods: GET
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /v1/models, Methods: GET
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /ping, Methods: GET
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /ping, Methods: POST
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /invocations, Methods: POST
+(APIServer pid=1) INFO 09-02 17:37:39 launcher.py:47] Route: /v1/chat/completions, Methods: POST
+# --- appended by tests/fixtures: this runner disables uvicorn logging, so the stock ready line is added here ---
+INFO:     Application startup complete.

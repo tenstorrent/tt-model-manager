@@ -172,7 +172,9 @@ them in a suggested workflow. Read them in full at
   `generic_op`) wheel, `vllm_models/<name>/vllm_metadata.json`, `install.sh`, `run.sh`, manifest.
 - **After pull:** `install.sh` succeeded; `<install>/venv/bin/python` exists.
 - **After serve:** the log reaches **`Application startup complete`** (model load + JIT warmup is
-  minutes on a single chip — wait, don't declare failure early).
+  minutes on a single chip — wait, don't declare failure early). For a container package,
+  `tt-model serve` itself waits and shows the boot as a checklist ending in a ready card;
+  `--detach` skips the wait.
 - **Only then** run the `curl` and confirm the text is coherent. Report the real result; if a step
   failed, say so with the output.
 

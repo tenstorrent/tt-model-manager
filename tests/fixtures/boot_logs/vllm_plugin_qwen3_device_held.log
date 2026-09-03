@@ -1,0 +1,325 @@
+INFO 09-01 13:11:12 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 09-01 13:11:12 [__init__.py:46] - tt -> vllm_tt_plugin.entrypoints:platform_plugin
+INFO 09-01 13:11:12 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+2026-09-01 13:11:14.257 | DEBUG    | ttnn:<module>:78 - Initial ttnn.CONFIG:
+Config{cache_path=/home/tt/.cache/ttnn,model_cache_path=/home/tt/.cache/ttnn/models,tmp_dir=/tmp/ttnn,enable_model_cache=false,enable_fast_runtime_mode=true,validate_program_args=false,throw_exception_on_fallback=false,enable_logging=false,enable_graph_report=false,enable_graph_python_stack_traces=false,enable_detailed_buffer_report=false,enable_detailed_tensor_report=false,enable_comparison_mode=false,comparison_mode_should_raise_exception=false,comparison_mode_pcc=0.9999,root_report_path=generated/ttnn/reports,report_name=std::nullopt,std::nullopt}
+INFO 09-01 13:11:14 [__init__.py:237] Platform plugin tt is activated
+INFO 09-01 13:11:20 [importing.py:46] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 09-01 13:11:20 [importing.py:81] Triton not installed or not compatible; certain GPU-related functions will not be available.
+INFO 09-01 13:11:21 [tt/platform.py:968] Registered TT model TTQwen3MoeForCausalLM -> tt_qwen3_coder_30b_a3b_instruct:Qwen3CoderForCausalLM (from EXTRA_MODELS_DIR/qwen3_coder_30b_a3b_instruct)
+INFO 09-01 13:11:21 [tt/platform.py:968] Registered TT model TTQwen3MoeForCausalLM -> tt_qwen3_coder_30b_a3b_instruct:Qwen3CoderForCausalLM (from EXTRA_MODELS_DIR/qwen3_coder_30b_a3b_instruct)
+INFO 09-01 13:11:21 [tt/platform.py:968] Registered TT model TTQwen3MoeForCausalLM -> tt_qwen3_coder_30b_a3b_instruct:Qwen3CoderForCausalLM (from EXTRA_MODELS_DIR/qwen3_coder_30b_a3b_instruct)
+INFO 09-01 13:11:21 [tt/platform.py:968] Registered TT model TTQwen3MoeForCausalLM -> tt_qwen3_coder_30b_a3b_instruct:Qwen3CoderForCausalLM (from EXTRA_MODELS_DIR/qwen3_coder_30b_a3b_instruct)
+(APIServer pid=1) INFO 09-01 13:11:21 [api_utils.py:339] 
+
+(APIServer pid=1) INFO 09-01 13:11:21 [api_utils.py:339]        █     █     █▄   ▄█
+
+(APIServer pid=1) INFO 09-01 13:11:21 [api_utils.py:339]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.24.0
+
+(APIServer pid=1) INFO 09-01 13:11:21 [api_utils.py:339]   █▄█▀ █     █     █     █  model   Qwen/Qwen3-Coder-30B-A3B-Instruct
+
+(APIServer pid=1) INFO 09-01 13:11:21 [api_utils.py:339]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+
+(APIServer pid=1) INFO 09-01 13:11:21 [api_utils.py:339] 
+(APIServer pid=1) INFO 09-01 13:11:21 [tt/platform.py:968] Registered TT model TTQwen3MoeForCausalLM -> tt_qwen3_coder_30b_a3b_instruct:Qwen3CoderForCausalLM (from EXTRA_MODELS_DIR/qwen3_coder_30b_a3b_instruct)
+(APIServer pid=1) INFO 09-01 13:11:21 [api_utils.py:273] non-default args: {'model_tag': 'Qwen/Qwen3-Coder-30B-A3B-Instruct', 'enable_auto_tool_choice': True, 'tool_call_parser': 'qwen3_coder', 'max_log_len': 32, 'port': 7002, 'model': 'Qwen/Qwen3-Coder-30B-A3B-Instruct', 'seed': 9472, 'max_model_len': 256000, 'generation_config': 'vllm', 'block_size': 64, 'max_num_batched_tokens': 256000, 'max_num_seqs': 32, 'additional_config': {'tt': {'sample_on_device_mode': 'all', 'trace_region_size': 50331648, 'fabric_config': 'FABRIC_1D_RING'}}}
+(APIServer pid=1) INFO 09-01 13:11:21 [tt/platform.py:968] Registered TT model TTQwen3MoeForCausalLM -> tt_qwen3_coder_30b_a3b_instruct:Qwen3CoderForCausalLM (from EXTRA_MODELS_DIR/qwen3_coder_30b_a3b_instruct)
+(APIServer pid=1) WARNING 09-01 13:11:21 [envs.py:2004] Unknown vLLM environment variable detected: VLLM_RPC_TIMEOUT
+(APIServer pid=1) INFO 09-01 13:11:31 [model.py:598] Resolved architecture: Qwen3MoeForCausalLM
+(APIServer pid=1) INFO 09-01 13:11:31 [model.py:1725] Using max model len 256000
+(APIServer pid=1) INFO 09-01 13:11:31 [scheduler.py:252] Chunked prefill is enabled with max_num_batched_tokens=256000.
+(APIServer pid=1) INFO 09-01 13:11:31 [vllm.py:1006] Asynchronous scheduling is enabled.
+(APIServer pid=1) WARNING 09-01 13:11:31 [vllm.py:1110] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(APIServer pid=1) INFO 09-01 13:11:31 [kernel.py:276] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(APIServer pid=1) INFO 09-01 13:11:31 [tt/platform.py:153] Chunked prefill is not supported for `model_type=qwen3_moe`; disabling it.
+(APIServer pid=1) INFO 09-01 13:11:31 [tt/platform.py:968] Registered TT model TTQwen3MoeForCausalLM -> tt_qwen3_coder_30b_a3b_instruct:Qwen3CoderForCausalLM (from EXTRA_MODELS_DIR/qwen3_coder_30b_a3b_instruct)
+(APIServer pid=1) INFO 09-01 13:11:31 [tt/platform.py:1610] Automatic prefix caching is enabled
+(APIServer pid=1) INFO 09-01 13:11:31 [compilation.py:310] Enabled custom fusions: norm_quant, act_quant
+INFO 09-01 13:11:34 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 09-01 13:11:34 [__init__.py:46] - tt -> vllm_tt_plugin.entrypoints:platform_plugin
+INFO 09-01 13:11:34 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+2026-09-01 13:11:36.208 | DEBUG    | ttnn:<module>:78 - Initial ttnn.CONFIG:
+Config{cache_path=/home/tt/.cache/ttnn,model_cache_path=/home/tt/.cache/ttnn/models,tmp_dir=/tmp/ttnn,enable_model_cache=false,enable_fast_runtime_mode=true,validate_program_args=false,throw_exception_on_fallback=false,enable_logging=false,enable_graph_report=false,enable_graph_python_stack_traces=false,enable_detailed_buffer_report=false,enable_detailed_tensor_report=false,enable_comparison_mode=false,comparison_mode_should_raise_exception=false,comparison_mode_pcc=0.9999,root_report_path=generated/ttnn/reports,report_name=std::nullopt,std::nullopt}
+INFO 09-01 13:11:36 [__init__.py:237] Platform plugin tt is activated
+INFO 09-01 13:11:41 [importing.py:46] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 09-01 13:11:41 [importing.py:81] Triton not installed or not compatible; certain GPU-related functions will not be available.
+(EngineCore pid=60) INFO 09-01 13:11:41 [tt/platform.py:968] Registered TT model TTQwen3MoeForCausalLM -> tt_qwen3_coder_30b_a3b_instruct:Qwen3CoderForCausalLM (from EXTRA_MODELS_DIR/qwen3_coder_30b_a3b_instruct)
+(EngineCore pid=60) INFO 09-01 13:11:41 [core.py:114] Initializing a V1 LLM engine (v0.24.0) with config: model='Qwen/Qwen3-Coder-30B-A3B-Instruct', speculative_config=None, tokenizer='Qwen/Qwen3-Coder-30B-A3B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=256000, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=None, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=None, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=True, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_verbose=False), seed=9472, served_model_name=Qwen/Qwen3-Coder-30B-A3B-Instruct, enable_prefix_caching=True, enable_chunked_prefill=False, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'eager', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::qwen_gdn_attention_core', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': [256000], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native']), enable_flashinfer_autotune=True, moe_backend='auto', linear_backend='auto')
+(EngineCore pid=60) INFO 09-01 13:11:41 [tt/platform.py:968] Registered TT model TTQwen3MoeForCausalLM -> tt_qwen3_coder_30b_a3b_instruct:Qwen3CoderForCausalLM (from EXTRA_MODELS_DIR/qwen3_coder_30b_a3b_instruct)
+(EngineCore pid=60) INFO 09-01 13:11:41 [tt/platform.py:968] Registered TT model TTQwen3MoeForCausalLM -> tt_qwen3_coder_30b_a3b_instruct:Qwen3CoderForCausalLM (from EXTRA_MODELS_DIR/qwen3_coder_30b_a3b_instruct)
+(EngineCore pid=60) INFO 09-01 13:11:41 [tt/platform.py:1610] Automatic prefix caching is enabled
+(EngineCore pid=60) INFO 09-01 13:11:41 [tt/worker.py:232] TT worker standard-DP binding: data_parallel_index=0 data_parallel_rank_local=0 TT_VISIBLE_DEVICES=None MESH_DEVICE=P300x2
+2026-09-01 13:11:41.906 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-09-01 13:11:41.906 | info     |             UMD | Cluster constructor started. (cluster.cpp:389)
+2026-09-01 13:11:41.906 | info     |             UMD | Creating TopologyDiscovery for architecture: blackhole (topology_discovery.cpp:96)
+2026-09-01 13:11:41.906 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:115)
+2026-09-01 13:11:41.914 | info     |             UMD | Established firmware bundle version: 19.13.1 (topology_discovery.cpp:575)
+2026-09-01 13:11:41.914 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:119)
+2026-09-01 13:11:42.015 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1, 2, 3}/[0, 1, 2, 3] and remote chip ids {} (cluster.cpp:173)
+2026-09-01 13:11:42.015 | info     |             UMD | IOMMU: enabled (cluster.cpp:147)
+2026-09-01 13:11:42.015 | info     |             UMD | KMD version: 2.8.0 (cluster.cpp:150)
+2026-09-01 13:11:42.015 | info     |             UMD | Cluster constructor completed. (cluster.cpp:648)
+2026-09-01 13:11:42.016 | info     |             UMD | Starting devices in cluster (cluster.cpp:1188)
+2026-09-01 13:11:43.016 | warning  |             UMD | Waiting for lock 'CHIP_IN_USE_0_PCIe' which is currently held by thread TID: 141, PID: 141 (robust_mutex.cpp:476)
+2026-09-01 13:29:58.415 | error    |             UMD | Expected sysmem to be mapped at NOC address 0x1000000000000000, but it was mapped at 0x1000000040000000. This usually means another process is already holding the sysmem NOC address space UMD requires (often a stale or crashed process from a previous run). To fix this, find and kill the other processes using the Tenstorrent device(s), then retry. (silicon_sysmem_manager.cpp:423)
+2026-09-01 13:29:58.416 | info     |             UMD | Cluster destructor started. (cluster.cpp:916)
+2026-09-01 13:29:58.416 | info     |             UMD | Cluster destructor completed. (cluster.cpp:919)
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] EngineCore failed to start.
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] Traceback (most recent call last):
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 1200, in run_engine_core
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]     engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]     return func(*args, **kwargs)
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]            ^^^^^^^^^^^^^^^^^^^^^
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 966, in __init__
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]     super().__init__(
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 123, in __init__
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]     self.model_executor = executor_class(vllm_config)
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]     return func(*args, **kwargs)
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]            ^^^^^^^^^^^^^^^^^^^^^
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/executor/abstract.py", line 109, in __init__
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]     self._init_executor()
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 63, in _init_executor
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]     self.driver_worker.init_device()
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/worker/worker_base.py", line 331, in init_device
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]     self.worker.init_device()  # type: ignore
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]   File "/opt/tt-venv/lib/python3.12/site-packages/vllm_tt_plugin/worker.py", line 241, in init_device
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]     self.mesh_device = open_mesh_device(
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]                        ^^^^^^^^^^^^^^^^^
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]   File "/opt/tt-venv/lib/python3.12/site-packages/vllm_tt_plugin/worker.py", line 848, in open_mesh_device
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]     mesh_grid = get_mesh_grid()
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]                 ^^^^^^^^^^^^^^^
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]   File "/opt/tt-venv/lib/python3.12/site-packages/vllm_tt_plugin/worker.py", line 830, in get_mesh_grid
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]     num_devices_available = ttnn.get_num_devices()
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]                             ^^^^^^^^^^^^^^^^^^^^^^
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]   File "/opt/tt-metal/ttnn/ttnn/distributed/distributed.py", line 627, in get_num_devices
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]     return ttnn._ttnn.device.GetNumAvailableDevices()
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] RuntimeError: Sysmem mapped at unexpected NOC address (likely a stale process holding sysmem); proceeding could lead to undefined behavior
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] Location: /opt/tt-metal/tt_metal/third_party/umd/device/chip_helpers/silicon_sysmem_manager.cpp:427
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]  1. tt::umd::SiliconSysmemManager::pin_or_map_sysmem_to_device()
+
+(EngineCore pid=60) Process EngineCore:
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]  2. tt::umd::LocalChip::start_device(unsigned int)
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]  3. tt::umd::Cluster::start_device(tt::umd::DeviceParams const&)
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]  4. tt::Cluster::start_driver(tt::umd::DeviceParams&) const
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]  5. tt::Cluster::initialize_device_drivers()
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]  6. tt::Cluster::Cluster(tt::llrt::RunTimeOptions&)
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]  7. tt::tt_metal::MetalEnvImpl::initialize_base_objects()
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]  8. tt::tt_metal::MetalEnvImpl::MetalEnvImpl(tt::tt_metal::MetalEnvDescriptor)
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231]  9. std::__detail::_MakeUniq<tt::tt_metal::MetalEnvImpl>::__single_object std::make_unique<tt::tt_metal::MetalEnvImpl, tt::tt_metal::MetalEnvDescriptor>(tt::tt_metal::MetalEnvDescriptor&&)
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 10. tt::tt_metal::MetalEnv::MetalEnv(tt::tt_metal::MetalEnvDescriptor)
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 11. tt::tt_metal::MetalContext::create_default_instance_implicit_locked()
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 12. tt::tt_metal::MetalContext::instance(ttsl::StrongType<int, tt::tt_metal::ContextIdTag>)
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 13. tt::tt_metal::GetNumAvailableDevices()
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 14. /opt/tt-metal/ttnn/ttnn/_ttnn.so(+0x68d008) [0x70e1fd61d008]
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 15. /opt/tt-metal/ttnn/ttnn/_ttnn.so(+0x35cebf) [0x70e1fd2ecebf]
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 16. _PyEval_EvalFrameDefault
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 17. _PyEval_EvalFrameDefault
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 18. _PyEval_EvalFrameDefault
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 19. PyEval_EvalCode
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 20. PyRun_StringFlags
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 21. PyRun_SimpleStringFlags
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 22. Py_RunMain
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 23. /lib/x86_64-linux-gnu/libc.so.6(+0x2a1ca) [0x70e2418051ca]
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 24. __libc_start_main
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 25. _start
+
+(EngineCore pid=60) ERROR 09-01 13:29:58 [core.py:1231] 
+(EngineCore pid=60) Traceback (most recent call last):
+(EngineCore pid=60)   File "/usr/local/share/uv/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+(EngineCore pid=60)     self.run()
+(EngineCore pid=60)   File "/usr/local/share/uv/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/multiprocessing/process.py", line 108, in run
+(EngineCore pid=60)     self._target(*self._args, **self._kwargs)
+(EngineCore pid=60)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 1235, in run_engine_core
+(EngineCore pid=60)     raise e
+(EngineCore pid=60)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 1200, in run_engine_core
+(EngineCore pid=60)     engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
+(EngineCore pid=60)                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=60)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=60)     return func(*args, **kwargs)
+(EngineCore pid=60)            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=60)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 966, in __init__
+(EngineCore pid=60)     super().__init__(
+(EngineCore pid=60)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 123, in __init__
+(EngineCore pid=60)     self.model_executor = executor_class(vllm_config)
+(EngineCore pid=60)                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=60)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=60)     return func(*args, **kwargs)
+(EngineCore pid=60)            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=60)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/executor/abstract.py", line 109, in __init__
+(EngineCore pid=60)     self._init_executor()
+(EngineCore pid=60)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 63, in _init_executor
+(EngineCore pid=60)     self.driver_worker.init_device()
+(EngineCore pid=60)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/worker/worker_base.py", line 331, in init_device
+(EngineCore pid=60)     self.worker.init_device()  # type: ignore
+(EngineCore pid=60)     ^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=60)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm_tt_plugin/worker.py", line 241, in init_device
+(EngineCore pid=60)     self.mesh_device = open_mesh_device(
+(EngineCore pid=60)                        ^^^^^^^^^^^^^^^^^
+(EngineCore pid=60)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm_tt_plugin/worker.py", line 848, in open_mesh_device
+(EngineCore pid=60)     mesh_grid = get_mesh_grid()
+(EngineCore pid=60)                 ^^^^^^^^^^^^^^^
+(EngineCore pid=60)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm_tt_plugin/worker.py", line 830, in get_mesh_grid
+(EngineCore pid=60)     num_devices_available = ttnn.get_num_devices()
+(EngineCore pid=60)                             ^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=60)   File "/opt/tt-metal/ttnn/ttnn/distributed/distributed.py", line 627, in get_num_devices
+(EngineCore pid=60)     return ttnn._ttnn.device.GetNumAvailableDevices()
+(EngineCore pid=60)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=60) RuntimeError: Sysmem mapped at unexpected NOC address (likely a stale process holding sysmem); proceeding could lead to undefined behavior
+(EngineCore pid=60) Location: /opt/tt-metal/tt_metal/third_party/umd/device/chip_helpers/silicon_sysmem_manager.cpp:427
+(EngineCore pid=60)  1. tt::umd::SiliconSysmemManager::pin_or_map_sysmem_to_device()
+(EngineCore pid=60)  2. tt::umd::LocalChip::start_device(unsigned int)
+(EngineCore pid=60)  3. tt::umd::Cluster::start_device(tt::umd::DeviceParams const&)
+(EngineCore pid=60)  4. tt::Cluster::start_driver(tt::umd::DeviceParams&) const
+(EngineCore pid=60)  5. tt::Cluster::initialize_device_drivers()
+(EngineCore pid=60)  6. tt::Cluster::Cluster(tt::llrt::RunTimeOptions&)
+(EngineCore pid=60)  7. tt::tt_metal::MetalEnvImpl::initialize_base_objects()
+(EngineCore pid=60)  8. tt::tt_metal::MetalEnvImpl::MetalEnvImpl(tt::tt_metal::MetalEnvDescriptor)
+(EngineCore pid=60)  9. std::__detail::_MakeUniq<tt::tt_metal::MetalEnvImpl>::__single_object std::make_unique<tt::tt_metal::MetalEnvImpl, tt::tt_metal::MetalEnvDescriptor>(tt::tt_metal::MetalEnvDescriptor&&)
+(EngineCore pid=60) 10. tt::tt_metal::MetalEnv::MetalEnv(tt::tt_metal::MetalEnvDescriptor)
+(EngineCore pid=60) 11. tt::tt_metal::MetalContext::create_default_instance_implicit_locked()
+(EngineCore pid=60) 12. tt::tt_metal::MetalContext::instance(ttsl::StrongType<int, tt::tt_metal::ContextIdTag>)
+(EngineCore pid=60) 13. tt::tt_metal::GetNumAvailableDevices()
+(EngineCore pid=60) 14. /opt/tt-metal/ttnn/ttnn/_ttnn.so(+0x68d008) [0x70e1fd61d008]
+(EngineCore pid=60) 15. /opt/tt-metal/ttnn/ttnn/_ttnn.so(+0x35cebf) [0x70e1fd2ecebf]
+(EngineCore pid=60) 16. _PyEval_EvalFrameDefault
+(EngineCore pid=60) 17. _PyEval_EvalFrameDefault
+(EngineCore pid=60) 18. _PyEval_EvalFrameDefault
+(EngineCore pid=60) 19. PyEval_EvalCode
+(EngineCore pid=60) 20. PyRun_StringFlags
+(EngineCore pid=60) 21. PyRun_SimpleStringFlags
+(EngineCore pid=60) 22. Py_RunMain
+(EngineCore pid=60) 23. /lib/x86_64-linux-gnu/libc.so.6(+0x2a1ca) [0x70e2418051ca]
+(EngineCore pid=60) 24. __libc_start_main
+(EngineCore pid=60) 25. _start
+(EngineCore pid=60) 
+(APIServer pid=1) Traceback (most recent call last):
+(APIServer pid=1)   File "/opt/tt-venv/bin/vllm", line 12, in <module>
+(APIServer pid=1)     sys.exit(main())
+(APIServer pid=1)              ^^^^^^
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/entrypoints/cli/main.py", line 95, in main
+(APIServer pid=1)     args.dispatch_function(args)
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/entrypoints/cli/serve.py", line 148, in cmd
+(APIServer pid=1)     uvloop.run(run_server(args))
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/uvloop/__init__.py", line 96, in run
+(APIServer pid=1)     return __asyncio.run(
+(APIServer pid=1)            ^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/share/uv/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 195, in run
+(APIServer pid=1)     return runner.run(main)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/share/uv/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py", line 118, in run
+(APIServer pid=1)     return self._loop.run_until_complete(task)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/uvloop/__init__.py", line 48, in wrapper
+(APIServer pid=1)     return await main
+(APIServer pid=1)            ^^^^^^^^^^
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/entrypoints/openai/api_server.py", line 663, in run_server
+(APIServer pid=1)     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/entrypoints/openai/api_server.py", line 677, in run_server_worker
+(APIServer pid=1)     async with build_async_engine_client(
+(APIServer pid=1)                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/share/uv/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/contextlib.py", line 210, in __aenter__
+(APIServer pid=1)     return await anext(self.gen)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/entrypoints/openai/api_server.py", line 99, in build_async_engine_client
+(APIServer pid=1)     async with build_async_engine_client_from_engine_args(
+(APIServer pid=1)                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/share/uv/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/contextlib.py", line 210, in __aenter__
+(APIServer pid=1)     return await anext(self.gen)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/entrypoints/openai/api_server.py", line 135, in build_async_engine_client_from_engine_args
+(APIServer pid=1)     async_llm = AsyncLLM.from_vllm_config(
+(APIServer pid=1)                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 217, in from_vllm_config
+(APIServer pid=1)     return cls(
+(APIServer pid=1)            ^^^^
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 146, in __init__
+(APIServer pid=1)     self.engine_core = EngineCoreClient.make_async_mp_client(
+(APIServer pid=1)                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(APIServer pid=1)     return func(*args, **kwargs)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 132, in make_async_mp_client
+(APIServer pid=1)     return AsyncMPClient(*client_args)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(APIServer pid=1)     return func(*args, **kwargs)
+(APIServer pid=1)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 963, in __init__
+(APIServer pid=1)     super().__init__(
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 573, in __init__
+(APIServer pid=1)     with launch_core_engines(
+(APIServer pid=1)          ^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=1)   File "/usr/local/share/uv/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/contextlib.py", line 144, in __exit__
+(APIServer pid=1)     next(self.gen)
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 1213, in launch_core_engines
+(APIServer pid=1)     wait_for_engine_startup(
+(APIServer pid=1)   File "/opt/tt-venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 1272, in wait_for_engine_startup
+(APIServer pid=1)     raise RuntimeError(
+(APIServer pid=1) RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
