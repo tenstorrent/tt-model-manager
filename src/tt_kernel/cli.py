@@ -1146,8 +1146,9 @@ def serve(
         "ready, streaming the boot (a cold boot JIT-compiles kernels, ~10 min)."
     ),
     port: Optional[int] = typer.Option(
-        None, "--port", help="Serve on exactly this port (default: the manifest's, else "
-        "20000 — walking up 20001, 20002, ... past busy ports). For a container package "
+        None, "--port", help="Serve on exactly this port (default: 20000, walking up "
+        "20001, 20002, ... past busy ports; the manifest's port is not used). For a "
+        "container package "
         "it moves BOTH the published mapping and the server's own --port (which is why "
         "it must be a flag, not a passthrough argument); for a v5/v6 bundle it is "
         "appended to the launch command, where argparse last-wins."

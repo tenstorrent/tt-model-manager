@@ -185,7 +185,7 @@ runtime:
   lock: requirements.lock                   # optional but strongly recommended
 
 serve:
-  port: 8000
+  port: 8000                                # bare-docker default; `tt-model serve` uses 20000+
   block_size: 64                            # required — TT backend rejects vLLM's default
   capabilities:
     tool_parser: hermes

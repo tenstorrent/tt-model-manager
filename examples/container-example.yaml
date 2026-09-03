@@ -99,7 +99,8 @@ runtime:
   # overrides: ["some-package<2"]
 
 serve:                          # defaults every profile inherits
-  port: 8000
+  port: 8000                    # what the image binds under bare `docker run`; `tt-model serve`
+                                # picks the host port itself (20000, walking past busy ones)
   block_size: 64                # required — the TT backend rejects vLLM's default
 
   # Tool calling and reasoning. Declare the parser NAMES here and tt-model renders the
