@@ -1141,10 +1141,12 @@ def serve(
         None, "--profile", help="For a container package: which serve profile to launch "
         "(default: the author's). See `tt-model profiles <id>`."
     ),
-    follow: bool = typer.Option(
-        False, "--follow", help="For a container package: wait for the server to report "
-        "ready, streaming the boot (a cold boot JIT-compiles kernels, ~10 min)."
+    detach: bool = typer.Option(
+        False, "--detach", help="For a container package: start the container and return "
+        "at once instead of watching the boot until the server is ready."
     ),
+    follow: bool = typer.Option(False, "--follow", hidden=True,
+                                help="Deprecated: watching the boot is the default now."),
     port: Optional[int] = typer.Option(
         None, "--port", help="Serve on exactly this port (default: 20000, walking up "
         "20001, 20002, ... past busy ports; the manifest's port is not used). For a "
@@ -1212,10 +1214,22 @@ def serve(
             container_cli.serve_container(
                 cmani, profile_name=profile, print_only=print_only, follow=follow,
                 extra_args=extra_args, source=src, port=port, target=repo_id,
-                local_only=local_only,
+                local_only=local_only, detach=detach,
             )
-        except (container_cli.ContainerCliError, container.ContainerError) as e:
+        except container_cli.ContainerCliError as e:
+            if e.diagnosis is not None:
+                raise _fail_card(f"serve {repo_id}", e.diagnosis)
             raise _err(str(e))
+        except container.ContainerError as e:
+            raise _err(str(e))
+        except KeyboardInterrupt:
+            # Only the WATCHING stopped: the container is detached and keeps booting.
+            console.console.print(console.notice_panel(
+                "[warning]stopped watching — the container is still booting[/warning]",
+                [f"[muted]follow it:  tt-model logs {repo_id} -f[/muted]",
+                 f"[muted]stop it:    tt-model stop {repo_id}[/muted]"],
+            ))
+            raise typer.Exit(code=130)
         return
 
     # Past this point --port has ALWAYS been a passthrough: `serve org/m --port 7009`

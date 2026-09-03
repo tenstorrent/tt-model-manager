@@ -52,6 +52,9 @@ def _host_is_fine(monkeypatch):
     # The image is identified by its digest now, not by a tag being present. Default to
     # "the right image is loaded"; tests about a missing or mismatched image override it.
     monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
+    # Serve now watches the boot by default; nothing here has a container to follow.
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(True, False, [], 1.0))
 
 
 def _wire(tmp_path: Path, **over) -> Path:
@@ -191,16 +194,16 @@ def test_an_unknown_profile_is_refused_with_the_available_ones(tmp_path, monkeyp
         container_cli.serve_container(_manifest(tmp_path), profile_name="nope")
 
 
-def test_follow_reports_when_the_server_never_became_ready(tmp_path, monkeypatch):
+def test_serve_reports_when_the_server_never_became_ready(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "running", lambda name=None: [])
     monkeypatch.setattr(container, "run_checked", lambda argv: None)
     monkeypatch.setattr(container, "wait_ready",
                         lambda *a, **k: container.ReadyResult(False, False, ["slow..."]))
     with pytest.raises(container_cli.ContainerCliError, match="did not report ready"):
-        container_cli.serve_container(_manifest(tmp_path), follow=True)
+        container_cli.serve_container(_manifest(tmp_path))
 
 
-def test_follow_says_the_container_EXITED_when_it_did(tmp_path, monkeypatch):
+def test_serve_says_the_container_EXITED_when_it_did(tmp_path, monkeypatch):
     """"did not report ready" is useless when the container crashed — the reason is in
     what it printed on the way out."""
     monkeypatch.setattr(container, "running", lambda name=None: [])
@@ -210,7 +213,7 @@ def test_follow_says_the_container_EXITED_when_it_did(tmp_path, monkeypatch):
                         lambda *a, **k: container.ReadyResult(
                             False, True, ["boom: could not open device"]))
     with pytest.raises(container_cli.ContainerCliError) as e:
-        container_cli.serve_container(_manifest(tmp_path), follow=True)
+        container_cli.serve_container(_manifest(tmp_path))
     msg = str(e.value)
     assert "container exited" in msg
     assert "boom: could not open device" in msg
@@ -227,7 +230,7 @@ def test_a_rejected_passthrough_flag_is_blamed_by_name(tmp_path, monkeypatch):
                         lambda *a, **k: container.ReadyResult(
                             False, True, ["vllm: error: unrecognized arguments: --refresh"]))
     with pytest.raises(container_cli.ContainerCliError) as e:
-        container_cli.serve_container(_manifest(tmp_path), follow=True,
+        container_cli.serve_container(_manifest(tmp_path),
                                       extra_args=["--refresh"], target="org/x")
     msg = str(e.value)
     assert "--refresh was passed through to the engine" in msg
@@ -241,9 +244,71 @@ def test_a_still_running_container_is_not_reported_as_exited(tmp_path, monkeypat
     monkeypatch.setattr(container, "wait_ready",
                         lambda *a, **k: container.ReadyResult(False, False, ["still booting"]))
     with pytest.raises(container_cli.ContainerCliError) as e:
-        container_cli.serve_container(_manifest(tmp_path), follow=True, target="org/x")
+        container_cli.serve_container(_manifest(tmp_path), target="org/x")
     msg = str(e.value)
     assert "still running" in msg and "tt-model stop org/x" in msg
+
+
+def test_a_boot_failure_carries_a_diagnosis_for_the_card(tmp_path, monkeypatch):
+    """The CLI renders a diagnosis card, not a red dump; the classifier's dict rides on
+    the exception so cli.py never re-derives it."""
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(False, True, ["x"]))
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_manifest(tmp_path), target="org/x")
+    assert e.value.diagnosis and "container exited" in e.value.diagnosis["cause"]
+
+
+def test_detach_returns_without_watching_the_boot(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+
+    def boom(*a, **k):
+        raise AssertionError("wait_ready must not run under --detach")
+
+    monkeypatch.setattr(container, "wait_ready", boom)
+    container_cli.serve_container(_manifest(tmp_path), target="org/x", detach=True)
+    out = capsys.readouterr().out
+    assert "container started" in out
+    assert "tt-model logs org/x -f" in out and "endpoint (once ready)" in out
+
+
+def test_serve_walks_the_boot_landmarks_and_ends_on_a_ready_card(tmp_path, monkeypatch, capsys):
+    """The log lines a real boot prints (see tests/fixtures/boot_logs) become named rows,
+    and the ready line ends in the endpoint card -- never the raw log."""
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    lines = [
+        "INFO 09-01 13:11:14 [__init__.py:237] Platform plugin tt is activated",
+        "2026-09-01 13:11:41.906 | info | Device | Opening user mode device driver (x.cpp:1)",
+        "(EngineCore pid=97) vllm_tt_plugin.worker - INFO - multidevice with 4 devices and grid (2, 2) is created",
+        "(EngineCore pid=97) INFO 09-02 17:36:10 kv_cache_utils.py:1308] GPU KV cache size: 133,120 tokens",
+        "(APIServer pid=1) INFO 09-02 17:37:39 api_server.py:500] Starting vLLM API server 0 on http://0.0.0.0:8000",
+        "INFO:     Application startup complete.",
+    ]
+
+    def fake_wait(name, probe, timeout_s=1800, on_line=None):
+        for ln in lines:
+            on_line(ln)
+            if probe in ln:
+                return container.ReadyResult(True, False, lines[-5:], 42.0)
+        return container.ReadyResult(False, False, lines, 42.0)
+
+    monkeypatch.setattr(container, "wait_ready", fake_wait)
+    # Hermetic: the free-port walk must not depend on what is listening on this box.
+    monkeypatch.setattr(container, "port_is_free", lambda p: True)
+    container_cli.serve_container(_manifest(tmp_path), target="org/x")
+    out = capsys.readouterr().out
+    assert "Tenstorrent device opened" in out and "4 chips · mesh (2, 2)" in out
+    assert "KV cache configured" in out and "133,120 tokens" in out
+    assert "org/x ready" in out
+    assert "http://127.0.0.1:20000" in out and "tt-model stop org/x" in out
+    assert "kv_cache_utils.py" not in out, "a raw log line reached the terminal"
 
 
 # ------------------------------------------------------------------ stop
@@ -1229,7 +1294,7 @@ def _image_gone(monkeypatch):
     monkeypatch.setattr(container, "run_checked", lambda argv: None)
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
     monkeypatch.setattr(container, "wait_ready",
-                        lambda *a, **k: container.ReadyResult(True, 1.0, None))
+                        lambda *a, **k: container.ReadyResult(True, False, [], 1.0))
 
 
 def test_a_deleted_image_is_re_pulled_at_the_recorded_revision(tmp_path, monkeypatch):
@@ -1296,7 +1361,7 @@ def _serving_ok(monkeypatch):
     monkeypatch.setattr(container, "run_checked", lambda argv: None)
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
     monkeypatch.setattr(container, "wait_ready",
-                        lambda *a, **k: container.ReadyResult(True, 1.0, None))
+                        lambda *a, **k: container.ReadyResult(True, False, [], 1.0))
 
 
 def test_serve_warns_when_the_weights_are_not_cached(tmp_path, monkeypatch, capsys):

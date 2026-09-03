@@ -562,12 +562,16 @@ def _body_print(renderable):
     """
     lines = _render_lines(renderable, rule_width())
     with _lock:
-        if activity.running() and _isatty():
+        if (activity.running() or checklist_active()) and _isatty():
             _real_console.file.write("\r\033[2K")
             _real_console.file.flush()
         # console.file, not _real_console: inside a captured step() this must stay captured.
         console.file.write("\n".join(line.rstrip() for line in lines) + "\n")
         console.file.flush()
+        if _checklist is not None:
+            # Rows printed under a live checklist are part of what its final erase must
+            # cover; count them or the erase stops short and leaves them behind.
+            _checklist._rows_written += len(lines)
 
 
 def note(text, marker="○", style="muted"):
@@ -670,6 +674,277 @@ def run_with_activity(cmd, cwd=None, env=None, label="Working", parse=None):
         activity.stop()
     process.wait()
     return process.returncode, "".join(lines)
+
+
+# ── checklist: a live list of steps that erases itself when the job is done ───
+def fmt_clock(seconds):
+    """`0:42` / `4:12` / `1:02:05` — the running-time style for a live row. fmt_duration's
+    `1m 21s` is for a finished step; a clock that ticks reads better as a clock."""
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+class _Checklist:
+    """A vertical list of steps for one long job (a model boot), rendered as it happens.
+
+    Only the ACTIVE row is live: `⠹ label  ▕████░░░░▏ 12/32 · 38%   0:42`, repainted by a
+    ticker under `_lock` with `\r\033[2K`, exactly as `step()` and `_Activity` do. Every
+    finished row is printed once, permanently — so the count of physical rows is known and
+    `clear()` can erase the whole list with a fixed number of cursor-ups when the job
+    succeeds. Rows added with `warn()` are actionable and are re-printed after the erase.
+
+    Not Rich `Live`: that redirects sys.stdout (fighting `step()`'s capture), runs its own
+    refresh thread outside `_lock`, permits one Live per Console (so a nested step() would
+    raise), and speaks a different escape vocabulary from the one the PTY tests assert on.
+
+    Non-TTY or --verbose: no ticker, each row printed once as it finishes, nothing erased —
+    a piped log records where the boot reached.
+    """
+
+    def __init__(self, indent=2):
+        self._indent = " " * indent
+        self._label = ""
+        self._detail = ""
+        self._progress = None          # (done, total) or None
+        self._row_start = None
+        self._placeholder = False
+        self._started = time.monotonic()
+        self._rows_written = 0
+        self._warns = []
+        self._stop = None
+        self._ticker = None
+        self._frame = 0
+        self._reflowed = False
+        self._live = _isatty() and not _VERBOSE
+
+    # -- the rows ---------------------------------------------------------------------
+
+    def begin(self, label, placeholder=False):
+        """Start the live row; an active row is finished first as ✓.
+
+        `placeholder=True` marks a row that only exists to keep the spinner honest while
+        nothing has reported yet ("waiting for the engine"); the next `begin()` replaces
+        it silently instead of leaving a ✓ for work that never happened.
+        """
+        if self._row_start is not None and not self._placeholder:
+            self._settle("✓", "success")
+        self._label, self._detail, self._progress = label, "", None
+        self._placeholder = placeholder
+        self._row_start = time.monotonic()
+        if self._live and self._ticker is None:
+            self._stop = threading.Event()
+            self._ticker = threading.Thread(target=self._loop, daemon=True)
+            self._ticker.start()
+        elif _VERBOSE:
+            _real_console.print(f"{self._indent}[muted]{label}…[/muted]")
+
+    def detail(self, text):
+        self._detail = text or ""
+
+    def progress(self, done, total):
+        self._progress = (done, total) if total and total > 0 else None
+
+    def done(self, label=None, detail=None):
+        """Finish the live row as `✓ label  detail  1.4s` (label defaults to the active one)."""
+        if label is not None:
+            self._label = label
+        if detail is not None:
+            self._detail = detail
+        self._settle("✓", "success")
+
+    def fail(self, label=None, detail=None):
+        if label is not None:
+            self._label = label
+        if detail is not None:
+            self._detail = detail
+        self._settle("✗", "error")
+
+    def interrupted(self):
+        """Ctrl-C: the step did not fail, we stopped watching it."""
+        self._detail = "interrupted"
+        self._settle("○", "muted")
+
+    @property
+    def active(self):
+        """Is a real (non-placeholder) row live?"""
+        return self._row_start is not None and not self._placeholder
+
+    def instant(self, label, detail=None):
+        """A row for work that already happened (a check done before the list opened)."""
+        if self.active:
+            self._settle("✓", "success")
+        self._label, self._detail, self._progress = label, detail or "", None
+        self._row_start = time.monotonic()
+        self._settle("✓", "success", timed=False)
+
+    def warn(self, text):
+        """An actionable `!` row. Survives `clear()`: it is why the user was watching."""
+        self._warns.append(text)
+        self._print_row(Padding(Text(f"! {text}", style="warning"), (0, 0, 0, len(self._indent))))
+
+    # -- ending ---------------------------------------------------------------------
+
+    @property
+    def elapsed(self):
+        return time.monotonic() - self._started
+
+    @property
+    def rows_written(self):
+        return self._rows_written
+
+    def clear(self):
+        """The job succeeded: erase every row, then re-print the warnings."""
+        self._stop_ticker()
+        if self._live and not self._reflowed and _isatty():
+            with _lock:
+                f = _real_console.file
+                f.write("\r\033[2K" + "\033[1A\033[2K" * self._rows_written)
+                f.flush()
+            self._rows_written = 0
+            for text in self._warns:
+                self._print_row(Padding(Text(f"! {text}", style="warning"),
+                                        (0, 0, 0, len(self._indent))))
+
+    def close(self):
+        """Stop animating and leave the list as it stands (failure, --detach, Ctrl-C)."""
+        self._stop_ticker()
+
+    # -- internals -------------------------------------------------------------------
+
+    def _mark(self, glyph, style):
+        elapsed = time.monotonic() - (self._row_start or time.monotonic())
+        text = Text(self._indent)
+        text.append(f"{glyph} ", style=style)
+        text.append(self._label)
+        if self._detail:
+            text.append(f"  {self._detail}", style="muted")
+        return text, elapsed
+
+    def _settle(self, glyph, style, timed=True):
+        text, elapsed = self._mark(glyph, style)
+        if timed and elapsed >= 0.8:
+            text.append(f"  {fmt_duration(elapsed)}", style="muted")
+        self._row_start = None
+        self._placeholder = False
+        self._print_row(text)
+
+    def _print_row(self, renderable):
+        """One permanent row. Live: through `_real_console` so it lands under the spinner.
+        Otherwise through `console`, which follows sys.stdout (so a captured or piped run
+        records it)."""
+        text_row = isinstance(renderable, Text)
+        if text_row:
+            renderable.no_wrap, renderable.overflow = True, "crop"
+        lines = [renderable] if text_row else _render_lines(renderable, rule_width())
+        with _lock:
+            if not (self._live and _isatty()):
+                if text_row:
+                    console.print(renderable, crop=True)
+                else:
+                    console.file.write("\n".join(line.rstrip() for line in lines) + "\n")
+                    console.file.flush()
+                return
+            f = _real_console.file
+            f.write("\r\033[2K")
+            if text_row:
+                with _real_console.capture() as cap:
+                    _real_console.print(renderable, crop=True)
+                f.write(cap.get())
+            else:
+                f.write("\n".join(line.rstrip() for line in lines) + "\n")
+            f.flush()
+            self._rows_written += len(lines)
+
+    def _live_row(self):
+        text = Text(self._indent)
+        text.append(f"{SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)]} ", style="accent")
+        text.append(self._label or "starting up", style="muted")
+        if self._detail:
+            text.append(f"  {self._detail}", style="muted")
+        if self._progress and terminal_width() >= 60:
+            done, total = self._progress
+            pct = int(100 * min(done, total) / total)
+            text.append(f"  {progress_bar(done, total)} {done}/{total} · {pct}%", style="accent")
+        if self._row_start is not None:
+            text.append(f"  {fmt_clock(time.monotonic() - self._row_start)}", style="muted")
+        text.no_wrap, text.overflow = True, "crop"
+        return text
+
+    def _loop(self):
+        f = _real_console.file
+        while not self._stop.is_set():
+            with _lock:
+                with _real_console.capture() as cap:
+                    _real_console.print(self._live_row(), end="", crop=True)
+                f.write("\r\033[2K" + cap.get())
+                f.flush()
+            self._frame += 1
+            self._stop.wait(0.1)
+
+    def _stop_ticker(self):
+        if self._stop is not None:
+            self._stop.set()
+        if self._ticker is not None and self._ticker is not threading.current_thread():
+            self._ticker.join(timeout=0.5)
+        self._ticker = self._stop = None
+        if self._live and _isatty():
+            with _lock:
+                _real_console.file.write("\r\033[2K")
+                _real_console.file.flush()
+
+    def _on_resize(self, *_):
+        # A reflowing terminal changes how many physical rows the list occupies; erasing
+        # a guessed count would eat the user's scrollback. Leave the list instead.
+        self._reflowed = True
+
+
+_checklist = None
+
+
+def checklist_active():
+    return _checklist is not None
+
+
+@contextlib.contextmanager
+def checklist():
+    """Bracket one long job with a live step list (see _Checklist).
+
+    On a clean exit the list is left as it stands — call `view.clear()` first when the
+    rows should vanish (success). On an exception the active row is marked ✗ (or ○ on
+    Ctrl-C) and the list stays as the evidence. Only one may be active; a nested
+    `step()` is unsupported, so run any step()-using work before opening the list.
+    """
+    global _checklist
+    if _checklist is not None:
+        raise RuntimeError("a checklist is already active")
+    view = _Checklist()
+    _checklist = view
+    prev_winch = None
+    if view._live and hasattr(signal, "SIGWINCH") and not pinned.active():
+        try:
+            prev_winch = signal.signal(signal.SIGWINCH, view._on_resize)
+        except (ValueError, OSError):   # not the main thread
+            prev_winch = None
+    try:
+        yield view
+    except KeyboardInterrupt:
+        if view.active:
+            view.interrupted()
+        raise
+    except BaseException:
+        if view.active:
+            view.fail()
+        raise
+    finally:
+        view.close()
+        _checklist = None
+        if prev_winch is not None:
+            try:
+                signal.signal(signal.SIGWINCH, prev_winch)
+            except (ValueError, OSError):
+                pass
 
 
 # ── cards ────────────────────────────────────────────────────────────────────

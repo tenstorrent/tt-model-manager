@@ -575,10 +575,15 @@ class ReadyResult:
     ready: bool
     exited: bool           # the log stream closed => the container is gone
     tail: List[str]        # last lines seen, for a failure card
+    elapsed_s: float = 0.0  # how long the wait took, for the ready line
 
 
-def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> ReadyResult:
+def wait_ready(name: str, probe: str, timeout_s: int = 1800, on_line=None) -> ReadyResult:
     """Follow the container's logs until the launcher's ready line appears.
+
+    ``on_line(text)`` sees every line (tqdm ``\r`` fragments arrive as separate lines:
+    the pipe is read in text mode with universal newlines). It is how the caller turns
+    the stream into progress without this module knowing anything about rendering.
 
     The generous default timeout is not padding: a cold boot JIT-compiles kernels, which
     is the ~10-minute cost the mounted TT_METAL_CACHE exists to avoid paying twice.
@@ -587,10 +592,14 @@ def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> Read
     import threading
     import time
 
-    deadline = time.monotonic() + timeout_s
+    started = time.monotonic()
+    deadline = started + timeout_s
+    # errors="replace": one undecodable byte in a log line used to raise inside the reader
+    # thread, which then never queued its EOF sentinel -- and the caller sat out the full
+    # timeout on a container that had already exited.
     proc = subprocess.Popen(
         ["docker", "logs", "--follow", name],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
     )
     assert proc.stdout is not None
     # Read the log on a thread so the deadline is honoured even while the container is
@@ -600,16 +609,18 @@ def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> Read
     tail: List[str] = []
 
     def _pump() -> None:
-        for line in proc.stdout:  # type: ignore[union-attr]
-            lines.put(line)
-        lines.put(None)  # EOF sentinel: the log stream closed => the container exited
+        try:
+            for line in proc.stdout:  # type: ignore[union-attr]
+                lines.put(line)
+        finally:
+            lines.put(None)  # EOF sentinel: the log stream closed => the container exited
 
     threading.Thread(target=_pump, daemon=True).start()
     try:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return ReadyResult(False, False, tail[-20:])
+                return ReadyResult(False, False, tail[-20:], time.monotonic() - started)
             try:
                 line = lines.get(timeout=min(remaining, 5.0))
             except queue.Empty:
@@ -618,11 +629,12 @@ def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> Read
                 # EOF: the container exited before the probe appeared. The reason is in
                 # what it printed on the way out, so hand that back rather than a bare
                 # "not ready".
-                return ReadyResult(False, True, tail[-20:])
+                return ReadyResult(False, True, tail[-20:], time.monotonic() - started)
             stripped = line.rstrip("\n")
             tail.append(stripped)
-            echo(stripped)
+            if on_line is not None:
+                on_line(stripped)
             if probe in line:
-                return ReadyResult(True, False, tail[-20:])
+                return ReadyResult(True, False, tail[-20:], time.monotonic() - started)
     finally:
         proc.terminate()

@@ -54,8 +54,9 @@ import json
 import re
 import shlex
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
+from .boot_progress import TT_DIT_PHASES, VLLM_PHASES, Phase
 from .manifest import DEFAULT_PORT, Manifest, ServeProfile
 
 if TYPE_CHECKING:
@@ -341,6 +342,10 @@ class VllmPluginLauncher:
     def ready_probe(self, m: Manifest) -> str:
         return self.READY_LINE
 
+    def boot_phases(self, m: Manifest) -> Tuple[Phase, ...]:
+        """The boot's landmarks, for `serve`'s progress view (see boot_progress)."""
+        return VLLM_PHASES
+
 
 class VllmForkLauncher:
     """``kind: vllm-fork`` — the ``tenstorrent/vllm`` fork with its in-tree plugin.
@@ -538,6 +543,10 @@ class VllmForkLauncher:
 
     def ready_probe(self, m: Manifest) -> str:
         return self.READY_LINE
+
+    def boot_phases(self, m: Manifest) -> Tuple[Phase, ...]:
+        """The boot's landmarks, for `serve`'s progress view (see boot_progress)."""
+        return VLLM_PHASES
 
 
 # tt-metal declares the torch it expects in its dev requirements, e.g.
@@ -796,6 +805,10 @@ class TtDitServerLauncher:
 
     def ready_probe(self, m: Manifest) -> str:
         return self.READY_LINE
+
+    def boot_phases(self, m: Manifest) -> Tuple[Phase, ...]:
+        """The boot's landmarks, for `serve`'s progress view (see boot_progress)."""
+        return TT_DIT_PHASES
 
 
 def _mesh_shape_env(m: Manifest) -> str:
