@@ -12,7 +12,7 @@ imagined.
 import pytest
 from typer.testing import CliRunner
 
-from tt_kernel.hub import classify_hub_error
+from tt_kernel.hub import classify_hub_error, classify_repo_id
 
 runner = CliRunner()
 
@@ -40,6 +40,19 @@ REPO_NOT_FOUND = (
 )
 UNAUTHORIZED = "401 Client Error. (Request ID: Root=1-6a878f2d-60019c1d;350dfb25)"
 
+# Captured verbatim from `snapshot_download("jashan/kabadoo")` with huggingface_hub 1.27.0.
+# Note the LAST line: every not-found message now mentions a "private or gated repo", which
+# is what used to route a plain typo to "the Hub recognised X but refused it".
+REPO_NOT_FOUND_HF127 = (
+    "404 Client Error. (Request ID: Root=1-6a99c88d-70f4e46d6a289145589a22ea;097dfff0)\n"
+    "\n"
+    "Repository Not Found for url: https://huggingface.co/api/models/jashan/kabadoo/revision/main.\n"
+    "Please make sure you specified the correct `repo_id` and `repo_type`.\n"
+    "If you are trying to access a private or gated repo, make sure you are authenticated "
+    "and your token has the required permissions.\n"
+    "For more details, see https://huggingface.co/docs/huggingface_hub/authentication"
+)
+
 
 def test_404_names_both_possibilities():
     """The Hub answers 404 for "no such repo" AND "private repo you can't see"; it will
@@ -49,6 +62,24 @@ def test_404_names_both_possibilities():
     assert d["cause"] == "no such bundle, or no access"
     assert "id is wrong" in d["detail"]
     assert "private" in d["detail"]
+
+
+def test_not_found_with_gated_boilerplate_is_still_not_found():
+    """huggingface_hub 1.27 appends "...a private or gated repo..." to EVERY not-found
+    message. A repo that does not exist must not be reported as one the Hub recognised."""
+    d = classify_hub_error(
+        _exc("RepositoryNotFoundError", REPO_NOT_FOUND_HF127, 404), "jashan/kabadoo")
+    assert d["cause"] == "no such bundle, or no access"
+    assert "recognised" not in d["detail"]
+    assert not any("accept the terms" in a for a in d["actions"])
+
+
+def test_not_found_type_wins_over_a_401_status():
+    """An unauthenticated caller gets 401 from the Hub for a repo that simply does not
+    exist; huggingface_hub still raises RepositoryNotFoundError. The type is the signal."""
+    d = classify_hub_error(
+        _exc("RepositoryNotFoundError", REPO_NOT_FOUND_HF127, 401), "jashan/kabadoo")
+    assert d["cause"] == "no such bundle, or no access"
 
 
 def test_401_is_access_not_missing():
@@ -93,6 +124,8 @@ def test_every_branch_returns_the_full_card_contract():
     i.e. while already reporting another error."""
     cases = [
         _exc("RepositoryNotFoundError", REPO_NOT_FOUND, 404),
+        _exc("RepositoryNotFoundError", REPO_NOT_FOUND_HF127, 404),
+        _exc("GatedRepoError", "Access to model x/y is restricted", 401),
         _exc("HfHubHTTPError", UNAUTHORIZED, 401),
         _exc("HfHubHTTPError", "403", 403),
         _exc("LocalEntryNotFoundError", "Max retries exceeded"),
@@ -103,6 +136,9 @@ def test_every_branch_returns_the_full_card_contract():
         d = classify_hub_error(exc, "x/y")
         assert set(d) == {"cause", "detail", "evidence", "actions"}, type(exc).__name__
         assert d["cause"] and d["detail"] and d["actions"]
+    d = classify_repo_id("kabadoo")
+    assert set(d) == {"cause", "detail", "evidence", "actions"}
+    assert d["cause"] and d["detail"] and d["actions"]
 
 
 def test_evidence_drops_the_request_id():
@@ -223,3 +259,70 @@ def test_large_push_makes_no_delete_commit_when_nothing_is_stale(monkeypatch, tm
     monkeypatch.setattr(hub, "_api", lambda: _Api())
     hub.push_large_folder("you/model", tmp_path)
     assert "deleted" not in calls
+
+
+# ------------------------------------------------------------------ bare ids never reach the Hub
+# `tt-model serve kabadoo` used to ask the Hub for a canonical (namespace-less) model, get a
+# 404, and — worse — misreport it as "gated". A bundle is always namespace/name, so a bare
+# name is refused with a definite card before any request is made.
+
+
+def test_bare_name_is_not_a_repo_id():
+    d = classify_repo_id("kabadoo")
+    assert d["cause"] == "not a repo id"
+    assert "namespace/name" in d["detail"]
+    assert any(a.startswith("tt-model search kabadoo") for a in d["actions"])
+
+
+@pytest.mark.parametrize("repo_id", ["ns/name", "tenstorrent/llama-3.1-8b"])
+def test_namespaced_id_passes(repo_id):
+    assert classify_repo_id(repo_id) is None
+
+
+def _hub_must_not_be_called(monkeypatch):
+    from tt_kernel import hub
+
+    def boom(*a, **k):
+        raise AssertionError("the Hub was asked about a bare id")
+
+    for fn in ("latest_revision", "download_bundle", "fetch_manifest"):
+        monkeypatch.setattr(hub, fn, boom)
+
+
+@pytest.mark.parametrize("argv", [["pull", "kabadoo"], ["info", "kabadoo"]])
+def test_pull_and_info_refuse_a_bare_name_before_the_hub(monkeypatch, argv):
+    from tt_kernel import cli
+
+    _hub_must_not_be_called(monkeypatch)
+    res = runner.invoke(cli.app, argv)
+    assert res.exit_code == 1, res.output
+    assert "not a repo id" in res.output
+    assert "recognised" not in res.output
+    assert "Traceback" not in res.output
+
+
+def test_serve_refuses_a_bare_name_that_is_not_installed(monkeypatch, tmp_path):
+    from tt_kernel import cli, container_cli
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))  # empty localdb
+    monkeypatch.setattr(container_cli, "resolve_target", lambda *a, **k: None)
+    _hub_must_not_be_called(monkeypatch)
+    res = runner.invoke(cli.app, ["serve", "kabadoo"])
+    assert res.exit_code == 1, res.output
+    assert "not a repo id" in res.output
+    assert "recognised" not in res.output
+
+
+def test_serve_still_serves_an_installed_bare_name(monkeypatch):
+    """The shape check sits AFTER local resolution: whatever localdb already holds under a
+    bare name keeps serving; only what would be sent to the Hub is judged."""
+    from tt_kernel import cli, container_cli
+
+    served = []
+    monkeypatch.setattr(container_cli, "resolve_target", lambda *a, **k: None)
+    monkeypatch.setattr(cli.localdb, "get", lambda rid: {"self_contained": True, "repo_id": rid})
+    monkeypatch.setattr(cli, "_serve_self_contained", lambda entry, **k: served.append(entry))
+    _hub_must_not_be_called(monkeypatch)
+    res = runner.invoke(cli.app, ["serve", "kabadoo", "--no-update-check"])
+    assert res.exit_code == 0, res.output
+    assert served and served[0]["repo_id"] == "kabadoo"
