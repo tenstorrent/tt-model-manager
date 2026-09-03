@@ -78,7 +78,10 @@ def install_self_contained(bundle_dir: Path, venv_dir: Path) -> Path:
 # The consumer's last step is "did it actually answer?". Everything below builds that one
 # OpenAI chat request so the user never has to retype the model id, the endpoint or the JSON
 # body. Stdlib only — tt-model takes no HTTP dependency.
-DEFAULT_BASE_URL = "http://localhost:8000"
+# Tracks manifest.DEFAULT_PORT, where `tt-model serve` puts a server when nothing names a
+# port. If serve had to walk past a busy 20000 (it says so, and prints the endpoint),
+# point curl there with --base-url or TT_MODEL_BASE_URL.
+DEFAULT_BASE_URL = "http://localhost:20000"
 ENV_BASE_URL = "TT_MODEL_BASE_URL"
 DEFAULT_PROMPT = "Say hello in one sentence."
 DEFAULT_MAX_TOKENS = 64

@@ -57,7 +57,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from .boot_progress import TT_DIT_PHASES, VLLM_PHASES, Phase
-from .manifest import Manifest, ServeProfile
+from .manifest import DEFAULT_PORT, Manifest, ServeProfile
 
 if TYPE_CHECKING:
     from .container_manifest import ContainerManifest
@@ -325,7 +325,7 @@ class VllmPluginLauncher:
             argv += ["--additional-config", json.dumps(profile.additional_config)]
         argv += _capability_argv(profile)
         argv += profile.flat_args()
-        argv += ["--port", str(profile.port or 8000)]
+        argv += ["--port", str(profile.port or DEFAULT_PORT)]
         return argv
 
     def serve_env(self, m: Manifest, profile: ServeProfile) -> Dict[str, str]:
@@ -523,7 +523,7 @@ class VllmForkLauncher:
         argv += ["--block-size", str(profile.block_size)]
         if profile.server_timeout is not None:
             argv += ["--server-timeout", str(profile.server_timeout)]
-        argv += ["--port", str(profile.port or 8000)]
+        argv += ["--port", str(profile.port or DEFAULT_PORT)]
         tt_cfg = profile.additional_config.get("tt")
         if tt_cfg:
             argv += ["--tt-config", json.dumps(tt_cfg)]
@@ -781,7 +781,7 @@ class TtDitServerLauncher:
             "--host",
             "0.0.0.0",
             "--port",
-            str(profile.port or 8000),
+            str(profile.port or DEFAULT_PORT),
             "--lifespan",
             "on",
         ]

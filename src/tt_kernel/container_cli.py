@@ -25,7 +25,7 @@ from .boot_progress import BootTracker, diagnose_boot, summarize
 from .build import BuildError, build_log_path, finalize, run_build, stage
 from .container_manifest import ContainerManifestError
 from .launchers import launcher_for
-from .manifest import Manifest
+from .manifest import DEFAULT_PORT, Manifest
 
 PHASES = ["Resolve", "Stage", "Build", "Export"]
 
@@ -500,8 +500,22 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         raise ContainerCliError(str(e)) from None
     if port is not None:
         # Override BEFORE composition, so --publish and the launcher's --port are both
-        # derived from the same value and cannot diverge.
+        # derived from the same value and cannot diverge. Explicit means exact: a busy
+        # port the user asked for by name fails (docker's "already allocated") rather
+        # than silently moving the endpoint.
         profile = profile.model_copy(update={"port": port})
+    elif not print_only:
+        # No explicit --port: start at 20000 and walk upward past busy ports — 20000
+        # taken → 20001 → 20002 ... — instead of failing. The manifest's own `port`
+        # is deliberately NOT the seed: authors write 8000 there (vLLM's default, and
+        # what the bare-docker CMD wrapper binds inside the image), which is exactly the
+        # port that collides on a shared box. Under tt-model the host port is tt-model's
+        # call. Skipped under --print, which must stay pure and deterministic.
+        chosen = container.pick_free_port(DEFAULT_PORT)
+        if chosen != DEFAULT_PORT:
+            console.note(f"port {DEFAULT_PORT} is in use; serving on {chosen} instead",
+                         marker="•")
+        profile = profile.model_copy(update={"port": chosen})
     if profile_name is None and len(spec.serve_profiles) > 1:
         console.note(
             f"profile {profile.name!r} (the author's default; "
@@ -579,7 +593,7 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     # container.ensure_mount_sources.
     container.ensure_mount_sources(manifest)
 
-    port = profile.port or 8000
+    port = profile.port or DEFAULT_PORT
     endpoint = f"http://127.0.0.1:{port}"
     probe = launcher.ready_probe(manifest)
     tracker = BootTracker(launcher.boot_phases(manifest), probe)

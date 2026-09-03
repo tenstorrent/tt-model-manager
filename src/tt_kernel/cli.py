@@ -26,6 +26,7 @@ from . import (
     packaging, runtime,
 )
 from .manifest import (
+    DEFAULT_PORT,
     CompatibilityReport,
     Manifest,
     Mesh,
@@ -1147,10 +1148,12 @@ def serve(
     follow: bool = typer.Option(False, "--follow", hidden=True,
                                 help="Deprecated: watching the boot is the default now."),
     port: Optional[int] = typer.Option(
-        None, "--port", help="Serve on this port instead of the bundle's/manifest's. For a "
-        "container package it moves BOTH the published mapping and the server's own "
-        "--port (which is why it must be a flag, not a passthrough argument); for a v5/v6 "
-        "bundle it is appended to the launch command, where argparse last-wins."
+        None, "--port", help="Serve on exactly this port (default: 20000, walking up "
+        "20001, 20002, ... past busy ports; the manifest's port is not used). For a "
+        "container package "
+        "it moves BOTH the published mapping and the server's own --port (which is why "
+        "it must be a flag, not a passthrough argument); for a v5/v6 bundle it is "
+        "appended to the launch command, where argparse last-wins."
     ),
     refresh: bool = typer.Option(
         False, "--refresh", help="Before serving an already-installed package, re-pull it if "
@@ -1236,6 +1239,16 @@ def serve(
     # override. Put it back, appended, so the ordering that makes last-wins work holds.
     if port is not None:
         extra_args = extra_args + ["--port", str(port)]
+    elif not any(a == "--port" or a.startswith("--port=") for a in extra_args):
+        # No port named anywhere: default to 20000 and walk upward past busy ports
+        # (20001, 20002, ...) instead of inheriting vLLM's 8000 and failing when it is
+        # taken. PREPENDED so a passthrough --port typed after the target still wins
+        # under argparse last-wins. --print keeps the deterministic default.
+        chosen = DEFAULT_PORT if print_only else container.pick_free_port(DEFAULT_PORT)
+        if chosen != DEFAULT_PORT:
+            console.note(f"port {DEFAULT_PORT} is in use; serving on {chosen} instead",
+                         marker="•")
+        extra_args = ["--port", str(chosen)] + extra_args
 
     # An already-installed bundle serves from its own venv. The host toolchain (ttnn/vLLM versions)
     # is irrelevant — the bundle ships/builds its own — so nothing about the host is checked.

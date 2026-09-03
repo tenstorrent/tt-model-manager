@@ -180,7 +180,7 @@ the check per-serve with `--no-update-check`, or entirely offline with `--local-
 ## Step 5 — Verify (consumer)
 
 ```bash
-curl -s http://localhost:8000/v1/chat/completions \
+curl -s http://localhost:20000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"unsloth/Llama-3.2-3B-Instruct",
        "messages":[{"role":"user","content":"Say hello in one sentence."}],

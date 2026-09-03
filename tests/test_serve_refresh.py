@@ -447,3 +447,48 @@ def test_print_refresh_does_no_rebuild(monkeypatch, tmp_path):
     assert "refreshed self-contained bundle" not in stdout
     # the skip note went to stderr
     assert "--refresh skipped under --print" in res.stderr
+
+
+# --------------------------------------------------------------------------- default port
+
+
+def test_bundle_serve_defaults_to_port_20000_or_walks_upward(monkeypatch, tmp_path):
+    """No --port anywhere: the launch gets `--port 20000` (or the next free port when
+    this box has it taken) instead of inheriting vLLM's 8000."""
+    _isolate(monkeypatch, tmp_path)
+    _record_installed(tmp_path, revision="oldsha0000")
+    argvs = []
+
+    def _fake_run(argv, **kw):
+        argvs.append(argv)
+
+        class _R:
+            returncode = 0
+        return _R()
+
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+    res = _runner.invoke(cli.app, ["serve", _ID, "--no-update-check"])
+    assert res.exit_code == 0, res.output
+    launch = argvs[-1]
+    assert int(launch[launch.index("--port") + 1]) >= 20000
+
+
+def test_bundle_serve_explicit_port_suppresses_the_default(monkeypatch, tmp_path):
+    """--port is exact, appended last so argparse last-wins keeps the user's value."""
+    _isolate(monkeypatch, tmp_path)
+    _record_installed(tmp_path, revision="oldsha0000")
+    argvs = []
+
+    def _fake_run(argv, **kw):
+        argvs.append(argv)
+
+        class _R:
+            returncode = 0
+        return _R()
+
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+    res = _runner.invoke(cli.app, ["serve", "--port", "7009", _ID, "--no-update-check"])
+    assert res.exit_code == 0, res.output
+    launch = argvs[-1]
+    ports = [launch[i + 1] for i, a in enumerate(launch) if a == "--port"]
+    assert ports == ["7009"]

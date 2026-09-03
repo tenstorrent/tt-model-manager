@@ -562,3 +562,44 @@ def test_a_symlinked_hub_cache_is_judged_by_where_it_lands(tmp_path):
         hf_home_dir=tmp_path / "hf", cache_dir=tmp_path / "c",
         weight_cache_dir=tmp_path / "w", hub_cache_dir=link, include_hf_token=False)
     assert "HF_HUB_CACHE=/hf-hub" not in argv
+
+
+# ------------------------------------------------------------------ free-port walk
+
+
+def test_pick_free_port_skips_a_real_listener():
+    """20000 busy -> 20001 (or the next free one): the increment is real, not cosmetic."""
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        busy = s.getsockname()[1]
+        got = container.pick_free_port(busy, attempts=10)
+        assert got > busy
+        assert container.port_is_free(got)
+
+
+def test_pick_free_port_returns_the_preferred_port_when_free():
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        free = s.getsockname()[1]
+    # the socket is closed, so the port is free again
+    assert container.pick_free_port(free, attempts=10) == free
+
+
+def test_pick_free_port_gives_up_with_the_fix_in_the_message(monkeypatch):
+    monkeypatch.setattr(container, "port_is_free", lambda p: False)
+    with pytest.raises(container.ContainerError, match="--port"):
+        container.pick_free_port(20000, attempts=3)
+
+
+def test_compose_run_defaults_to_20000_when_the_profile_names_no_port():
+    m = _wire()
+    profile = m.container.resolve_profile().model_copy(update={"port": None})
+    argv = container.compose_run(m, profile, ["srv"], {},
+                                 hf_home_dir=Path("/hf"), cache_dir=Path("/c"),
+                                 weight_cache_dir=Path("/w"), include_hf_token=False)
+    assert argv[argv.index("--publish") + 1] == "20000:20000"

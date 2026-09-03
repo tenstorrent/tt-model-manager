@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .manifest import Manifest, ServeProfile
+from .manifest import DEFAULT_PORT, Manifest, ServeProfile
 
 #: Docker label applied to every container and used to find ours again.
 LABEL = "org.tenstorrent.tt-model"
@@ -274,7 +274,7 @@ def compose_run(
     all can be overridden by the caller so tests never depend on the developer's shell.
     """
     _require_container(m)
-    port = profile.port or 8000
+    port = profile.port or DEFAULT_PORT
     hf = Path(hf_home_dir) if hf_home_dir is not None else hf_home()
     cache = Path(cache_dir) if cache_dir is not None else model_cache_dir(m)
     weights = Path(weight_cache_dir) if weight_cache_dir is not None else model_weight_cache_dir(m)
@@ -362,6 +362,40 @@ def ensure_mount_sources(m: Manifest, *, hf_home_dir: Optional[Path] = None,
         hub = hub_cache()
     for d in (hf, cache, weights, hub):
         d.mkdir(parents=True, exist_ok=True)
+
+
+def port_is_free(port: int) -> bool:
+    """Can this host port be bound right now?
+
+    Checked the way docker will bind it — the wildcard address — so a listener on any
+    interface counts as taken. A best-effort snapshot: the port can still be claimed
+    between this check and ``docker run``, in which case docker's own "address already
+    in use" error surfaces as before.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("", port))
+        except OSError:
+            return False
+    return True
+
+
+def pick_free_port(preferred: int, *, attempts: int = 100) -> int:
+    """First free port at or above ``preferred``.
+
+    The Next.js behavior: 20000 busy → try 20001, 20002, ... rather than failing with
+    "port is already allocated" and making the user pick one by hand.
+    """
+    for port in range(preferred, min(preferred + attempts, 65536)):
+        if port_is_free(port):
+            return port
+    raise ContainerError(
+        f"no free port found in {preferred}-{min(preferred + attempts, 65536) - 1}; "
+        f"pass one explicitly with --port"
+    )
 
 
 def compose_pull(m: Manifest) -> Optional[List[str]]:

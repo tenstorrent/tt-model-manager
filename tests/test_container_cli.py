@@ -300,12 +300,14 @@ def test_serve_walks_the_boot_landmarks_and_ends_on_a_ready_card(tmp_path, monke
         return container.ReadyResult(False, False, lines, 42.0)
 
     monkeypatch.setattr(container, "wait_ready", fake_wait)
+    # Hermetic: the free-port walk must not depend on what is listening on this box.
+    monkeypatch.setattr(container, "port_is_free", lambda p: True)
     container_cli.serve_container(_manifest(tmp_path), target="org/x")
     out = capsys.readouterr().out
     assert "Tenstorrent device opened" in out and "4 chips · mesh (2, 2)" in out
     assert "KV cache configured" in out and "133,120 tokens" in out
     assert "org/x ready" in out
-    assert "http://127.0.0.1:8000" in out and "tt-model stop org/x" in out
+    assert "http://127.0.0.1:20000" in out and "tt-model stop org/x" in out
     assert "kv_cache_utils.py" not in out, "a raw log line reached the terminal"
 
 
@@ -598,12 +600,19 @@ def test_port_moves_the_publish_mapping_and_the_server_together(tmp_path, monkey
     assert "8000" not in argv
 
 
-def test_without_the_flag_the_manifest_port_is_used(tmp_path, monkeypatch):
+def test_without_the_flag_the_default_is_20000_not_the_manifest_port(tmp_path, monkeypatch):
+    """The fixture's manifest says `port: 8000` (what authors write, and what the image's
+    own CMD binds under bare docker). Under tt-model that must NOT seed the choice: 8000
+    is the port that collides on a shared box, so no --port means 20000."""
     ran, _ = _argv_of(monkeypatch)
+    # Hermetic: the free-port walk must not make this depend on what happens to be
+    # listening on the machine running the tests.
+    monkeypatch.setattr(container, "port_is_free", lambda p: True)
     container_cli.serve_container(_manifest(tmp_path))
     argv = ran[0]
-    assert argv[argv.index("--publish") + 1] == "8000:8000"
-    assert argv[argv.index("--port") + 1] == "8000"
+    assert argv[argv.index("--publish") + 1] == "20000:20000"
+    assert argv[argv.index("--port") + 1] == "20000"
+    assert "8000" not in argv
 
 
 def test_the_two_ports_can_never_diverge(tmp_path, monkeypatch):
@@ -634,6 +643,40 @@ def test_the_endpoint_hint_reports_the_overridden_port(tmp_path, monkeypatch, ca
     _argv_of(monkeypatch)
     container_cli.serve_container(_manifest(tmp_path), port=8001)
     assert "127.0.0.1:8001" in capsys.readouterr().out
+
+
+def test_a_busy_default_port_walks_upward_in_both_places(tmp_path, monkeypatch, capsys):
+    """No --port and 20000 is taken: increment past it (the Next.js behavior), keeping
+    --publish and the server's --port in lockstep — and say so. The walk starts at
+    20000 even though the manifest says 8000."""
+    ran, _ = _argv_of(monkeypatch)
+    monkeypatch.setattr(container, "port_is_free", lambda p: p != 20000)
+    container_cli.serve_container(_manifest(tmp_path))
+    argv = ran[0]
+    assert argv[argv.index("--publish") + 1] == "20001:20001"
+    assert argv[argv.index("--port") + 1] == "20001"
+    out = capsys.readouterr().out
+    assert "20000 is in use" in out
+    assert "127.0.0.1:20001" in out  # the endpoint hint follows the walked port
+
+
+def test_an_explicit_port_is_never_walked(tmp_path, monkeypatch):
+    """--port means exactly that port: a busy one fails loudly (docker's "already
+    allocated") rather than silently serving somewhere the user did not ask for."""
+    ran, _ = _argv_of(monkeypatch)
+    monkeypatch.setattr(container, "port_is_free", lambda p: False)
+    container_cli.serve_container(_manifest(tmp_path), port=8000)
+    argv = ran[0]
+    assert argv[argv.index("--publish") + 1] == "8000:8000"
+    assert argv[argv.index("--port") + 1] == "8000"
+
+
+def test_print_never_scans_ports(tmp_path, monkeypatch):
+    """--print composes a deterministic command anywhere; the free-port walk would make
+    its output depend on what happens to be listening."""
+    monkeypatch.setattr(container, "port_is_free",
+                        lambda p: pytest.fail("--print must not probe ports"))
+    container_cli.serve_container(_manifest(tmp_path), print_only=True)
 
 
 def test_the_cli_accepts_port_before_the_target(tmp_path, monkeypatch):
