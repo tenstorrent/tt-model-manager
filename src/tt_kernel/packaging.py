@@ -105,9 +105,21 @@ def _normalize_staged_symlinks(root: Path) -> None:
     * dangling (target missing, or a symlink loop) -> drop it;
     * resolves INSIDE ``root`` -> keep it (a self-contained relative link);
     * resolves OUTSIDE ``root`` -> replace it with a real copy of the target (file or directory)
-      so nothing leaks and the bundle carries the content the pre-change copytree used to embed.
+      so nothing leaks and the bundle carries the content the pre-change copytree used to embed;
+    * resolves OUTSIDE ``root`` onto a directory whose materialization is already in progress
+      (``outside/dir/self -> outside/dir``) -> drop it, because copying it would re-enter the same
+      directory forever. See ``_materializing`` below.
     """
     root = root.resolve()
+    # Outside directories whose materialization is currently in progress, innermost last. A
+    # ``copytree(..., symlinks=True)`` preserves an absolute link inside the copy verbatim, so a
+    # self-referential escaping directory (``outside/dir/self -> outside/dir``) hands _walk a link
+    # that resolves back outside onto a directory already being copied — which is materialized
+    # again, and again, writing an ever-deeper tree until the interpreter dies with a raw
+    # RecursionError (defeating the StagingError wrapper) and leaving the partial copy on disk.
+    # Such a link is NOT a symlink loop, so ``resolve(strict=True)`` above resolves it happily and
+    # the dangling/loop guard never fires; the cycle only exists between successive copies.
+    _materializing: List[Path] = []
 
     def _normalize_link(link: Path) -> None:
         try:
@@ -121,9 +133,20 @@ def _normalize_staged_symlinks(root: Path) -> None:
         except ValueError:
             pass  # points outside -> materialize below so the host path never ships
         link.unlink()
+        if any(active == target or active.is_relative_to(target) for active in _materializing):
+            # Materializing this target would re-copy a directory whose own copy is still in
+            # progress (it IS that directory, or contains it) -> unbounded recursion. A cycle
+            # cannot be expressed in a self-contained tree anyway: keeping it as an in-tree link
+            # would hand consumers the very cycle the dereferencing copies this pass exists to
+            # protect (``cp -rL``, ``tar -czhf``) cannot walk. Drop it, as with a dangling link.
+            return
         if target.is_dir():
             shutil.copytree(target, link, symlinks=True)
-            _walk(link)  # the fresh copy may itself carry links that escape the tree
+            _materializing.append(target)
+            try:
+                _walk(link)  # the fresh copy may itself carry links that escape the tree
+            finally:
+                _materializing.pop()
         else:
             shutil.copy2(target, link)
 
