@@ -11,7 +11,9 @@ exactly what was verified and what was not. **Never claim the package works with
 hardware checkpoints below.**
 
 In this repo the CLI runs as `uv run tt-model …` (from the repo root); an installed
-`tt-model` works the same. A cold build is 2.5–4 hours; a warm rebuild that only changes
+`tt-model` works the same. With a venv already active, `uv run` prints `warning:
+VIRTUAL_ENV=… does not match the project environment path .venv and will be ignored` —
+that is correct behaviour (uv uses the project `.venv`), not a problem to fix. A cold build is 2.5–4 hours; a warm rebuild that only changes
 the verify stage is minutes. Everything in Preflight exists to avoid burning the hours.
 
 ## Step 1 — Preflight (no docker, seconds)
@@ -30,6 +32,12 @@ Run all of these before the first build:
    tt-model-yaml skill, Step 8) and diff it flag-for-flag against the serve script or
    command the model was actually validated with. A missing flag here is a broken
    deployment later.
+
+   Many models ship no `serve*.sh`. In descending order of authority, diff against: a
+   launch command in the model's `README.md`; the flags recorded in a benchmark or
+   bring-up note; or, failing both, walk the argv WITH the user field by field and have
+   them confirm it. Never skip the step for want of a script — say which source you
+   used, so the report shows what the argv was actually checked against.
 3. **If the manifest has `runtime.lock`, dry-run the resolution locally** with the same
    flags the image uses — a 2-second failure here is the same failure 40 minutes into
    the build:
@@ -89,6 +97,20 @@ vLLM kinds). Do not declare failure early; do not declare success before it.
 
 While it boots, verify the argv is the one you previewed: `docker ps` for the container,
 then `ps -o args= -C vllm` inside or `pgrep -af "vllm serve"` on the host.
+
+**If the boot dies on the mesh open** — the log carries `TT_THROW: Device <n>: Timed out
+while waiting for active ethernet core <x-y> to become active again` — the devices are
+dirty, not the package. Something was hard-killed earlier (a container that exited
+non-zero, a SIGKILLed fabric server) and left eth cores untrained. Confirm nothing else
+holds them (`docker ps -a --filter name=tt-model-`, `pgrep -af vllm`), then `tt-smi -r all`
+and serve again; it cost one wasted boot on a real run.
+
+Reset ONLY on that evidence. It reinitialises every board on the host, so a speculative
+reset before each serve would disrupt anyone else on the box and add minutes to every
+attempt for nothing. Preflight cannot pre-empt this: `tt-smi -ls` proves the boards
+enumerate, not that their eth cores are trained, and the `ETH_LIVE_STATUS` word in
+`tt-smi -s` is a per-arch bitmask — reading it wrong means resetting always or never
+noticing.
 
 ## Step 4 — Prove it works
 
