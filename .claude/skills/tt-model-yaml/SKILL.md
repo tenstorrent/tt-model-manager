@@ -159,9 +159,15 @@ and where it came from, so the user is confirming rather than composing:
 | `additional_config.tt` | `trace_region_size`, `fabric_config`, `sample_on_device_mode` | model-specific tuning |
 | `capabilities.tool_parser` | tool-calling model? which parser | otherwise tool calls come back as prose |
 | `ubuntu` / `python` | base image + interpreter | must match a published tt-metalium dev image tag |
+| `card.description` | one or two sentences: what the model is and what it is for | leads the generated model card; the checkout cannot state intent |
 
 If a launch script exists, transcribe from it and ask only to confirm. If the README states
 a context or hardware target, quote it in the question.
+
+Write `card.description` even when the README gave you a usable sentence — the card leads
+with it, and without it a reader meets the hardware requirement before learning what the
+model does. Keep it to what the model IS and is FOR; the hardware, port and quickstart are
+generated around it, so do not restate them.
 
 `serve_profiles:` is OPTIONAL — omit it for a single configuration and put everything in a
 flat `serve:` block. Add profiles only when ONE image should serve several configs the user

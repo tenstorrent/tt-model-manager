@@ -166,6 +166,11 @@ verify:                         # build-time assertions run INSIDE the finished 
   - "import models.autoports.my_model.tt as m; assert m"
 
 card:
+  # One or two sentences on what the model IS and what it is for. Leads the generated
+  # model card, right under the title. The tool cannot know this, so state it here --
+  # omit it and the card jumps straight from the title to the hardware sentence.
+  description: >
+    A 7B instruct model for general chat and code, served on Blackhole via vLLM.
   quickstart: |
     ### Use with your client
     Point it at `http://127.0.0.1:20000` once the server is up (or the port `tt-model serve` printed).

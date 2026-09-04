@@ -1112,6 +1112,18 @@ def test_every_kind_describes_the_server_it_starts():
         assert not desc.endswith("."), f"{name}: SERVER_DESC is a clause, not a sentence"
 
 
+def test_the_card_documents_the_port_serve_opens_not_the_manifests_bind_port():
+    """BASE pins serve.port: 8000, which is what the image binds under bare `docker run`.
+    `tt-model serve` -- the command the card prints -- ignores it and opens DEFAULT_PORT,
+    so rendering the manifest port would document an endpoint those commands never open."""
+    from tt_kernel.manifest import DEFAULT_PORT
+
+    card = _card()
+    assert f"port {DEFAULT_PORT}" in card
+    assert "port 8000" not in card
+    assert "next free port" in card
+
+
 def test_the_card_does_not_keep_its_own_copy_of_the_default_port():
     """The default moved 8000 -> 20000 in manifest.DEFAULT_PORT and the card was the one
     site left behind, publishing a port consumers could not reach. It must read the
@@ -1130,6 +1142,14 @@ def test_the_card_does_not_keep_its_own_copy_of_the_default_port():
     assert "next free port" in card
 
 
-def test_an_explicit_port_is_stated_without_the_walk_caveat():
-    card = _card()  # BASE pins serve.port
-    assert "next free port" not in card
+def test_the_manifest_bind_port_never_reaches_the_card():
+    """Superseded an earlier test that asserted a pinned port was stated verbatim -- that
+    encoded the bug: it documented 8000 while serve opened 20000."""
+    import json as _json
+
+    from tt_kernel.container_manifest import ContainerManifest
+
+    raw = _json.loads(_json.dumps(BASE))
+    raw["serve"]["port"] = 9999
+    card = build.render_model_card(ContainerManifest.model_validate(raw), _built())
+    assert "9999" not in card
