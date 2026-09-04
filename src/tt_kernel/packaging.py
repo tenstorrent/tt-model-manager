@@ -287,8 +287,12 @@ def render_install_sh(manifest: Manifest) -> str:
         steps: List[str] = []
         # (1) Engine + models FIRST: ttnn (bundles the tt-metal runtime) and, once published,
         # tt-metal-models. This establishes torch + numpy<2 in the venv before vLLM's deps resolve.
+        # --find-links checks wheels_dir first, so a locally-built wheel there (e.g. a hand-built
+        # tt-metal-models wheel staged ahead of its index publish) satisfies its requirements.txt
+        # pin without a network resolve; anything not present there still falls through to the index.
+        req_find_links = f'--find-links "$HERE/{d.wheels_dir}" ' if d.wheels_dir else ""
         steps.append(
-            f'{pip} --extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{d.requirements}"'
+            f'{pip} {req_find_links}--extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{d.requirements}"'
         )
         # (2) vLLM core for the plugin: STOCK upstream vLLM built with VLLM_TARGET_DEVICE=empty (NOT
         # the CUDA `vllm` on PyPI). Mirrors tenstorrent/vllm-tt-plugin docs/install-vllm-tt.sh: install
@@ -670,6 +674,7 @@ def stage_thin_package(
     requirements: Optional[Path] = None,
     plugin_wheel: Optional[Path] = None,
     extra_wheels: Optional[List[Path]] = None,
+    models_wheels: Optional[List[Path]] = None,
     vllm_wheel: Optional[Path] = None,
     vllm_version: str = VLLM_VERSION,
     with_vllm: bool = True,
@@ -687,7 +692,9 @@ def stage_thin_package(
     the ``vllm_metadata.json`` (EXTRA_MODELS_DIR contract), generated ``install.sh``/``run.sh``, and
     — in ``wheels/`` — the **bundled wheels installed by path**: the ``vllm-tt-plugin``
     (``--plugin-wheel``, the vLLM integration) and any ``generic_op`` custom-op wheels
-    (``extra_wheels``).
+    (``extra_wheels``). ``models_wheels`` are also staged into ``wheels/`` but are NOT installed by
+    path — they only ride along on ``--find-links`` so a ``requirements.txt`` pin that isn't on an
+    index yet (e.g. a hand-built ``tt-metal-models`` wheel, ahead of its publish) still resolves.
 
     vLLM core is installed by ``install.sh`` as **stock upstream vLLM built with
     ``VLLM_TARGET_DEVICE=empty``** (the plugin's ``docs/install-vllm-tt.sh`` path — NOT the CUDA
@@ -726,6 +733,15 @@ def stage_thin_package(
             shutil.copy2(w, wheels_root / Path(w).name)
             deps_wheels.append(f"{WHEELS_DIR}/{Path(w).name}")
 
+    # Wheels that only need to satisfy a requirements.txt pin locally (not installed by path) — a
+    # locally-built tt-metal-models wheel ahead of its index publish is the motivating case.
+    models_deps_wheels: List[str] = []
+    for w in models_wheels or []:
+        wheels_root = staged / WHEELS_DIR
+        wheels_root.mkdir(exist_ok=True)
+        shutil.copy2(w, wheels_root / Path(w).name)
+        models_deps_wheels.append(f"{WHEELS_DIR}/{Path(w).name}")
+
     # vLLM core: stock upstream vLLM built empty-target (see Vllm). Ship the override file (numpy<2 /
     # opencv pin) so the common-deps install doesn't bump ttnn's numpy; the upstream common.txt is
     # fetched at install. An optional prebuilt empty-target wheel avoids building from source.
@@ -750,7 +766,9 @@ def stage_thin_package(
         python=python_version,
         requirements=REQUIREMENTS,
         wheels=deps_wheels,
-        wheels_dir=(WHEELS_DIR if (deps_wheels or (vllm_spec and vllm_spec.wheel)) else None),
+        models_wheels=models_deps_wheels,
+        wheels_dir=(WHEELS_DIR if (deps_wheels or models_deps_wheels
+                                    or (vllm_spec and vllm_spec.wheel)) else None),
         vllm=vllm_spec,
         model_dir=".",
     )

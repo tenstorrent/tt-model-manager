@@ -9,6 +9,13 @@
 > (`tt-metal-models==X` ⇒ `ttnn==X`). So a thin bundle pins **one** dep (`tt-metal-models`) and the
 > matching `ttnn` comes transitively — it likely subsumes a separate "TTTv2" wheel. Until it lands,
 > the generated `requirements.txt` pins `ttnn` directly (it's on PyPI). See #29 for the full design.
+>
+> **Don't want to wait for the PyPI publish?** The packaging code already exists on the PR's branch
+> (`knauth/tt-metal-models-packaging`). Build the wheel yourself from that branch (matched to the
+> `ttnn` version you're serving with), pin `tt-metal-models==<that version>` in `requirements.txt`,
+> and pass the wheel to `package-thin --models-wheel ./tt_metal_models-<version>-*.whl`. It's staged
+> into `wheels/` and added to `install.sh`'s `--find-links`, so the pin resolves from the bundled
+> wheel instead of the (not yet published) index — no other change to the flow below.
 
 A **thin (v6) bundle** keeps the self-contained wall between models — its own uv-managed venv — but
 builds that venv from **pip dependency pins + a tiny models wheel** instead of embedding the full
@@ -153,7 +160,10 @@ The key discipline: **pin what actually worked** — `pip freeze` in your workin
    by default; to avoid that (hermetic, faster), build a wheel once with
    `VLLM_TARGET_DEVICE=empty pip wheel --no-deps vllm==0.25.1` and pass it via `--vllm-wheel`.
 4. **(Custom ops only)** `model.py` calls `ttnn.generic_op(...)`; ship your built wheel with `--ops-wheel`.
-5. **Run `package-thin`:**
+5. **(Optional, before tt-metal-models publishes)** built your own `tt-metal-models` wheel from
+   `knauth/tt-metal-models-packaging`? Ship it with `--models-wheel` — it's staged for `--find-links`,
+   not installed by path, so `requirements.txt` still just pins `tt-metal-models==<version>`.
+6. **Run `package-thin`:**
    ```bash
    tt-model package-thin <org>/<model> \
      --model-py ./model.py \
@@ -161,16 +171,18 @@ The key discipline: **pin what actually worked** — `pip freeze` in your workin
      --plugin-wheel ./wheels/vllm_tt_plugin-*.whl \   # vllm-tt-plugin (the vLLM integration)
      --vllm-wheel ./wheels/vllm-0.25.1-*.whl \  # optional: prebuilt empty-target vLLM (else built at install)
      --ops-wheel ./wheels/my_model_ops-*.whl \  # optional: your generic_op wheel (repeatable)
+     --models-wheel ./wheels/tt_metal_models-*.whl \  # optional: local tt-metal-models, ahead of publish
      --arch blackhole \
      --arch-name QwenForCausalLM --main-class model:QwenForCausalLM \
      --weights Qwen/Qwen3-4B \                # pointer, never embedded
      --mesh P150 --max-num-seqs 32 --block-size 64 \
      --out ./bundle                           # stage locally (omit + pass <org>/<model> to push)
    ```
-6. **Result** — the bundle layout shown above (`model.py` + `requirements.txt` + `vllm-overrides.txt`
-   + `wheels/` [vllm-tt-plugin + ops (+ optional vLLM wheel)] + `vllm_models/<name>/vllm_metadata.json`
-   + manifest + `install.sh`/`run.sh`; no `metal/`, no embedded ttnn wheel, no vLLM fork).
-7. **Round-trip** — on any card + firmware + SFPI box: `tt-model pull <org>/<model>` builds the venv
+7. **Result** — the bundle layout shown above (`model.py` + `requirements.txt` + `vllm-overrides.txt`
+   + `wheels/` [vllm-tt-plugin + ops (+ optional vLLM wheel + optional local models wheel)]
+   + `vllm_models/<name>/vllm_metadata.json` + manifest + `install.sh`/`run.sh`; no `metal/`, no
+   embedded ttnn wheel, no vLLM fork).
+8. **Round-trip** — on any card + firmware + SFPI box: `tt-model pull <org>/<model>` builds the venv
    (ttnn/models + empty-target vLLM + plugin) and fetches the weights; `tt-model serve <org>/<model>`
    launches it.
 
