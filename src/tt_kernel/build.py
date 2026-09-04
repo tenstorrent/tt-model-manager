@@ -37,7 +37,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence
 
 from . import MANIFEST_NAME, __version__
 from .container_manifest import (
@@ -296,29 +296,45 @@ CODE_IGNORE = (
 )
 
 
-def stage_code(m: ContainerManifest, metal: Path, dest: Path) -> "StagedCode":
-    """Copy the ``source.code`` allowlist into ``dest``, refusing missing paths.
+def stage_code(m: ContainerManifest, metal: Path, dest: Path,
+               extra_roots: "Sequence[Path]" = ()) -> "StagedCode":
+    """Copy the allowlist into ``dest``, from every root, refusing missing paths.
 
     A missing path RAISES rather than shipping nothing: the silent miss is the failure
     mode where the image ImportErrors on a consumer long after the push looked fine.
     Returns the rendered file tree for the model card AND everything ``CODE_IGNORE``
     dropped, so a skip can be reported rather than discovered as an ImportError inside
     the finished image.
+
+    ``extra_roots[i]`` is the resolved local tree for ``m.source.extra_code[i]`` -- already
+    cloned by the caller if it was a GitSource, because staging should not decide when to
+    touch the network. Everything lands in ONE ``dest`` tree regardless of which root it
+    came from: the image has a single code overlay, and a file's origin stops being
+    observable the moment it is copied.
     """
     skipped: List[str] = []
 
-    def _ignore(dirpath: str, names: List[str]) -> set:
-        dropped = set(shutil.ignore_patterns(*CODE_IGNORE)(dirpath, names))
-        for n in sorted(dropped):
-            skipped.append(str(Path(dirpath).relative_to(metal) / n))
-        return dropped
+    def _ignore_for(root: Path):
+        """CODE_IGNORE drops, reported relative to the root being copied.
+
+        The reported path has to be relative to ITS OWN root: a `relative_to(metal)` on a
+        file that came from an extra root raises ValueError, which would turn a cosmetic
+        skip report into a crash mid-stage.
+        """
+        def _ignore(dirpath: str, names: List[str]) -> set:
+            dropped = set(shutil.ignore_patterns(*CODE_IGNORE)(dirpath, names))
+            for n in sorted(dropped):
+                skipped.append(str(Path(dirpath).relative_to(root) / n))
+            return dropped
+        return _ignore
 
     entries: List[str] = []
-    for rel in m.source.code:
-        src = metal / rel
+
+    def _copy(root: Path, rel: str, field: str) -> None:
+        src = root / rel
         if not src.exists():
             raise BuildError(
-                f"source.code entry {rel!r} does not exist under {metal} — the "
+                f"{field} entry {rel!r} does not exist under {root} — the "
                 "allowlist names exactly what ships, so a missing entry is an error, "
                 "not a skip"
             )
@@ -327,11 +343,25 @@ def stage_code(m: ContainerManifest, metal: Path, dest: Path) -> "StagedCode":
         if src.is_dir():
             shutil.copytree(
                 src, target, symlinks=False, dirs_exist_ok=True,
-                ignore=_ignore,
+                ignore=_ignore_for(root),
             )
         else:
             shutil.copy2(src, target)
         entries.append(rel + ("/" if src.is_dir() else ""))
+
+    for rel in m.source.code:
+        _copy(metal, rel, "source.code")
+
+    if len(extra_roots) != len(m.source.extra_code):
+        raise BuildError(
+            f"stage_code got {len(extra_roots)} resolved extra root(s) for "
+            f"{len(m.source.extra_code)} source.extra_code entries; a root that was "
+            "never resolved would silently ship nothing"
+        )
+    for extra, root in zip(m.source.extra_code, extra_roots):
+        for rel in extra.paths:
+            _copy(root, rel, "source.extra_code")
+
     return StagedCode(tree=entries, skipped=skipped)
 
 
@@ -462,17 +492,48 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
 
     # -- code/ ----------------------------------------------------------------------
     code_dir = ctx / "code"
-    if metal.mode == "local":
-        staged_code = stage_code(m, metal.origin, code_dir)
-    else:
-        # git mode: shallow-clone just to stage code/ (the image build re-clones)
-        tmp = ctx / "metal-for-code"
+
+    def _clone_for_code(repo: str, ref: str, into: Path) -> Path:
+        """Partial-clone (blobless) a tree only to stage code/ from it (the image build
+        re-clones)."""
         subprocess.run(
-            ["git", "clone", "--filter=blob:none", metal.git_repo, str(tmp)], check=True
+            ["git", "clone", "--filter=blob:none", repo, str(into)], check=True
         )
-        subprocess.run(["git", "-C", str(tmp), "checkout", metal.sha], check=True)
-        staged_code = stage_code(m, tmp, code_dir)
-        shutil.rmtree(tmp)
+        subprocess.run(["git", "-C", str(into), "checkout", ref], check=True)
+        return into
+
+    # Every extra root is resolved to a local tree BEFORE staging, so stage_code never
+    # decides when to touch the network and a clone failure is reported here, next to the
+    # repo that caused it, rather than partway through a copy.
+    temporary: List[Path] = []
+    extra_roots: List[Path] = []
+    try:
+        for i, extra in enumerate(m.source.extra_code):
+            if isinstance(extra.root, GitSource):
+                # Pinned to a resolved sha BEFORE cloning, same as runtime.vllm/plugin
+                # above: "ref: main" is a moving target, and the manifest should record
+                # the commit that was actually staged, not the branch name that pointed
+                # at it.
+                extra.root.sha = resolve_git_ref(extra.root.repo, extra.root.ref)
+                tmp_extra = ctx / f"extra-code-{i}"
+                extra_roots.append(_clone_for_code(extra.root.repo, extra.root.sha, tmp_extra))
+                temporary.append(tmp_extra)
+            else:
+                extra_roots.append(Path(extra.root).expanduser())
+
+        if metal.mode == "local":
+            staged_code = stage_code(m, metal.origin, code_dir, extra_roots)
+        else:
+            # git mode: partial-clone just to stage code/ (the image build re-clones)
+            tmp = ctx / "metal-for-code"
+            _clone_for_code(metal.git_repo, metal.sha, tmp)
+            staged_code = stage_code(m, tmp, code_dir, extra_roots)
+            temporary.append(tmp)
+    finally:
+        # Cleaned up even when cloning or stage_code() raises -- otherwise a failed
+        # build leaves multi-GB clones sitting under ctx/ with nothing to remove them.
+        for d in temporary:
+            shutil.rmtree(d, ignore_errors=True)
 
     # -- lock ------------------------------------------------------------------------
     lock_name = m.runtime.get("lock")

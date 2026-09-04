@@ -53,6 +53,16 @@ source:
     - models/common                  # the readiness runner lives here
     - models/autoports/my_model      # must COVER runtime.extra_models_dir below, or the
                                      # plugin scans a dir that never entered the image
+  extra_code:                        # OPTIONAL. Model code that does NOT live in the
+                                     # tt-metal tree -- a diffusion server in its own repo,
+                                     # say. Same two forms as tt_metal above (a local
+                                     # checkout, or {repo, ref} to clone), and the same
+                                     # allowlist rule. Everything lands in the SAME code/
+                                     # tree, so a path here and a path in `code` above are
+                                     # indistinguishable once the image is built.
+    - root: {repo: https://github.com/tenstorrent/tt-animatediff, ref: v0.10.0}
+      paths:
+        - animatediff_ttnn           # must COVER runtime.app's top-level package
   ubuntu: "22.04"
   python: "3.12"
 

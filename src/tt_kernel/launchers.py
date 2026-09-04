@@ -174,10 +174,11 @@ class VllmPluginLauncher:
             )
         emd = rt.get("extra_models_dir")
         if emd and not any(
-            emd == c or emd.startswith(c.rstrip("/") + "/") for c in m.source.code
+            emd == c or emd.startswith(c.rstrip("/") + "/") for c in m.source.all_code_paths
         ):
             raise ContainerManifestError(
-                f"runtime.extra_models_dir {emd!r} is not covered by source.code — the "
+                f"runtime.extra_models_dir {emd!r} is not covered by source.code or "
+                f"source.extra_code — the "
                 "plugin would scan a directory that never entered the image"
             )
         for key in rt:
@@ -413,11 +414,12 @@ class VllmForkLauncher:
         # The launcher resolves model_dir INSIDE the image, so it must be covered by the
         # allowlist that decides what gets into the image at all.
         covered = any(
-            model_dir == c or model_dir.startswith(c.rstrip("/") + "/") for c in m.source.code
+            model_dir == c or model_dir.startswith(c.rstrip("/") + "/") for c in m.source.all_code_paths
         )
         if not covered:
             raise ContainerManifestError(
-                f"runtime.model_dir {model_dir!r} is not covered by source.code — the "
+                f"runtime.model_dir {model_dir!r} is not covered by source.code or "
+                f"source.extra_code — the "
                 "launcher would not find the model inside the image"
             )
 
@@ -697,10 +699,11 @@ class TtDitServerLauncher:
         # The app lives in the model's own tree, so it only exists in the image if the
         # allowlist ships it. Catch a missing prefix here rather than in the image.
         top = app.split(":", 1)[0].split(".")[0]
-        if not any(c.split("/")[0] == top for c in m.source.code):
+        if not any(c.split("/")[0] == top for c in m.source.all_code_paths):
             raise ContainerManifestError(
-                f"runtime.app {app!r} lives under {top!r}, which no source.code entry "
-                "ships. Add the package holding the server to source.code."
+                f"runtime.app {app!r} lives under {top!r}, which no allowlist entry "
+                "ships. Add the package holding the server to source.code (if it lives "
+                "in the tt-metal tree) or to source.extra_code (if it does not)."
             )
 
         # The name is interpolated into `docker run --env K=V` and into an `export K=...`

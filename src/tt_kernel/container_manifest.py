@@ -149,6 +149,45 @@ class GitSource(BaseModel):
     sha: Optional[str] = None  # filled in by `package`
 
 
+class ExtraCode(BaseModel):
+    """Model code that does NOT live in the tt-metal tree.
+
+    ``source.code`` is relative to ``source.tt_metal``, which is right for a model whose
+    code ships inside tt-metal and wrong for one that does not. A diffusion model served
+    by ``kind: tt-dit-server`` need not be a tt-metal file at all -- the launcher only
+    requires that ``runtime.app``'s top-level package is shipped by *some* allowlist
+    entry -- but before this field there was no way to ship one from anywhere else.
+
+    Deliberately the same two-form shape as ``Source.tt_metal``: a local checkout path
+    (hermetic -- packages exactly the tree the author validated) or a ``{repo, ref}`` to
+    clone (reproducible from a sha, CI-friendly). The local form alone would not have
+    been enough: a published package whose code can only be staged from one person's
+    working copy is not reproducible by the consumer reading it, which is the whole
+    reason ``tt_metal`` accepts a GitSource in the first place.
+
+    Everything staged lands in the same ``code/`` tree and is COPY'd to the same place in
+    the image, so a path here and a path in ``source.code`` are indistinguishable
+    downstream. That is intentional: only the *root* differs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    root: Union[str, GitSource]
+
+    #: Allowlist, relative to ``root`` -- same rules as ``source.code``, same reason.
+    paths: List[str] = Field(min_length=1)
+
+    @field_validator("paths")
+    @classmethod
+    def _no_escaping_paths(cls, v: List[str]) -> List[str]:
+        for p in v:
+            if p.startswith("/") or ".." in Path(p).parts:
+                raise ValueError(
+                    f"source.extra_code paths must be relative to their root: {p!r}"
+                )
+        return v
+
+
 class Source(BaseModel):
     """Build-time inputs. Nothing under ``source:`` is consulted at runtime."""
 
@@ -164,8 +203,24 @@ class Source(BaseModel):
     # the image's own build-time import check, on the author's machine.
     code: List[str] = Field(min_length=1)
 
+    #: Code from OUTSIDE the tt-metal tree. Optional and empty by default, so every
+    #: manifest written before this field behaves exactly as it did.
+    extra_code: List[ExtraCode] = Field(default_factory=list)
+
     ubuntu: str  # base image, e.g. "22.04"
     python: str  # interpreter, e.g. "3.12" — independent of ubuntu; uv provides it
+
+    @property
+    def all_code_paths(self) -> List[str]:
+        """Every path that ships, from every root, as it will appear in the image.
+
+        Read this, never ``code`` alone, when asking "does the allowlist ship X?".
+        ``code`` and ``extra_code`` differ only in where a file is staged FROM; by the
+        time anything imports it they are the same tree, so a check that consults one and
+        not the other is asking a question about staging while claiming to ask one about
+        the image.
+        """
+        return list(self.code) + [p for e in self.extra_code for p in e.paths]
 
     @field_validator("code")
     @classmethod
@@ -410,23 +465,40 @@ class ContainerManifest(BaseModel):
         launcher.validate(self)
 
     def validate_sources_exist(self, root: Optional[Path] = None) -> None:
-        """Every ``source.code`` entry must exist — a missing one is an ERROR, never a
-        silent skip, because the failure it causes otherwise is an import error deep
-        inside a multi-hour build (or worse, a silent fallback at serve time).
+        """Every allowlist entry must exist — ``source.code`` and ``source.extra_code``
+        alike. A missing one is an ERROR, never a silent skip, because the failure it
+        causes otherwise is an import error deep inside a multi-hour build (or worse, a
+        silent fallback at serve time).
 
         Split out from ``validate_semantics`` so the manifest stays loadable, and fully
         checkable, on a machine that does not have the author's tt-metal tree — a
         consumer reading a published package, or the test suite.
         """
-        if isinstance(self.source.tt_metal, GitSource):
-            return  # a remote tree is not on disk yet; `package` checks after cloning
-        base = Path(root) if root is not None else Path(self.source.tt_metal)
-        missing = [c for c in self.source.code if not (base / c).exists()]
-        if missing:
-            raise ContainerManifestError(
-                f"source.code lists {len(missing)} path(s) that do not exist under {base}: "
-                + ", ".join(sorted(missing))
-            )
+        if not isinstance(self.source.tt_metal, GitSource):
+            base = Path(root) if root is not None else Path(self.source.tt_metal).expanduser()
+            missing = [c for c in self.source.code if not (base / c).exists()]
+            if missing:
+                raise ContainerManifestError(
+                    f"source.code lists {len(missing)} path(s) that do not exist under "
+                    f"{base}: " + ", ".join(sorted(missing))
+                )
+
+        # Each extra root is checked independently and by the same rule. A GitSource root
+        # is skipped for the same reason tt_metal's is -- it is not on disk yet -- but a
+        # LOCAL extra root is checkable right now, and checking it here is the difference
+        # between a typo caught on the author's machine and one caught by an ImportError
+        # inside a finished image. ``root`` overrides only the tt-metal base; an extra
+        # root names its own tree and is never relocated by it.
+        for extra in self.source.extra_code:
+            if isinstance(extra.root, GitSource):
+                continue
+            ebase = Path(extra.root).expanduser()
+            emissing = [c for c in extra.paths if not (ebase / c).exists()]
+            if emissing:
+                raise ContainerManifestError(
+                    f"source.extra_code lists {len(emissing)} path(s) that do not exist "
+                    f"under {ebase}: " + ", ".join(sorted(emissing))
+                )
 
     # ---- rendering to the published document ---------------------------------------
 

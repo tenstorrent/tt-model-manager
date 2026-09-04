@@ -91,7 +91,7 @@ def test_runtime_app_must_be_an_asgi_target():
 def test_an_app_the_allowlist_does_not_ship_is_refused():
     """source.code promises EXACTLY what ships. An app outside it would import fine on the
     author's machine and vanish inside the image."""
-    with pytest.raises(ContainerManifestError, match="no source.code entry"):
+    with pytest.raises(ContainerManifestError, match="no allowlist entry"):
         _manifest(
             runtime={"app": "somewhere.else.app:app"},
             source={
