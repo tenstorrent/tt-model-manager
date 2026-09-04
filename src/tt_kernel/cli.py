@@ -26,6 +26,7 @@ from . import (
     packaging, runtime,
 )
 from .manifest import (
+    DEFAULT_PORT,
     CompatibilityReport,
     Manifest,
     Mesh,
@@ -595,7 +596,11 @@ def package(
             shutil.rmtree(upload_from)
     else:
         upload_from = Path(tempfile.mkdtemp(prefix="tt-model-pkg-")) / "bundle"
-    manifest = _stage(upload_from)
+    try:
+        manifest = _stage(upload_from)
+    except packaging.StagingError as e:
+        detail = "\n".join(f"  - {p}" for p in e.paths)
+        raise _err(f"{e}" + (f"\n{detail}" if detail else "")) from e
     if vendor_deps:
         _vendor_dependencies(upload_from, manifest)
     _report(manifest, upload_from)
@@ -1136,15 +1141,19 @@ def serve(
         None, "--profile", help="For a container package: which serve profile to launch "
         "(default: the author's). See `tt-model profiles <id>`."
     ),
-    follow: bool = typer.Option(
-        False, "--follow", help="For a container package: wait for the server to report "
-        "ready, streaming the boot (a cold boot JIT-compiles kernels, ~10 min)."
+    detach: bool = typer.Option(
+        False, "--detach", help="For a container package: start the container and return "
+        "at once instead of watching the boot until the server is ready."
     ),
+    follow: bool = typer.Option(False, "--follow", hidden=True,
+                                help="Deprecated: watching the boot is the default now."),
     port: Optional[int] = typer.Option(
-        None, "--port", help="Serve on this port instead of the bundle's/manifest's. For a "
-        "container package it moves BOTH the published mapping and the server's own "
-        "--port (which is why it must be a flag, not a passthrough argument); for a v5/v6 "
-        "bundle it is appended to the launch command, where argparse last-wins."
+        None, "--port", help="Serve on exactly this port (default: 20000, walking up "
+        "20001, 20002, ... past busy ports; the manifest's port is not used). For a "
+        "container package "
+        "it moves BOTH the published mapping and the server's own --port (which is why "
+        "it must be a flag, not a passthrough argument); for a v5/v6 bundle it is "
+        "appended to the launch command, where argparse last-wins."
     ),
     refresh: bool = typer.Option(
         False, "--refresh", help="Before serving an already-installed package, re-pull it if "
@@ -1205,9 +1214,22 @@ def serve(
             container_cli.serve_container(
                 cmani, profile_name=profile, print_only=print_only, follow=follow,
                 extra_args=extra_args, source=src, port=port, target=repo_id,
+                local_only=local_only, detach=detach,
             )
-        except (container_cli.ContainerCliError, container.ContainerError) as e:
+        except container_cli.ContainerCliError as e:
+            if e.diagnosis is not None:
+                raise _fail_card(f"serve {repo_id}", e.diagnosis)
             raise _err(str(e))
+        except container.ContainerError as e:
+            raise _err(str(e))
+        except KeyboardInterrupt:
+            # Only the WATCHING stopped: the container is detached and keeps booting.
+            console.console.print(console.notice_panel(
+                "[warning]stopped watching — the container is still booting[/warning]",
+                [f"[muted]follow it:  tt-model logs {repo_id} -f[/muted]",
+                 f"[muted]stop it:    tt-model stop {repo_id}[/muted]"],
+            ))
+            raise typer.Exit(code=130)
         return
 
     # Past this point --port has ALWAYS been a passthrough: `serve org/m --port 7009`
@@ -1217,6 +1239,16 @@ def serve(
     # override. Put it back, appended, so the ordering that makes last-wins work holds.
     if port is not None:
         extra_args = extra_args + ["--port", str(port)]
+    elif not any(a == "--port" or a.startswith("--port=") for a in extra_args):
+        # No port named anywhere: default to 20000 and walk upward past busy ports
+        # (20001, 20002, ...) instead of inheriting vLLM's 8000 and failing when it is
+        # taken. PREPENDED so a passthrough --port typed after the target still wins
+        # under argparse last-wins. --print keeps the deterministic default.
+        chosen = DEFAULT_PORT if print_only else container.pick_free_port(DEFAULT_PORT)
+        if chosen != DEFAULT_PORT:
+            console.note(f"port {DEFAULT_PORT} is in use; serving on {chosen} instead",
+                         marker="•")
+        extra_args = ["--port", str(chosen)] + extra_args
 
     # An already-installed bundle serves from its own venv. The host toolchain (ttnn/vLLM versions)
     # is irrelevant — the bundle ships/builds its own — so nothing about the host is checked.

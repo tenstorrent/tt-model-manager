@@ -21,19 +21,29 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import MANIFEST_NAME, console, container, hub, localdb, oci
+from .boot_progress import BootTracker, diagnose_boot, summarize
 from .build import BuildError, build_log_path, finalize, run_build, stage
 from .container_manifest import ContainerManifestError
 from .launchers import launcher_for
-from .manifest import Manifest
+from .manifest import DEFAULT_PORT, Manifest
 
 PHASES = ["Resolve", "Stage", "Build", "Export"]
 
 
 class ContainerCliError(RuntimeError):
-    """User-facing failure; the caller turns this into an exit code."""
+    """User-facing failure; the caller turns this into an exit code.
+
+    ``diagnosis`` (cause/detail/evidence/actions, from a pure classifier) is set when the
+    failure deserves a card rather than one red line; ``str(e)`` stays the full plain-text
+    summary so a non-TTY run and the tests see the same facts.
+    """
+
+    def __init__(self, message: str, diagnosis: Optional[dict] = None):
+        super().__init__(message)
+        self.diagnosis = diagnosis
 
 
-def require_host(*, need_devices: bool) -> None:
+def require_host(*, need_devices: bool):
     """Fail fast on a host that cannot possibly run this, naming the fix.
 
     Called before anything slow. Each of these checks exists because the unchecked
@@ -43,7 +53,7 @@ def require_host(*, need_devices: bool) -> None:
     reqs = container.preflight(need_devices=need_devices)
     bad = container.preflight_failures(reqs)
     if not bad:
-        return
+        return reqs
     lines = []
     for r in bad:
         lines.append(f"{r.name}: {r.detail}")
@@ -280,6 +290,62 @@ def _download_weights(ref) -> Path:
     ))
 
 
+def weights_cached(ref) -> Optional[Path]:
+    """The cached snapshot path if the pinned weights are already complete, else None.
+
+    Mirrors :func:`_download_weights` argument for argument, with ``local_files_only`` — so
+    "complete" means complete *for this spec* (the author's ``allow_patterns`` included), not
+    merely "some revision of this repo is in the cache". Never touches the network, so it is
+    safe on the serve path.
+
+    Returns None on ANY failure. This only drives an advisory note: a false "not cached"
+    costs the user one unnecessary line, while a raise here would fail a serve that would
+    otherwise have worked.
+    """
+    from huggingface_hub import snapshot_download
+
+    try:
+        return Path(snapshot_download(
+            repo_id=ref.repo_id,
+            revision=ref.revision,
+            allow_patterns=ref.allow_patterns,
+            ignore_patterns=ref.ignore_patterns,
+            local_files_only=True,
+        ))
+    except Exception:  # noqa: BLE001 — absent, incomplete, or unresolvable offline
+        return None
+
+
+def _weights_notice(manifest: Manifest, target: Optional[str], view=None) -> None:
+    """Say so when serve is about to boot without the weights on the host.
+
+    Only ``serve``-that-auto-pulls fetches weights; an already-installed package and the
+    missing-image repair both skip them by design, and the model then downloads them itself
+    inside the container. That is a supported path -- the HF cache is bind-mounted, so the
+    bytes land on the host and are reused -- but it is silent, slow, and hidden behind the
+    readiness probe, which is a bad thing to discover as an unexplained multi-minute boot.
+    """
+    ref = manifest.weights
+    if ref is None or weights_cached(ref) is not None:
+        return
+    at = f"@{ref.revision[:8]}" if ref.revision else ""
+    head = (f"weights {ref.repo_id}{at} are not in your local HF cache; the model will "
+            f"download them inside the container at first load (slower, and no progress is "
+            f"shown here)")
+    rev = f" --revision {ref.revision}" if ref.revision else ""
+    hints = []
+    if target:
+        hints.append(f"to fetch them first instead:  tt-model pull {target} --with-weights")
+    hints.append(f"or directly:  hf download {ref.repo_id}{rev}")
+    if view is not None:
+        # One warn row (it survives the checklist's final erase), hints indented under it.
+        view.warn("\n".join([head] + [f"  → {h}" for h in hints]))
+        return
+    console.note(head, marker="⚠", style="warning")
+    for h in hints:
+        console.note(h, marker="→")
+
+
 # --------------------------------------------------------------------------- refresh
 
 
@@ -391,20 +457,28 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     extra_args: Optional[List[str]] = None,
                     source: Optional[Path] = None,
                     port: Optional[int] = None,
-                    target: Optional[str] = None) -> None:
-    """Run one serve profile.
+                    target: Optional[str] = None,
+                    local_only: bool = False,
+                    detach: bool = False) -> None:
+    """Run one serve profile, and (unless ``detach``) watch it boot.
+
+    The boot is shown as a checklist of its landmarks -- device opened, weights loaded, KV
+    cache configured, warmed up -- parsed out of the container log (never the log itself),
+    and erased once the server is ready in favour of one ``✓ ready`` line and a card.
 
     ``source`` is the staged/pulled dir the manifest came from, used to reload the image
     from ``image/`` if docker no longer has it. ``port`` overrides the profile's port.
     ``target`` is the argument the user actually typed, so hints can be copy-pasted —
     ``manifest.name`` is NOT a valid target and telling someone to use it sends them in a
-    circle.
+    circle. ``follow`` is accepted for compatibility; waiting is the default now.
     """
+    del follow  # the old opt-in; kept so callers written against it still work
     spec = manifest.container
     assert spec is not None
+    host_reqs = None
     if not print_only:
         # --print composes a command without running it, so it must work anywhere.
-        require_host(need_devices=True)
+        host_reqs = require_host(need_devices=True)
 
     # The port has to move in TWO places at once — docker's --publish mapping and the
     # server's own --port — so it cannot be a passthrough argument. Passing --port after
@@ -426,8 +500,22 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         raise ContainerCliError(str(e)) from None
     if port is not None:
         # Override BEFORE composition, so --publish and the launcher's --port are both
-        # derived from the same value and cannot diverge.
+        # derived from the same value and cannot diverge. Explicit means exact: a busy
+        # port the user asked for by name fails (docker's "already allocated") rather
+        # than silently moving the endpoint.
         profile = profile.model_copy(update={"port": port})
+    elif not print_only:
+        # No explicit --port: start at 20000 and walk upward past busy ports — 20000
+        # taken → 20001 → 20002 ... — instead of failing. The manifest's own `port`
+        # is deliberately NOT the seed: authors write 8000 there (vLLM's default, and
+        # what the bare-docker CMD wrapper binds inside the image), which is exactly the
+        # port that collides on a shared box. Under tt-model the host port is tt-model's
+        # call. Skipped under --print, which must stay pure and deterministic.
+        chosen = container.pick_free_port(DEFAULT_PORT)
+        if chosen != DEFAULT_PORT:
+            console.note(f"port {DEFAULT_PORT} is in use; serving on {chosen} instead",
+                         marker="•")
+        profile = profile.model_copy(update={"port": chosen})
     if profile_name is None and len(spec.serve_profiles) > 1:
         console.note(
             f"profile {profile.name!r} (the author's default; "
@@ -449,14 +537,42 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                 with console.step(f"docker load {ref} (image was not loaded)"):
                     oci.load(layout, expect_tag=ref)
             else:
-                raise ContainerCliError(
-                    f"image {ref} is not loaded in docker.\n"
-                    f"  → if you have the staged package dir:  tt-model serve "
-                    f"<dir>/{MANIFEST_NAME}\n"
-                    f"  → if it was published:                 tt-model pull <namespace/name>\n"
-                    f"  → otherwise rebuild it:                tt-model package --container "
-                    f"<manifest.yaml>"
+                # A PULLED package keeps only the manifest: pull_container loads the image
+                # from a TemporaryDirectory and lets the multi-GB layout go, so docker's
+                # store is the only local copy. An ordinary `docker image rm` / `system
+                # prune` therefore leaves an installed record pointing at nothing, and the
+                # self-heal above cannot fire (there is no `image/` beside the manifest).
+                # Re-fetch rather than dead-ending. This is NOT an update check -- those
+                # stay opt-in behind --refresh -- so it re-pulls the RECORDED revision,
+                # reproducing the image this manifest describes rather than the Hub tip.
+                entry = localdb.get(target) if target else None
+                repairable = (
+                    bool(target) and not local_only and spec.image.is_hub_hosted
+                    and bool(entry) and not Path(str(target)).exists()
                 )
+                if repairable:
+                    console.note(
+                        f"image {ref} is missing from docker (deleted or pruned); "
+                        f"re-pulling it from {target}",
+                        marker="↻",
+                    )
+                    pull_container(str(target), (entry or {}).get("revision"), manifest,
+                                   no_weights=True)
+                    if container.loaded_digest(ref) is None:
+                        raise ContainerCliError(
+                            f"re-pulled {target} but image {ref} is still not loaded; "
+                            f"rebuild it with `tt-model package --container <manifest.yaml>`"
+                        )
+                else:
+                    hint = target if target and "/" in str(target) else "<namespace/name>"
+                    raise ContainerCliError(
+                        f"image {ref} is not loaded in docker.\n"
+                        f"  → if you have the staged package dir:  tt-model serve "
+                        f"<dir>/{MANIFEST_NAME}\n"
+                        f"  → if it was published:                 tt-model pull {hint}\n"
+                        f"  → otherwise rebuild it:                tt-model package "
+                        f"--container <manifest.yaml>"
+                    )
 
     launcher = launcher_for(spec.kind)
     argv = launcher.serve_argv(manifest, profile) + list(extra_args or [])
@@ -473,75 +589,107 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         raise ContainerCliError(
             f"{name} is already running. Stop it first:  tt-model stop {what}"
         )
-    if container.container_exists(name):
-        # Not running, but holding the name — `docker run` creates the container before
-        # it binds ports, so a failed start (a busy port, usually) leaves one in
-        # "Created". Refusing here would make the obvious retry impossible.
-        with console.step(f"removing a stopped {name}"):
-            container.remove(name, force=True)
-
     # As the host user, so the daemon does not create them as root: see
     # container.ensure_mount_sources.
     container.ensure_mount_sources(manifest)
 
-    try:
-        with console.step(f"starting {name}"):
-            container.run_checked(run_argv)
-    except container.ContainerError:
-        # Leave no half-created container behind to block the next attempt.
+    port = profile.port or DEFAULT_PORT
+    endpoint = f"http://127.0.0.1:{port}"
+    probe = launcher.ready_probe(manifest)
+    tracker = BootTracker(launcher.boot_phases(manifest), probe)
+    result = None
+    # Everything step()-shaped (host checks, image repair) ran above: a live checklist
+    # and a live step() would fight for the row, so the list opens only now.
+    with console.checklist() as view:
+        view.instant("host ready", _host_summary(host_reqs))
+        view.instant(f"image {container.image_ref(manifest)}")
+        try:
+            _weights_notice(manifest, target, view)
+        except Exception:  # noqa: BLE001 — one advisory line, never a reason not to serve
+            pass
         if container.container_exists(name):
+            # Not running, but holding the name — `docker run` creates the container before
+            # it binds ports, so a failed start (a busy port, usually) leaves one in
+            # "Created". Refusing here would make the obvious retry impossible.
+            view.begin(f"removing a stopped {name}")
             container.remove(name, force=True)
-        raise
+            view.done()
+        view.begin(f"starting {name}")
+        try:
+            container.run_checked(run_argv)
+        except container.ContainerError:
+            # Leave no half-created container behind to block the next attempt.
+            if container.container_exists(name):
+                container.remove(name, force=True)
+            raise
+        view.done("container started")
+        if detach:
+            view.close()
+        else:
+            view.begin("waiting for the engine", placeholder=True)
+            result = container.wait_ready(name, probe, on_line=_feed(tracker, view))
+            if result.ready:
+                if view.active:
+                    view.done()
+                view.clear()
 
-    port = profile.port or 8000
-    console.milestone(f"{name} started")
-    if follow:
-        console.note("waiting for the server to become ready (a cold boot JIT-compiles "
-                     "kernels; ~10 min the first time)", marker="○")
-        result = container.wait_ready(name, launcher.ready_probe(manifest),
-                                      echo=console.raw)
-        if not result.ready:
-            raise ContainerCliError(_not_ready_message(result, what, extra_args))
-        console.milestone(f"ready at http://127.0.0.1:{port}")
-    else:
-        console.note(f"endpoint (once ready):  http://127.0.0.1:{port}", marker="→")
+    if detach:
+        console.note(f"endpoint (once ready):  {endpoint}", marker="→")
         console.note(f"follow the boot:        tt-model logs {what} -f", marker="→")
+        return
+
+    assert result is not None
+    if not result.ready:
+        diag = diagnose_boot(tracker.evidence() or result.tail, exited=result.exited,
+                             target=what, extra_args=extra_args)
+        raise ContainerCliError(summarize(diag, result.tail), diagnosis=diag)
+
+    console.milestone(f"{what} ready  {console.fmt_duration(view.elapsed)}")
+    console.console.print(_ready_card(name, endpoint, what))
+
+
+def _host_summary(reqs) -> Optional[str]:
+    """`docker 28.1 · /dev/tenstorrent · hugepages` from the preflight, or nothing."""
+    if not reqs:
+        return None
+    parts = []
+    for r in reqs:
+        if not getattr(r, "ok", False):
+            continue
+        parts.append(f"{r.name} {r.detail}" if r.name == "docker" else r.name)
+    return " · ".join(parts) or None
+
+
+def _feed(tracker: BootTracker, view):
+    """The bridge from log lines to checklist rows: the tracker decides, the view draws."""
+    def on_line(line: str) -> None:
+        for ev in tracker.feed(line):
+            kind = ev[0]
+            if kind == "start":
+                view.begin(ev[2])
+            elif kind == "done":
+                view.done(ev[2], ev[3] or "")
+            elif kind == "progress":
+                view.progress(ev[1], ev[2])
+            elif kind == "detail":
+                view.detail(ev[1])
+    return on_line
+
+
+def _ready_card(name: str, endpoint: str, target: str):
+    """The end-of-boot card: where the server is and what to do next."""
+    return console.ready_panel(
+        name,
+        [
+            ("endpoint", endpoint),
+            ("models", f"curl {endpoint}/v1/models"),
+            ("try", f'tt-model curl {target} "hello"'),
+        ],
+        footer_lines=[f"[muted]tt-model logs {target} -f   ·   tt-model stop {target}[/muted]"],
+    )
 
 
 # ------------------------------------------------------------------------ stop / logs
-
-
-def _not_ready_message(result, target: str, extra_args: Optional[List[str]]) -> str:
-    """Say what actually happened, and name the cause when the logs give it away.
-
-    A container that CRASHED and one that is merely slow need different next steps, and
-    the most common crash here is an argument tt-model forwarded to the engine: `serve`
-    declares ignore_unknown_options, so a flag it does not know (a tt-model flag typed
-    after the target, or one that only exists on a newer version) is passed straight
-    through and the engine rejects it — after the container has already started.
-    """
-    tail = "\n".join(f"    {ln}" for ln in result.tail[-8:])
-    if not result.exited:
-        return (
-            f"the server did not report ready within the timeout; the container is still "
-            f"running.\n  → follow it:  tt-model logs {target} -f\n"
-            f"  → give up:    tt-model stop {target}\n\n  last output:\n{tail}"
-        )
-
-    bad = [a for a in (extra_args or []) if a.startswith("-")]
-    blamed = ""
-    joined = "\n".join(result.tail)
-    if bad and ("unrecognized arguments" in joined or "error: argument" in joined
-                or "no such option" in joined):
-        blamed = (
-            f"\n  {', '.join(bad)} was passed through to the engine, which rejected it. "
-            f"tt-model's own flags must come BEFORE the target "
-            f"(`tt-model serve --flag {target}`); anything after it goes to the engine "
-            f"verbatim. If the flag is not a tt-model flag either, drop it."
-        )
-    return (
-        f"the container exited before the server was ready.{blamed}\n\n  last output:\n{tail}"
-    )
 
 
 def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) -> None:

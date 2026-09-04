@@ -52,6 +52,9 @@ def _host_is_fine(monkeypatch):
     # The image is identified by its digest now, not by a tag being present. Default to
     # "the right image is loaded"; tests about a missing or mismatched image override it.
     monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
+    # Serve now watches the boot by default; nothing here has a container to follow.
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(True, False, [], 1.0))
 
 
 def _wire(tmp_path: Path, **over) -> Path:
@@ -191,16 +194,16 @@ def test_an_unknown_profile_is_refused_with_the_available_ones(tmp_path, monkeyp
         container_cli.serve_container(_manifest(tmp_path), profile_name="nope")
 
 
-def test_follow_reports_when_the_server_never_became_ready(tmp_path, monkeypatch):
+def test_serve_reports_when_the_server_never_became_ready(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "running", lambda name=None: [])
     monkeypatch.setattr(container, "run_checked", lambda argv: None)
     monkeypatch.setattr(container, "wait_ready",
                         lambda *a, **k: container.ReadyResult(False, False, ["slow..."]))
     with pytest.raises(container_cli.ContainerCliError, match="did not report ready"):
-        container_cli.serve_container(_manifest(tmp_path), follow=True)
+        container_cli.serve_container(_manifest(tmp_path))
 
 
-def test_follow_says_the_container_EXITED_when_it_did(tmp_path, monkeypatch):
+def test_serve_says_the_container_EXITED_when_it_did(tmp_path, monkeypatch):
     """"did not report ready" is useless when the container crashed — the reason is in
     what it printed on the way out."""
     monkeypatch.setattr(container, "running", lambda name=None: [])
@@ -210,7 +213,7 @@ def test_follow_says_the_container_EXITED_when_it_did(tmp_path, monkeypatch):
                         lambda *a, **k: container.ReadyResult(
                             False, True, ["boom: could not open device"]))
     with pytest.raises(container_cli.ContainerCliError) as e:
-        container_cli.serve_container(_manifest(tmp_path), follow=True)
+        container_cli.serve_container(_manifest(tmp_path))
     msg = str(e.value)
     assert "container exited" in msg
     assert "boom: could not open device" in msg
@@ -227,7 +230,7 @@ def test_a_rejected_passthrough_flag_is_blamed_by_name(tmp_path, monkeypatch):
                         lambda *a, **k: container.ReadyResult(
                             False, True, ["vllm: error: unrecognized arguments: --refresh"]))
     with pytest.raises(container_cli.ContainerCliError) as e:
-        container_cli.serve_container(_manifest(tmp_path), follow=True,
+        container_cli.serve_container(_manifest(tmp_path),
                                       extra_args=["--refresh"], target="org/x")
     msg = str(e.value)
     assert "--refresh was passed through to the engine" in msg
@@ -241,9 +244,71 @@ def test_a_still_running_container_is_not_reported_as_exited(tmp_path, monkeypat
     monkeypatch.setattr(container, "wait_ready",
                         lambda *a, **k: container.ReadyResult(False, False, ["still booting"]))
     with pytest.raises(container_cli.ContainerCliError) as e:
-        container_cli.serve_container(_manifest(tmp_path), follow=True, target="org/x")
+        container_cli.serve_container(_manifest(tmp_path), target="org/x")
     msg = str(e.value)
     assert "still running" in msg and "tt-model stop org/x" in msg
+
+
+def test_a_boot_failure_carries_a_diagnosis_for_the_card(tmp_path, monkeypatch):
+    """The CLI renders a diagnosis card, not a red dump; the classifier's dict rides on
+    the exception so cli.py never re-derives it."""
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(False, True, ["x"]))
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_manifest(tmp_path), target="org/x")
+    assert e.value.diagnosis and "container exited" in e.value.diagnosis["cause"]
+
+
+def test_detach_returns_without_watching_the_boot(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+
+    def boom(*a, **k):
+        raise AssertionError("wait_ready must not run under --detach")
+
+    monkeypatch.setattr(container, "wait_ready", boom)
+    container_cli.serve_container(_manifest(tmp_path), target="org/x", detach=True)
+    out = capsys.readouterr().out
+    assert "container started" in out
+    assert "tt-model logs org/x -f" in out and "endpoint (once ready)" in out
+
+
+def test_serve_walks_the_boot_landmarks_and_ends_on_a_ready_card(tmp_path, monkeypatch, capsys):
+    """The log lines a real boot prints (see tests/fixtures/boot_logs) become named rows,
+    and the ready line ends in the endpoint card -- never the raw log."""
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    lines = [
+        "INFO 09-01 13:11:14 [__init__.py:237] Platform plugin tt is activated",
+        "2026-09-01 13:11:41.906 | info | Device | Opening user mode device driver (x.cpp:1)",
+        "(EngineCore pid=97) vllm_tt_plugin.worker - INFO - multidevice with 4 devices and grid (2, 2) is created",
+        "(EngineCore pid=97) INFO 09-02 17:36:10 kv_cache_utils.py:1308] GPU KV cache size: 133,120 tokens",
+        "(APIServer pid=1) INFO 09-02 17:37:39 api_server.py:500] Starting vLLM API server 0 on http://0.0.0.0:8000",
+        "INFO:     Application startup complete.",
+    ]
+
+    def fake_wait(name, probe, timeout_s=1800, on_line=None):
+        for ln in lines:
+            on_line(ln)
+            if probe in ln:
+                return container.ReadyResult(True, False, lines[-5:], 42.0)
+        return container.ReadyResult(False, False, lines, 42.0)
+
+    monkeypatch.setattr(container, "wait_ready", fake_wait)
+    # Hermetic: the free-port walk must not depend on what is listening on this box.
+    monkeypatch.setattr(container, "port_is_free", lambda p: True)
+    container_cli.serve_container(_manifest(tmp_path), target="org/x")
+    out = capsys.readouterr().out
+    assert "Tenstorrent device opened" in out and "4 chips · mesh (2, 2)" in out
+    assert "KV cache configured" in out and "133,120 tokens" in out
+    assert "org/x ready" in out
+    assert "http://127.0.0.1:20000" in out and "tt-model stop org/x" in out
+    assert "kv_cache_utils.py" not in out, "a raw log line reached the terminal"
 
 
 # ------------------------------------------------------------------ stop
@@ -535,12 +600,19 @@ def test_port_moves_the_publish_mapping_and_the_server_together(tmp_path, monkey
     assert "8000" not in argv
 
 
-def test_without_the_flag_the_manifest_port_is_used(tmp_path, monkeypatch):
+def test_without_the_flag_the_default_is_20000_not_the_manifest_port(tmp_path, monkeypatch):
+    """The fixture's manifest says `port: 8000` (what authors write, and what the image's
+    own CMD binds under bare docker). Under tt-model that must NOT seed the choice: 8000
+    is the port that collides on a shared box, so no --port means 20000."""
     ran, _ = _argv_of(monkeypatch)
+    # Hermetic: the free-port walk must not make this depend on what happens to be
+    # listening on the machine running the tests.
+    monkeypatch.setattr(container, "port_is_free", lambda p: True)
     container_cli.serve_container(_manifest(tmp_path))
     argv = ran[0]
-    assert argv[argv.index("--publish") + 1] == "8000:8000"
-    assert argv[argv.index("--port") + 1] == "8000"
+    assert argv[argv.index("--publish") + 1] == "20000:20000"
+    assert argv[argv.index("--port") + 1] == "20000"
+    assert "8000" not in argv
 
 
 def test_the_two_ports_can_never_diverge(tmp_path, monkeypatch):
@@ -571,6 +643,40 @@ def test_the_endpoint_hint_reports_the_overridden_port(tmp_path, monkeypatch, ca
     _argv_of(monkeypatch)
     container_cli.serve_container(_manifest(tmp_path), port=8001)
     assert "127.0.0.1:8001" in capsys.readouterr().out
+
+
+def test_a_busy_default_port_walks_upward_in_both_places(tmp_path, monkeypatch, capsys):
+    """No --port and 20000 is taken: increment past it (the Next.js behavior), keeping
+    --publish and the server's --port in lockstep — and say so. The walk starts at
+    20000 even though the manifest says 8000."""
+    ran, _ = _argv_of(monkeypatch)
+    monkeypatch.setattr(container, "port_is_free", lambda p: p != 20000)
+    container_cli.serve_container(_manifest(tmp_path))
+    argv = ran[0]
+    assert argv[argv.index("--publish") + 1] == "20001:20001"
+    assert argv[argv.index("--port") + 1] == "20001"
+    out = capsys.readouterr().out
+    assert "20000 is in use" in out
+    assert "127.0.0.1:20001" in out  # the endpoint hint follows the walked port
+
+
+def test_an_explicit_port_is_never_walked(tmp_path, monkeypatch):
+    """--port means exactly that port: a busy one fails loudly (docker's "already
+    allocated") rather than silently serving somewhere the user did not ask for."""
+    ran, _ = _argv_of(monkeypatch)
+    monkeypatch.setattr(container, "port_is_free", lambda p: False)
+    container_cli.serve_container(_manifest(tmp_path), port=8000)
+    argv = ran[0]
+    assert argv[argv.index("--publish") + 1] == "8000:8000"
+    assert argv[argv.index("--port") + 1] == "8000"
+
+
+def test_print_never_scans_ports(tmp_path, monkeypatch):
+    """--print composes a deterministic command anywhere; the free-port walk would make
+    its output depend on what happens to be listening."""
+    monkeypatch.setattr(container, "port_is_free",
+                        lambda p: pytest.fail("--print must not probe ports"))
+    container_cli.serve_container(_manifest(tmp_path), print_only=True)
 
 
 def test_the_cli_accepts_port_before_the_target(tmp_path, monkeypatch):
@@ -1170,3 +1276,156 @@ def test_serve_does_not_refresh_under_local_only(tmp_path, monkeypatch):
                         lambda *a, **k: pytest.fail("--local-only must not hit the Hub"))
     assert runner.invoke(
         cli.app, ["serve", "org/x", "--refresh", "--local-only"]).exit_code == 0
+
+
+# ------------------------------------- missing image on an installed pulled package
+#
+# A pulled package keeps ONLY the manifest: pull_container loads the image from a
+# TemporaryDirectory and lets the multi-GB layout go, so docker's store is the sole local
+# copy. `docker image rm` / `docker system prune` then leaves an installed record pointing
+# at nothing, and serve's layout self-heal cannot fire (no `image/` beside the manifest).
+
+
+def _image_gone(monkeypatch):
+    monkeypatch.setattr(container, "is_running", lambda n: False)
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(True, False, [], 1.0))
+
+
+def test_a_deleted_image_is_re_pulled_at_the_recorded_revision(tmp_path, monkeypatch):
+    """The repair must not smuggle in an update: --refresh is the only opt-in for moving to
+    the Hub tip, so this re-pulls the revision the install recorded."""
+    _image_gone(monkeypatch)
+    monkeypatch.setattr(container_cli.localdb, "get",
+                        lambda r: {"repo_id": r, "revision": "cafe1234"})
+    calls = []
+
+    def fake_pull(repo_id, revision, manifest, *, no_weights=False):
+        calls.append((repo_id, revision, no_weights))
+        monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
+
+    monkeypatch.setattr(container_cli, "pull_container", fake_pull)
+    container_cli.serve_container(_manifest(tmp_path), target="org/m")
+    assert calls == [("org/m", "cafe1234", True)], calls
+
+
+def test_local_only_does_not_re_pull_a_deleted_image(tmp_path, monkeypatch):
+    """--local-only means "do not touch the network", and a repair is still network."""
+    _image_gone(monkeypatch)
+    monkeypatch.setattr(container_cli.localdb, "get",
+                        lambda r: {"repo_id": r, "revision": "cafe1234"})
+    monkeypatch.setattr(container_cli, "pull_container",
+                        lambda *a, **k: pytest.fail("re-pulled under --local-only"))
+    with pytest.raises(container_cli.ContainerCliError, match="not loaded in docker"):
+        container_cli.serve_container(_manifest(tmp_path), target="org/m",
+                                      local_only=True)
+
+
+def test_a_repair_that_does_not_produce_the_image_fails_loudly(tmp_path, monkeypatch):
+    """A re-pull reporting success while the image is still absent must not fall through to
+    a docker run that would fail with something unrelated."""
+    _image_gone(monkeypatch)
+    monkeypatch.setattr(container_cli.localdb, "get",
+                        lambda r: {"repo_id": r, "revision": "cafe1234"})
+    monkeypatch.setattr(container_cli, "pull_container", lambda *a, **k: None)
+    with pytest.raises(container_cli.ContainerCliError, match="still not loaded"):
+        container_cli.serve_container(_manifest(tmp_path), target="org/m")
+
+
+def test_the_hint_names_the_actual_target_not_a_placeholder(tmp_path, monkeypatch):
+    """With nothing installed there is no baseline to repair from, so the message stands —
+    but it must name what the user typed rather than <namespace/name>."""
+    _image_gone(monkeypatch)
+    monkeypatch.setattr(container_cli.localdb, "get", lambda r: None)
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_manifest(tmp_path), target="org/m")
+    assert "tt-model pull org/m" in str(e.value)
+
+# ------------------------------------------------- weights notice on the serve path
+#
+# Only serve-that-auto-pulls fetches weights. An already-installed package and the
+# missing-image repair both skip them, and the model then downloads them itself inside the
+# container -- supported, but silent and slow, so serve says so.
+
+
+def _serving_ok(monkeypatch):
+    monkeypatch.setattr(container, "is_running", lambda n: False)
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(True, False, [], 1.0))
+
+
+def test_serve_warns_when_the_weights_are_not_cached(tmp_path, monkeypatch, capsys):
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m")
+    out = capsys.readouterr().out
+    assert "not in your local HF cache" in out
+    assert "tt-model pull org/m --with-weights" in out
+    assert "hf download org/w" in out
+
+
+def test_serve_is_quiet_when_the_weights_are_cached(tmp_path, monkeypatch, capsys):
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: Path("/hf/x"))
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m")
+    assert "not in your local HF cache" not in capsys.readouterr().out
+
+
+def test_the_notice_names_the_pinned_revision(tmp_path, monkeypatch, capsys):
+    """A revision is the difference between the validated weights and today's tip, so the
+    hint must reproduce the pin rather than fetching whatever is current."""
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
+    container_cli.serve_container(
+        _manifest(tmp_path, weights={"repo": "org/w", "revision": "abcdef1234"}),
+        target="org/m")
+    out = capsys.readouterr().out
+    assert "org/w@abcdef12" in out
+    assert "--revision abcdef1234" in out
+
+
+def test_a_broken_weights_probe_never_fails_the_serve(tmp_path, monkeypatch):
+    """This drives ONE advisory line, so no failure in it may stop a serve that would
+    otherwise have worked."""
+    def boom(ref):
+        raise RuntimeError("hub exploded")
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "weights_cached", boom)
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m")  # must not raise
+
+
+def test_the_notice_is_suppressed_under_print(tmp_path, monkeypatch, capsys):
+    """--print composes an argv for scripting; it must stay free of advisory chatter."""
+    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m", print_only=True)
+    assert "not in your local HF cache" not in capsys.readouterr().out
+
+
+def test_weights_cached_is_offline_and_swallows_failures(monkeypatch, tmp_path):
+    """It must never reach the network on the serve path."""
+    import huggingface_hub
+    seen = {}
+
+    def fake(**kw):
+        seen.update(kw)
+        raise OSError("not cached")
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake)
+    m = _manifest(tmp_path, weights={"repo": "org/w", "revision": "deadbeef"})
+    assert container_cli.weights_cached(m.weights) is None
+    assert seen["local_files_only"] is True
+    assert seen["repo_id"] == "org/w" and seen["revision"] == "deadbeef"

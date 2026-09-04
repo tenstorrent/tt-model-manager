@@ -54,9 +54,10 @@ import json
 import re
 import shlex
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-from .manifest import Manifest, ServeProfile
+from .boot_progress import TT_DIT_PHASES, VLLM_PHASES, Phase
+from .manifest import DEFAULT_PORT, Manifest, ServeProfile
 
 if TYPE_CHECKING:
     from .container_manifest import ContainerManifest
@@ -329,7 +330,7 @@ class VllmPluginLauncher:
             argv += ["--additional-config", json.dumps(profile.additional_config)]
         argv += _capability_argv(profile)
         argv += profile.flat_args()
-        argv += ["--port", str(profile.port or 8000)]
+        argv += ["--port", str(profile.port or DEFAULT_PORT)]
         return argv
 
     def serve_env(self, m: Manifest, profile: ServeProfile) -> Dict[str, str]:
@@ -345,6 +346,10 @@ class VllmPluginLauncher:
 
     def ready_probe(self, m: Manifest) -> str:
         return self.READY_LINE
+
+    def boot_phases(self, m: Manifest) -> Tuple[Phase, ...]:
+        """The boot's landmarks, for `serve`'s progress view (see boot_progress)."""
+        return VLLM_PHASES
 
 
 class VllmForkLauncher:
@@ -528,7 +533,7 @@ class VllmForkLauncher:
         argv += ["--block-size", str(profile.block_size)]
         if profile.server_timeout is not None:
             argv += ["--server-timeout", str(profile.server_timeout)]
-        argv += ["--port", str(profile.port or 8000)]
+        argv += ["--port", str(profile.port or DEFAULT_PORT)]
         tt_cfg = profile.additional_config.get("tt")
         if tt_cfg:
             argv += ["--tt-config", json.dumps(tt_cfg)]
@@ -548,6 +553,10 @@ class VllmForkLauncher:
 
     def ready_probe(self, m: Manifest) -> str:
         return self.READY_LINE
+
+    def boot_phases(self, m: Manifest) -> Tuple[Phase, ...]:
+        """The boot's landmarks, for `serve`'s progress view (see boot_progress)."""
+        return VLLM_PHASES
 
 
 # tt-metal declares the torch it expects in its dev requirements, e.g.
@@ -789,7 +798,7 @@ class TtDitServerLauncher:
             "--host",
             "0.0.0.0",
             "--port",
-            str(profile.port or 8000),
+            str(profile.port or DEFAULT_PORT),
             "--lifespan",
             "on",
         ]
@@ -813,6 +822,10 @@ class TtDitServerLauncher:
 
     def ready_probe(self, m: Manifest) -> str:
         return self.READY_LINE
+
+    def boot_phases(self, m: Manifest) -> Tuple[Phase, ...]:
+        """The boot's landmarks, for `serve`'s progress view (see boot_progress)."""
+        return TT_DIT_PHASES
 
 
 def _mesh_shape_env(m: Manifest) -> str:

@@ -257,6 +257,13 @@ class ImageRef(BaseModel):
         return f"{ref}@{self.digest}" if self.digest else f"{ref}:{self.tag.split(':')[-1]}"
 
 
+# Default host port when neither the user (--port) nor the manifest names one. High and
+# out of the way: 8000 collides with half the dev tools on a shared box. When it too is
+# busy, serve walks upward (20001, 20002, ...) instead of failing — see
+# container.pick_free_port.
+DEFAULT_PORT = 20000
+
+
 class ServeSettings(BaseModel):
     """Launch settings for a container package.
 

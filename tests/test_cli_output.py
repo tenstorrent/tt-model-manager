@@ -263,3 +263,124 @@ class TestPinnedStepper:
         assert "A" in rows[0] and "B" in rows[0], "row 1 is not the stepper"
         assert set(rows[1].replace("[muted]", "").replace("[/muted]", "")) == {"─"}, \
             "row 2 is not a plain rule"
+
+
+# ── the serve boot checklist ─────────────────────────────────────────────────
+CHECKLIST_PROG = """
+import sys, time; sys.path.insert(0, 'src')
+from tt_kernel import console
+mode = sys.argv[1]
+if mode == 'verbose':
+    console.set_verbose(True)
+with console.checklist() as view:
+    view.instant('host ready', 'docker 28.1')
+    view.warn('weights are not cached; downloading inside the container')
+    view.begin('opening Tenstorrent device'); time.sleep(0.35); view.done(detail='2 chips')
+    view.begin('loading weights'); view.progress(12, 32); time.sleep(0.35); view.done(detail='32/32')
+    view.begin('warming up the model'); time.sleep(0.35)
+    if mode == 'fail':
+        view.fail(detail='engine core died')
+    else:
+        view.done()
+        view.clear()
+    rows = view.rows_written
+print('✓ my-model ready  1.1s' if mode != 'fail' else '✗ my-model did not start')
+"""
+
+
+def _checklist(mode, columns=100):
+    return _pty_prog(CHECKLIST_PROG, [mode], columns)
+
+
+def _pty_prog(prog, argv, columns=100):
+    chunks = []
+    prev = os.environ.get("COLUMNS")
+    os.environ["COLUMNS"] = str(columns)
+    try:
+        pty.spawn([sys.executable, "-c", prog, *argv],
+                  lambda fd: (lambda d: (chunks.append(d), d)[1])(os.read(fd, 1024)))
+    finally:
+        if prev is None:
+            os.environ.pop("COLUMNS", None)
+        else:
+            os.environ["COLUMNS"] = prev
+    return b"".join(chunks).decode("utf8", "replace")
+
+
+def _final_screen(raw):
+    """Apply `\\r\\033[2K` and `\\033[1A\\033[2K` the way a terminal would, so the assertion
+    is about what the user is left LOOKING AT, not about the bytes that flew past."""
+    rows, cur = [""], 0
+    i = 0
+    while i < len(raw):
+        if raw.startswith("\r\033[2K", i):
+            rows[cur] = ""
+            i += 5
+        elif raw.startswith("\033[1A\033[2K", i):
+            if cur > 0:
+                rows.pop(cur)
+                cur -= 1
+            rows[cur] = ""
+            i += 8
+        elif raw.startswith("\r\n", i):        # a PTY's onlcr: plain newline
+            rows.append("")
+            cur += 1
+            i += 2
+        elif raw[i] == "\n":
+            rows.append("")
+            cur += 1
+            i += 1
+        elif raw[i] == "\r":
+            rows[cur] = ""
+            i += 1
+        else:
+            m = ANSI.match(raw, i)
+            if m:
+                i = m.end()
+            else:
+                rows[cur] += raw[i]
+                i += 1
+    return "\n".join(rows)
+
+
+class TestChecklist:
+    def test_success_erases_every_step_but_keeps_the_warning(self):
+        raw = _checklist("ok")
+        seen = plain(raw)
+        # The rows existed while the job ran...
+        assert "✓ opening Tenstorrent device" in seen and "2 chips" in seen
+        assert "12/32 · 37%" in seen, "a known total must show as a real fraction"
+        assert "\r\033[2K" in raw, "the live row was never erased before a result"
+        assert "\033[1A\033[2K" in raw, "the list was never erased on success"
+        # ...and are gone from what the user is left looking at.
+        screen = _final_screen(raw)
+        assert "opening Tenstorrent device" not in screen and "loading weights" not in screen
+        assert "weights are not cached" in screen, "an actionable warning must survive"
+        assert "✓ my-model ready" in screen
+        assert "⠋" not in screen and "⠹" not in screen, "a spinner frame was left behind"
+
+    def test_failure_keeps_the_list_as_evidence(self):
+        raw = _checklist("fail")
+        assert "\033[1A\033[2K" not in raw, "a failed run must not erase its own evidence"
+        screen = _final_screen(raw)
+        assert "✓ opening Tenstorrent device" in screen
+        assert "✗ warming up the model" in screen and "engine core died" in screen
+
+    def test_piped_run_prints_each_row_once_with_no_escapes(self):
+        res = subprocess.run([sys.executable, "-c", CHECKLIST_PROG, "ok"],
+                             capture_output=True, text=True, env=dict(os.environ, COLUMNS="100"))
+        assert res.returncode == 0, res.stderr
+        assert "\x1b" not in res.stdout
+        assert res.stdout.count("opening Tenstorrent device") == 1
+        assert "weights are not cached" in res.stdout and "✓ my-model ready" in res.stdout
+
+    def test_verbose_keeps_the_rows_even_on_a_tty(self):
+        raw = _checklist("verbose")
+        assert "\033[1A\033[2K" not in raw
+        screen = _final_screen(raw)
+        assert "✓ opening Tenstorrent device" in screen and "✓ my-model ready" in screen
+
+    def test_rows_never_exceed_a_narrow_terminal(self):
+        raw = _checklist("ok", columns=40)
+        for row in plain(raw).split("\n"):
+            assert len(row) <= 40, f"row wider than the terminal: {row!r}"

@@ -34,6 +34,13 @@ repo (the "running folder"): `wheels/`, `metal/`, `install.sh`, `run.sh`, a per-
 `tt_kernel_manifest.json`. If you omit `--max-num-seqs`/`--block-size`, the launcher defaults to
 32/64 (the known-good tt_transformers values).
 
+The embedded `metal/` tree is your source, not your build: it **excludes** VCS (`.git`),
+byte-caches (`__pycache__`, `*.pyc`), virtualenvs (`venv`, `.venv`), logs, and — at the tree root
+— the regenerable multi-GB caches and build output (`.cpmcache`, `python_env`, `tt_cache`,
+`build`/`build_*`, `built`, `built_kernels`). Symlinks are then normalized so the shipped tree is
+self-contained (dangling links dropped, links escaping the tree materialized as real copies) — the
+kernels ship in your `ttnn` wheel, so none of the excluded build state is needed at serve.
+
 ### Consumer — pull + serve (only a card + firmware required)
 ```bash
 tt-model pull  <org>/<model-name>     # installs the shipped wheels into the bundle's OWN venv,

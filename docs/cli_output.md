@@ -54,6 +54,18 @@ belongs to the served process, not the CLI, and stays as-is.
 - **Stop the spinner before handing the terminal to a foreground child.** `serve` execs
   vLLM into the foreground; a still-ticking ticker and vLLM will fight for the row.
 
+## The serve boot checklist
+
+`serve` on a container package watches the boot through `console.checklist()`: a vertical
+list where only the active row is live (`⠹ label  ▕████░░░░▏ 12/32 · 38%  0:42`) and every
+finished row is printed once. The rows come from `boot_progress.BootTracker`, a pure parser
+over the container log (`tests/fixtures/boot_logs` are real boots) — raw log lines never
+reach the terminal, only under `-v`. On success `view.clear()` erases the whole list (a
+known count of rows, so a fixed number of cursor-ups) and re-prints the `!` warnings; on
+failure the list stays and a `failure_card` built by `boot_progress.diagnose_boot` follows.
+Only one checklist may be active and `step()` must not run inside it — do step()-shaped
+work first, then open the list.
+
 ## Progress denominators
 
 Only show a bar for a total you actually know. `pip` tells us package counts from its

@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .manifest import Manifest, ServeProfile
+from .manifest import DEFAULT_PORT, Manifest, ServeProfile
 
 #: Docker label applied to every container and used to find ours again.
 LABEL = "org.tenstorrent.tt-model"
@@ -184,6 +184,33 @@ def hf_home() -> Path:
     return Path(os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface")))
 
 
+def _is_within(child: Path, parent: Path) -> bool:
+    """Is ``child`` inside ``parent``? Resolved, so a symlinked cache is judged by where it
+    actually lands rather than by how it was spelled."""
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def hub_cache() -> Path:
+    """Where ``snapshot_download`` actually writes, resolved the way huggingface_hub does.
+
+    Normally this is ``<HF_HOME>/hub`` and therefore already inside the ``/hf`` mount. But
+    ``HF_HUB_CACHE`` can point it somewhere else entirely (a big scratch disk), and it is a
+    documented HF variable that ``hf_home()`` alone cannot see. Ask the library rather than
+    re-deriving the precedence: getting it wrong means the host downloads weights to one
+    place and the container looks in another, and the model silently re-downloads them.
+    """
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        return Path(HF_HUB_CACHE)
+    except Exception:  # noqa: BLE001 — old/absent hub: the documented default
+        return hf_home() / "hub"
+
+
 def _safe_name(name: str) -> str:
     """Refuse a name that would escape the managed cache dir when used as a path component.
 
@@ -238,18 +265,28 @@ def compose_run(
     hf_home_dir: Optional[Path] = None,
     cache_dir: Optional[Path] = None,
     weight_cache_dir: Optional[Path] = None,
+    hub_cache_dir: Optional[Path] = None,
     include_hf_token: Optional[bool] = None,
 ) -> List[str]:
     """The full ``docker run`` argv for one serve profile.
 
-    Pure: the only environment it reads is ``HF_HOME``/``HF_TOKEN``, and both can be
-    overridden by the caller so tests never depend on the developer's shell.
+    Pure: the only environment it reads is ``HF_HOME``/``HF_HUB_CACHE``/``HF_TOKEN``, and
+    all can be overridden by the caller so tests never depend on the developer's shell.
     """
     _require_container(m)
-    port = profile.port or 8000
+    port = profile.port or DEFAULT_PORT
     hf = Path(hf_home_dir) if hf_home_dir is not None else hf_home()
     cache = Path(cache_dir) if cache_dir is not None else model_cache_dir(m)
     weights = Path(weight_cache_dir) if weight_cache_dir is not None else model_weight_cache_dir(m)
+    # Derived from an explicitly-passed hf_home_dir rather than the environment: a caller
+    # that pins the HF root has pinned the whole story, and reading the real HF_HUB_CACHE
+    # here would make composition depend on the developer's shell.
+    if hub_cache_dir is not None:
+        hub = Path(hub_cache_dir)
+    elif hf_home_dir is not None:
+        hub = hf / "hub"
+    else:
+        hub = hub_cache()
     if include_hf_token is None:
         include_hf_token = bool(os.environ.get("HF_TOKEN"))
 
@@ -279,6 +316,17 @@ def compose_run(
         "--env", "TT_DIT_CACHE_DIR=/weight-cache",
         "--publish", f"{port}:{port}",
     ]
+    # HF_HOME=/hf makes the container resolve its hub cache to /hf/hub, which is already
+    # inside the mount above -- so in the default and HF_HOME-only setups there is nothing
+    # more to do. Only when HF_HUB_CACHE points OUTSIDE HF_HOME does the container need a
+    # second mount, and its own HF_HUB_CACHE, to reach the weights the host just wrote.
+    # Mounted at a sibling path rather than nested under /hf/hub so the result never
+    # depends on how the daemon orders overlapping bind mounts.
+    if not _is_within(hub, hf):
+        cmd += [
+            "--volume", f"{hub}:/hf-hub",
+            "--env", "HF_HUB_CACHE=/hf-hub",
+        ]
     if include_hf_token:
         # name only: the value is inherited from the caller's environment rather than
         # being written into an argv that `--print` would display and `ps` would leak.
@@ -292,7 +340,8 @@ def compose_run(
 
 def ensure_mount_sources(m: Manifest, *, hf_home_dir: Optional[Path] = None,
                          cache_dir: Optional[Path] = None,
-                         weight_cache_dir: Optional[Path] = None) -> None:
+                         weight_cache_dir: Optional[Path] = None,
+                         hub_cache_dir: Optional[Path] = None) -> None:
     """Create the bind-mount source dirs, as the host user, before ``docker run``.
 
     If they do not exist the docker daemon creates them itself — owned by ROOT — and the
@@ -305,8 +354,48 @@ def ensure_mount_sources(m: Manifest, *, hf_home_dir: Optional[Path] = None,
     hf = Path(hf_home_dir) if hf_home_dir is not None else hf_home()
     cache = Path(cache_dir) if cache_dir is not None else model_cache_dir(m)
     weights = Path(weight_cache_dir) if weight_cache_dir is not None else model_weight_cache_dir(m)
-    for d in (hf, cache, weights):
+    if hub_cache_dir is not None:
+        hub = Path(hub_cache_dir)
+    elif hf_home_dir is not None:
+        hub = hf / "hub"
+    else:
+        hub = hub_cache()
+    for d in (hf, cache, weights, hub):
         d.mkdir(parents=True, exist_ok=True)
+
+
+def port_is_free(port: int) -> bool:
+    """Can this host port be bound right now?
+
+    Checked the way docker will bind it — the wildcard address — so a listener on any
+    interface counts as taken. A best-effort snapshot: the port can still be claimed
+    between this check and ``docker run``, in which case docker's own "address already
+    in use" error surfaces as before.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("", port))
+        except OSError:
+            return False
+    return True
+
+
+def pick_free_port(preferred: int, *, attempts: int = 100) -> int:
+    """First free port at or above ``preferred``.
+
+    The Next.js behavior: 20000 busy → try 20001, 20002, ... rather than failing with
+    "port is already allocated" and making the user pick one by hand.
+    """
+    for port in range(preferred, min(preferred + attempts, 65536)):
+        if port_is_free(port):
+            return port
+    raise ContainerError(
+        f"no free port found in {preferred}-{min(preferred + attempts, 65536) - 1}; "
+        f"pass one explicitly with --port"
+    )
 
 
 def compose_pull(m: Manifest) -> Optional[List[str]]:
@@ -486,10 +575,15 @@ class ReadyResult:
     ready: bool
     exited: bool           # the log stream closed => the container is gone
     tail: List[str]        # last lines seen, for a failure card
+    elapsed_s: float = 0.0  # how long the wait took, for the ready line
 
 
-def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> ReadyResult:
+def wait_ready(name: str, probe: str, timeout_s: int = 1800, on_line=None) -> ReadyResult:
     """Follow the container's logs until the launcher's ready line appears.
+
+    ``on_line(text)`` sees every line (tqdm ``\r`` fragments arrive as separate lines:
+    the pipe is read in text mode with universal newlines). It is how the caller turns
+    the stream into progress without this module knowing anything about rendering.
 
     The generous default timeout is not padding: a cold boot JIT-compiles kernels, which
     is the ~10-minute cost the mounted TT_METAL_CACHE exists to avoid paying twice.
@@ -498,10 +592,14 @@ def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> Read
     import threading
     import time
 
-    deadline = time.monotonic() + timeout_s
+    started = time.monotonic()
+    deadline = started + timeout_s
+    # errors="replace": one undecodable byte in a log line used to raise inside the reader
+    # thread, which then never queued its EOF sentinel -- and the caller sat out the full
+    # timeout on a container that had already exited.
     proc = subprocess.Popen(
         ["docker", "logs", "--follow", name],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
     )
     assert proc.stdout is not None
     # Read the log on a thread so the deadline is honoured even while the container is
@@ -511,16 +609,18 @@ def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> Read
     tail: List[str] = []
 
     def _pump() -> None:
-        for line in proc.stdout:  # type: ignore[union-attr]
-            lines.put(line)
-        lines.put(None)  # EOF sentinel: the log stream closed => the container exited
+        try:
+            for line in proc.stdout:  # type: ignore[union-attr]
+                lines.put(line)
+        finally:
+            lines.put(None)  # EOF sentinel: the log stream closed => the container exited
 
     threading.Thread(target=_pump, daemon=True).start()
     try:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return ReadyResult(False, False, tail[-20:])
+                return ReadyResult(False, False, tail[-20:], time.monotonic() - started)
             try:
                 line = lines.get(timeout=min(remaining, 5.0))
             except queue.Empty:
@@ -529,11 +629,12 @@ def wait_ready(name: str, probe: str, timeout_s: int = 1800, echo=print) -> Read
                 # EOF: the container exited before the probe appeared. The reason is in
                 # what it printed on the way out, so hand that back rather than a bare
                 # "not ready".
-                return ReadyResult(False, True, tail[-20:])
+                return ReadyResult(False, True, tail[-20:], time.monotonic() - started)
             stripped = line.rstrip("\n")
             tail.append(stripped)
-            echo(stripped)
+            if on_line is not None:
+                on_line(stripped)
             if probe in line:
-                return ReadyResult(True, False, tail[-20:])
+                return ReadyResult(True, False, tail[-20:], time.monotonic() - started)
     finally:
         proc.terminate()

@@ -502,3 +502,104 @@ def test_serve_preflights_but_print_does_not(tmp_path, monkeypatch):
     m = _wire()
     container_cli.serve_container(m, print_only=True)   # must not raise
     assert called == []
+
+# ------------------------------------------------------ HF_HUB_CACHE outside HF_HOME
+#
+# snapshot_download resolves through huggingface_hub's HF_HUB_CACHE, which honours both
+# HF_HOME and HF_HUB_CACHE; the mount was derived from HF_HOME alone. A user who points
+# HF_HUB_CACHE at a scratch disk therefore had the host download to one place and the
+# container look in another, and the model silently re-downloaded the weights.
+
+HF = Path("/home/u/.cache/huggingface")
+
+
+def test_the_hub_cache_is_not_mounted_twice_when_it_sits_inside_hf_home():
+    """Default and HF_HOME-only setups: /hf already contains hub/, so nothing is added."""
+    argv = _run_argv(_wire(), hub_cache_dir=HF / "hub")
+    assert "HF_HUB_CACHE=/hf-hub" not in argv
+    assert "/hf-hub" not in " ".join(argv)
+
+
+def test_an_unpinned_hub_cache_follows_hf_home_rather_than_the_environment():
+    """Purity: pinning hf_home_dir pins the whole story, so composition must not read the
+    developer's real HF_HUB_CACHE."""
+    assert "HF_HUB_CACHE=/hf-hub" not in _run_argv(_wire())
+
+
+def test_a_hub_cache_outside_hf_home_is_mounted_and_pointed_at():
+    argv = _run_argv(_wire(), hub_cache_dir=Path("/mnt/big/hub"))
+    assert "/mnt/big/hub:/hf-hub" in argv
+    assert "HF_HUB_CACHE=/hf-hub" in argv
+    assert "HF_HOME=/hf" in argv  # still carries the token store
+
+
+def test_hub_cache_reads_the_huggingface_hub_constant(monkeypatch, tmp_path):
+    """Resolved by asking the library, not by re-deriving HF_HOME/HF_HUB_CACHE precedence."""
+    import huggingface_hub.constants as c
+    monkeypatch.setattr(c, "HF_HUB_CACHE", str(tmp_path / "elsewhere"), raising=False)
+    assert container.hub_cache() == tmp_path / "elsewhere"
+
+
+def test_ensure_mount_sources_creates_the_hub_dir_too(tmp_path):
+    """Every bind-mount source must exist first, or the daemon creates it as ROOT and the
+    container -- running as the host user -- cannot write it."""
+    hub = tmp_path / "scratch" / "hub"
+    container.ensure_mount_sources(_wire(), hf_home_dir=tmp_path / "hf",
+                                   cache_dir=tmp_path / "c",
+                                   weight_cache_dir=tmp_path / "w", hub_cache_dir=hub)
+    assert hub.is_dir()
+
+
+def test_a_symlinked_hub_cache_is_judged_by_where_it_lands(tmp_path):
+    """Spelling must not decide it: a symlink INTO HF_HOME needs no second mount."""
+    real = tmp_path / "hf" / "hub"
+    real.mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    m = _wire()
+    argv = container.compose_run(
+        m, m.container.resolve_profile(), ["srv"], {},
+        hf_home_dir=tmp_path / "hf", cache_dir=tmp_path / "c",
+        weight_cache_dir=tmp_path / "w", hub_cache_dir=link, include_hf_token=False)
+    assert "HF_HUB_CACHE=/hf-hub" not in argv
+
+
+# ------------------------------------------------------------------ free-port walk
+
+
+def test_pick_free_port_skips_a_real_listener():
+    """20000 busy -> 20001 (or the next free one): the increment is real, not cosmetic."""
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        busy = s.getsockname()[1]
+        got = container.pick_free_port(busy, attempts=10)
+        assert got > busy
+        assert container.port_is_free(got)
+
+
+def test_pick_free_port_returns_the_preferred_port_when_free():
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        free = s.getsockname()[1]
+    # the socket is closed, so the port is free again
+    assert container.pick_free_port(free, attempts=10) == free
+
+
+def test_pick_free_port_gives_up_with_the_fix_in_the_message(monkeypatch):
+    monkeypatch.setattr(container, "port_is_free", lambda p: False)
+    with pytest.raises(container.ContainerError, match="--port"):
+        container.pick_free_port(20000, attempts=3)
+
+
+def test_compose_run_defaults_to_20000_when_the_profile_names_no_port():
+    m = _wire()
+    profile = m.container.resolve_profile().model_copy(update={"port": None})
+    argv = container.compose_run(m, profile, ["srv"], {},
+                                 hf_home_dir=Path("/hf"), cache_dir=Path("/c"),
+                                 weight_cache_dir=Path("/w"), include_hf_token=False)
+    assert argv[argv.index("--publish") + 1] == "20000:20000"
