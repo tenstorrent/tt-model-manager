@@ -265,10 +265,14 @@ class ImageSettings(BaseModel):
 
 
 class CardSettings(BaseModel):
-    """Optional model-authored Markdown appended to generated model-card sections."""
+    """Optional model-authored Markdown for the generated model card."""
 
     model_config = ConfigDict(extra="forbid")
 
+    # One or two sentences on what the model IS and what it is for ("intended for
+    # agentic coding"). Leads the card, right under the title — the tool cannot know
+    # this, so the author states it.
+    description: Optional[str] = None
     quickstart: Optional[str] = None
 
 

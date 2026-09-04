@@ -74,6 +74,42 @@ def _git(repo: Path, *args: str) -> Optional[str]:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def _remote_url_containing_head(metal: Path, remote_refs: Optional[str]) -> Optional[str]:
+    """Return the most relevant remote that actually contains ``HEAD``.
+
+    A fork checkout commonly keeps upstream as ``origin`` and pushes the working
+    branch to another remote.  Recording origin merely because it has that conventional
+    name creates a plausible-looking but broken model-card link.  Prefer the current
+    branch's tracking remote when it contains HEAD, then any containing remote, and use
+    origin only as orientation when the commit has not been pushed anywhere.
+    """
+    remotes = (_git(metal, "remote") or "").splitlines()
+    refs = {
+        line.strip().lstrip("* ").split(" -> ", 1)[0]
+        for line in (remote_refs or "").splitlines()
+        if line.strip()
+    }
+
+    branch = _git(metal, "rev-parse", "--abbrev-ref", "HEAD")
+    tracking_remote = (
+        _git(metal, "config", "--get", f"branch.{branch}.remote")
+        if branch and branch != "HEAD"
+        else None
+    )
+
+    def contains_head(remote: str) -> bool:
+        return any(ref.startswith(f"{remote}/") for ref in refs)
+
+    candidates = []
+    if tracking_remote and tracking_remote in remotes and contains_head(tracking_remote):
+        candidates.append(tracking_remote)
+    candidates.extend(remote for remote in remotes if contains_head(remote) and remote not in candidates)
+    if "origin" in remotes and "origin" not in candidates:
+        candidates.append("origin")
+    candidates.extend(remote for remote in remotes if remote not in candidates)
+    return _git(metal, "remote", "get-url", candidates[0]) if candidates else None
+
+
 def scm_version(metal: Path) -> str:
     """The version the ttnn editable install should carry.
 
@@ -232,7 +268,7 @@ def resolve_metal_source(m: ContainerManifest, scratch: Path) -> MetalSource:
             context=filtered,
             origin=metal,
             sha=_git(metal, "rev-parse", "HEAD"),
-            remote=_git(metal, "remote", "get-url", "origin"),
+            remote=_remote_url_containing_head(metal, on_remote),
             branch=_git(metal, "rev-parse", "--abbrev-ref", "HEAD"),
             pushed=bool(on_remote),
             # tt-metal's OWN describe invocation (cmake/version.cmake), so the stub tag
@@ -905,14 +941,45 @@ def freeze_from_image(image: str) -> str:
     return r.stdout
 
 
-def render_model_card(m: ContainerManifest, built: Dict[str, object],
-                      code_tree: List[str]) -> str:
+def _https_repo_url(repo: str) -> Optional[str]:
+    """A git remote in any common spelling -> a browsable https URL, or None."""
+    if repo.startswith("git@"):  # git@github.com:org/repo(.git)
+        host, sep, path = repo[4:].partition(":")
+        if not sep:
+            return None
+        repo = f"https://{host}/{path}"
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    return repo.rstrip("/") if repo.startswith(("https://", "http://")) else None
+
+
+def _pinned_sha(sha: str, repo: Optional[str], *, public: bool = True,
+                flags: str = "") -> str:
+    """A provenance cell. The sha appears ONLY as a working public link: a commit a
+    reader cannot fetch (not pushed, or from a local path) is not shown at all — the
+    cell says where the build came from instead."""
+    url = _https_repo_url(repo) if (repo and public) else None
+    if url and sha and sha != "unknown":
+        cell = f"[`{sha}`]({url}/commit/{sha})"
+    else:
+        cell = "a local checkout — commit not published"
+    return cell + (f" {flags}" if flags else "")
+
+
+TT_MODEL_MANAGER_URL = "https://github.com/tenstorrent/tt-model-manager"
+
+
+def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     """The generated README.md for the HF repo.
 
-    The serve-profile table travels WITH the model instead of living in a quickstart doc
-    someone has to find, and the provenance block is the pinned truth of what was built.
+    The order is the reader's order: what the model is and what hardware it needs
+    first, then how to run it, then (only when there is a choice) the profile table,
+    then provenance. Provenance names each component by its official name and shows a
+    commit only as a working public link.
     """
     from . import TT_MODEL_TAG
+    from .launchers import launcher_for
+    from .manifest import DEFAULT_PORT
 
     tt_metal = built.get("tt_metal") or {}
     tags = sorted({TT_MODEL_TAG, m.arch, m.kind, "tt-model-container"})
@@ -924,70 +991,135 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object],
         "",
         f"# {m.name}",
         "",
-        "A **tt-model container package**: the serving platform ships as a Docker image, "
-        "so a consumer needs only Docker and a Tenstorrent card — no tt-metal, no vLLM, "
-        "no venv on the host.",
+    ]
+    if m.card and m.card.description:
+        lines += [m.card.description.rstrip(), ""]
+
+    # Hardware requirement, up front. One profile: the whole launch config in a
+    # sentence. Several: the targets here, the details in the table below.
+    profiles = [m.resolve_profile(n) for n in m.profile_names()]
+    if len(profiles) == 1:
+        p = profiles[0]
+        detail = []
+        if p.max_model_len:
+            detail.append(f"{p.max_model_len:,}-token context")
+        if p.max_num_seqs:
+            detail.append(f"up to {p.max_num_seqs} concurrent sequences")
+        lines += [
+            f"Runs on **{p.hardware}** (mesh `{p.mesh_device}`)"
+            + (" — " + ", ".join(detail) if detail else "") + ".",
+            "",
+        ]
+    else:
+        targets = " or ".join(f"**{p.hardware}**" for p in profiles if p.hardware)
+        lines += [f"Runs on {targets} — see the serve profiles below.", ""]
+
+    lines += [
+        f"Packaged and published with [tt-model-manager]({TT_MODEL_MANAGER_URL}) "
+        f"{built.get('tt_model_version', '')} (manifest schema {m.schema_version}).",
         "",
-        "## Serve it",
+        "## Quickstart",
         "",
         "```bash",
-        f"tt-model pull  {m.repo}",
+        f"tt-model pull  {m.repo} --with-weights",
         f"tt-model serve {m.repo}",
         "```",
         "",
+        f"`pull --with-weights` downloads the Docker image and the "
+        f"[`{m.weights_repo}`](https://huggingface.co/{m.weights_repo}) weights"
+        + (f" at `{m.weights_ref.revision}`" if m.weights_ref.revision else "")
+        + " (into your HF cache; they are not in the image). `serve` starts "
+        # DEFAULT_PORT, never the manifest's `port`. The two commands above are
+        # `tt-model serve`, and serve deliberately ignores the manifest port as a seed:
+        # authors write 8000 there for the bare-`docker run` CMD, which is exactly the
+        # port that collides on a shared box.
+        f"{launcher_for(m.kind).SERVER_DESC} on port {DEFAULT_PORT} (or the next free "
+        "port, if that one is busy)"
+        + "; the first "
+        "start compiles kernels for your device, which takes several minutes, and the "
+        f"server is ready when it logs `{launcher_for(m.kind).READY_LINE}`.",
+        "",
     ]
     if m.card and m.card.quickstart:
-        lines += ["## Quickstart", "", m.card.quickstart.rstrip(), ""]
+        lines += [m.card.quickstart.rstrip(), ""]
+    if len(profiles) > 1:
+        lines += [
+            "## Serve profiles",
+            "",
+            "One image serves every profile below; pick one with `--profile`.",
+            "",
+            "| profile | hardware | mesh | max_num_seqs | max_model_len |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        default = m.resolved_default()
+        for name in m.profile_names():
+            p = m.resolve_profile(name)
+            label = f"`{name}`" + (" *(default)*" if name == default else "")
+            lines.append(
+                f"| {label} | {p.hardware or ''} | {p.mesh_device or ''} | "
+                f"{p.max_num_seqs or ''} | {p.max_model_len or ''} |"
+            )
+        lines.append("")
     lines += [
-        "## Serve profiles",
-        "",
-        "One image serves every profile below; pick one with `--profile`.",
-        "",
-        "| profile | hardware | mesh | max_num_seqs | max_model_len |",
-        "| --- | --- | --- | --- | --- |",
-    ]
-    default = m.resolved_default()
-    for name in m.profile_names():
-        p = m.resolve_profile(name)
-        label = f"`{name}`" + (" *(default)*" if name == default else "")
-        lines.append(
-            f"| {label} | {p.hardware or ''} | {p.mesh_device or ''} | "
-            f"{p.max_num_seqs or ''} | {p.max_model_len or ''} |"
-        )
-    lines += [
-        "",
-        "## What is inside",
-        "",
-        f"- **weights**: [`{m.weights_repo}`](https://huggingface.co/{m.weights_repo})"
-        + (f" at `{m.weights_ref.revision}`" if m.weights_ref.revision else "")
-        + " — "
-        "downloaded to *your* HF cache at pull time, never baked into the image",
-        f"- **arch**: {m.arch}",
-        f"- **serving stack**: `{m.kind}`",
-        "",
         "## Provenance",
         "",
-        "Everything below is pinned; the image was built from exactly these.",
+        "The exact sources the image was built from — `code/` in this repo is "
+        "byte-identical to the model code inside the image:",
         "",
-        "| component | pinned to |",
+        "| component | built from |",
         "| --- | --- |",
-        f"| tt-metal | `{tt_metal.get('sha') or 'unknown'}`"
-        + (" *(dirty tree)*" if tt_metal.get("dirty") else "") + " |",
     ]
-    for key in ("vllm", "plugin"):
-        entry = built.get(key)
-        if isinstance(entry, dict):
-            lines.append(f"| {key} | `{entry.get('sha')}` |")
+
+    # tt-metal: the commit, shown only as a working public link.
+    metal_sha = str(tt_metal.get("sha") or "unknown")
+    dirty_flag = "*(dirty tree — the image includes uncommitted changes)*"
+    lines.append(
+        "| tt-metal | "
+        + _pinned_sha(metal_sha, tt_metal.get("remote"),
+                      public=tt_metal.get("pushed") is not False,
+                      flags=dirty_flag if tt_metal.get("dirty") else "") + " |"
+    )
+
+    # vLLM: a released version, the author's own wheel, or a pinned checkout (the cell's
+    # link names the actual source — upstream release or the tenstorrent/vllm fork).
+    vllm_built = built.get("vllm")
+    vllm_rt = m.runtime.get("vllm") or {}
+    if isinstance(vllm_built, dict) and vllm_built.get("wheel"):
+        lines.append(f"| vLLM | `{vllm_built['wheel']}` — a wheel the author built |")
+    elif isinstance(vllm_built, dict) and vllm_built.get("sha"):
+        cell = _pinned_sha(
+            str(vllm_built["sha"]), vllm_built.get("repo"),
+            flags="*(dirty tree)*" if vllm_built.get("dirty") else "",
+        )
+        lines.append(f"| vLLM | {cell} |")
+    elif vllm_rt.get("version"):
+        v = vllm_rt["version"]
+        lines.append(
+            f"| vLLM | [`v{v}`](https://github.com/vllm-project/vllm/releases/tag/v{v}) |"
+        )
+
+    # The Tenstorrent platform plugin, by its official name — never just "plugin".
+    plugin_built = built.get("plugin")
+    plugin_rt = m.runtime.get("plugin") or {}
+    if isinstance(plugin_built, dict) and plugin_built.get("sha"):
+        cell = _pinned_sha(
+            str(plugin_built["sha"]), plugin_built.get("repo"),
+            flags="*(dirty tree — the image includes uncommitted changes)*"
+            if plugin_built.get("dirty") else "",
+        )
+        lines.append(f"| vllm-tt-plugin | {cell} |")
+    elif plugin_rt.get("version"):
+        v = plugin_rt["version"]
+        lines.append(
+            f"| vllm-tt-plugin | [`v{v}`](https://pypi.org/project/vllm-tt-plugin/{v}/) |"
+        )
+
     lines += [
-        f"| code digest | `{str(built.get('code_sha256', ''))[:16]}` |",
+        f"| `code/` digest | `{str(built.get('code_sha256', ''))[:16]}` (sha256, "
+        "first 16 hex digits) |",
         f"| built | {built.get('created_at', '')} by tt-model {built.get('tt_model_version', '')} |",
         "",
-        "## Shipped code",
-        "",
-        "`code/` in this repo is byte-identical to what runs inside the image.",
-        "",
     ]
-    lines += [f"- `{e}`" for e in code_tree]
     return "\n".join(lines) + "\n"
 
 
@@ -1018,7 +1150,7 @@ def finalize(staged: Staged, *, echo: Optional[Callable[[str], None]] = None) ->
     oci.save(staged.image, out / "image")
 
     (out / "README.md").write_text(
-        render_model_card(m, staged.built, staged.code_tree)
+        render_model_card(m, staged.built)
     )
     wire = m.to_wire(
         image_tag=staged.image,

@@ -63,14 +63,14 @@ if TYPE_CHECKING:
     from .container_manifest import ContainerManifest
 
 
-#: Where `package` stages a local plugin checkout inside the build context, and where
-#: the Dockerfile puts it in the builder stage.
+# Where `package` stages a local plugin checkout inside the build context, and where
+# the Dockerfile puts it in the builder stage.
 PLUGIN_CTX_DIR = "/ctx/plugin-src"
-#: A local vLLM source tree, staged the same way.
+# A local vLLM source tree, staged the same way.
 VLLM_CTX_DIR = "/ctx/vllm-src"
-#: The author's own vLLM wheel (v5 shipped one via --vllm-wheel).
+# The author's own vLLM wheel (v5 shipped one via --vllm-wheel).
 VLLM_CTX_WHEEL = "/ctx/wheels/vllm-*.whl"
-#: Extra local wheels to install alongside the engine (v5: --extra-wheel).
+# Extra local wheels to install alongside the engine (v5: --extra-wheel).
 WHEELS_CTX_DIR = "/ctx/wheels"
 
 
@@ -101,19 +101,24 @@ class VllmPluginLauncher:
 
     name = "vllm-plugin"
 
-    #: serve fields a profile must carry for this kind. max_num_seqs/block_size are
-    #: engine settings the TT backend has no working default for.
+    # serve fields a profile must carry for this kind. max_num_seqs/block_size are
+    # engine settings the TT backend has no working default for.
     REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device", "max_num_seqs", "block_size")
 
-    #: keys the manifest's ``runtime:`` block may contain for this kind
+    # keys the manifest's ``runtime:`` block may contain for this kind
     RUNTIME_KEYS = ("vllm", "plugin", "extension", "extra_models_dir", "lock",
                     "overrides", "wheels")
 
-    #: the log line whose appearance means the OpenAI server is accepting requests
+    # the log line whose appearance means the OpenAI server is accepting requests
     READY_LINE = "Application startup complete"
 
-    #: vLLM's PyPI metadata is generated on a CUDA machine; without the CPU index a plain
-    #: install resolves the CUDA dependency set (~4 GB of nvidia-* wheels, no device here)
+    # how the card describes what ``serve`` starts. Beside READY_LINE because it is
+    # the same category of fact -- what this stack exposes -- and the card must not
+    # hardcode it: a diffusion server is NOT an OpenAI API.
+    SERVER_DESC = "an OpenAI-compatible server"
+
+    # vLLM's PyPI metadata is generated on a CUDA machine; without the CPU index a plain
+    # install resolves the CUDA dependency set (~4 GB of nvidia-* wheels, no device here)
     PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 
     # ttnn pins numpy<2, while recent vLLM's opencv-python-headless wants numpy>=2. A hard
@@ -363,20 +368,25 @@ class VllmForkLauncher:
 
     name = "vllm-fork"
 
-    #: see VllmPluginLauncher.REQUIRED_SERVE_FIELDS
+    # see VllmPluginLauncher.REQUIRED_SERVE_FIELDS
     REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device", "max_num_seqs", "block_size")
 
-    #: keys the manifest's ``runtime:`` block may contain for this kind
+    # keys the manifest's ``runtime:`` block may contain for this kind
     RUNTIME_KEYS = ("vllm", "extension", "lock", "model_dir")
 
-    #: the log line whose appearance means the OpenAI server is accepting requests
+    # the log line whose appearance means the OpenAI server is accepting requests
     READY_LINE = "Server ready at"
 
-    #: where the fork checkout lives in both build stages
+    # how the card describes what ``serve`` starts. Beside READY_LINE because it is
+    # the same category of fact -- what this stack exposes -- and the card must not
+    # hardcode it: a diffusion server is NOT an OpenAI API.
+    SERVER_DESC = "an OpenAI-compatible server"
+
+    # where the fork checkout lives in both build stages
     FORK_DIR = "/opt/vllm"
 
-    #: vLLM's PyPI metadata is generated on a CUDA machine; without the CPU index a plain
-    #: install resolves the CUDA dependency set (~4 GB of nvidia-* wheels, no device here)
+    # vLLM's PyPI metadata is generated on a CUDA machine; without the CPU index a plain
+    # install resolves the CUDA dependency set (~4 GB of nvidia-* wheels, no device here)
     PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 
     def validate(self, m: "ContainerManifest") -> None:
@@ -593,9 +603,9 @@ def metal_torch_pin(metal_tree: Optional[Path]) -> Optional[str]:
     return None
 
 
-#: Resolve every model registered through EXTRA_MODELS_DIR, mirroring
-#: ``vllm_tt_plugin.platform._register_models_from_extra_dir`` and vLLM's later lazy
-#: import of the ``"module:Class"`` string it stores.
+# Resolve every model registered through EXTRA_MODELS_DIR, mirroring
+# ``vllm_tt_plugin.platform._register_models_from_extra_dir`` and vLLM's later lazy
+# import of the ``"module:Class"`` string it stores.
 RESOLVE_EXTRA_MODELS = (
     "import os, sys, json, importlib; "
     "md = os.environ['EXTRA_MODELS_DIR']; "
@@ -657,23 +667,30 @@ class TtDitServerLauncher:
 
     name = "tt-dit-server"
 
-    #: A diffusion server has no continuous-batching engine, so it needs neither
-    #: max_num_seqs nor block_size. It still needs to know its hardware and mesh.
+    # A diffusion server has no continuous-batching engine, so it needs neither
+    # max_num_seqs nor block_size. It still needs to know its hardware and mesh.
     REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device")
 
-    #: keys the manifest's ``runtime:`` block may contain for this kind
+    # keys the manifest's ``runtime:`` block may contain for this kind
     RUNTIME_KEYS = ("app", "packages", "lock", "mesh_shape_env")
 
-    #: Env var carrying the resolved mesh SHAPE, when the manifest does not name one.
-    #: These servers read the shape from the environment under a name they each choose;
-    #: FLUX.2 reads ``FLUX2_MESH_SHAPE``, and it is the default only because it is the
-    #: model this kind was built for. A second diffusion model sets ``mesh_shape_env``
-    #: rather than inheriting a name that means nothing to it.
+    # Env var carrying the resolved mesh SHAPE, when the manifest does not name one.
+    # These servers read the shape from the environment under a name they each choose;
+    # FLUX.2 reads ``FLUX2_MESH_SHAPE``, and it is the default only because it is the
+    # model this kind was built for. A second diffusion model sets ``mesh_shape_env``
+    # rather than inheriting a name that means nothing to it.
     DEFAULT_MESH_SHAPE_ENV = "FLUX2_MESH_SHAPE"
 
-    #: uvicorn logs this once the ASGI lifespan has finished, which for these servers
-    #: means the pipeline is warm and the device is claimed.
+    # uvicorn logs this once the ASGI lifespan has finished, which for these servers
+    # means the pipeline is warm and the device is claimed.
     READY_LINE = "Application startup complete"
+
+    # how the card describes what ``serve`` starts. Beside READY_LINE because it is
+    # the same category of fact -- what this stack exposes -- and the card must not
+    # hardcode it: a diffusion server is NOT an OpenAI API.
+    # A diffusion transformer has no tokens and no KV cache, so there is no chat/
+    # completions API to be compatible WITH -- the server is the model's own ASGI app.
+    SERVER_DESC = "the model's own HTTP server"
 
     PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
     DEFAULT_PACKAGES = ("fastapi", "uvicorn", "pydantic>=2", "pillow")
@@ -846,7 +863,7 @@ KINDS: Dict[str, object] = {
     TtDitServerLauncher.name: TtDitServerLauncher(),
 }
 
-#: Used when a kind is unknown or predates ``REQUIRED_SERVE_FIELDS``.
+# Used when a kind is unknown or predates ``REQUIRED_SERVE_FIELDS``.
 _DEFAULT_REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device", "max_num_seqs", "block_size")
 
 

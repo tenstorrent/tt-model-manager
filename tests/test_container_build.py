@@ -351,8 +351,10 @@ def test_a_missing_digest_is_a_clear_error(tmp_path, monkeypatch):
 
 
 def _built(**over):
-    b = {"tt_metal": {"sha": "a" * 40, "dirty": False, "scm_version": "0.72.1"},
-         "vllm": {"repo": "r", "sha": "b" * 40},
+    b = {"tt_metal": {"sha": "a" * 40, "dirty": False, "scm_version": "0.72.1",
+                      "pushed": True,
+                      "remote": "https://github.com/tenstorrent/tt-metal"},
+         "vllm": {"repo": "https://github.com/tenstorrent/vllm", "sha": "b" * 40},
          "code_sha256": "c" * 64, "created_at": "2026-01-01T00:00:00+00:00",
          "tt_model_version": "0.1.0"}
     b.update(over)
@@ -365,12 +367,48 @@ def _card(**over):
     raw = json.loads(json.dumps(BASE))
     raw.update(over)
     m = ContainerManifest.model_validate(raw)
-    return build.render_model_card(m, _built(), ["models/common/"])
+    return build.render_model_card(m, _built())
 
 
-def test_the_card_lists_every_profile_and_marks_the_default():
+def test_a_single_profile_card_states_the_hardware_up_front_with_no_table():
     card = _card()
-    assert "`p150x4`" in card and "*(default)*" in card
+    assert "Runs on **p150x4**" in card
+    assert "--profile" not in card
+    assert "## Serve profiles" not in card
+
+
+def test_a_multi_profile_card_lists_every_profile_and_marks_the_default():
+    profiles = [
+        {"name": "p150x2", "hardware": "p150x2", "mesh_device": "P150x2",
+         "max_num_seqs": 8, "max_model_len": 65536},
+        {"name": "p150x4", "hardware": "p150x4", "mesh_device": "P150x4",
+         "max_num_seqs": 32, "max_model_len": 131072},
+    ]
+    card = _card(serve_profiles=profiles, default_profile="p150x4")
+    assert "`p150x2`" in card and "`p150x4` *(default)*" in card
+    assert "--profile" in card
+    assert "Runs on **p150x2** or **p150x4**" in card
+
+
+def test_the_card_names_the_tool_and_schema_and_links_the_repo():
+    card = _card()
+    assert "https://github.com/tenstorrent/tt-model-manager" in card
+    assert "manifest schema 5.1" in card
+    assert "0.1.0" in card  # the tt-model version that built it
+
+
+def test_the_card_leads_with_the_authors_description():
+    card = _card(card={"description": "Intended for agentic coding."})
+    assert card.index("Intended for agentic coding.") < card.index("## Quickstart")
+
+
+def test_the_quickstart_sets_expectations():
+    card = _card()
+    assert "tt-model pull  you/my-model --with-weights" in card
+    assert "`pull --with-weights` downloads the Docker image" in card
+    assert "tt-model serve" in card
+    assert "several minutes" in card
+    assert "Application startup complete" in card
 
 
 def test_the_card_pins_provenance():
@@ -383,16 +421,67 @@ def test_the_card_flags_a_dirty_build():
 
     m = ContainerManifest.model_validate(json.loads(json.dumps(BASE)))
     card = build.render_model_card(
-        m, _built(tt_metal={"sha": "a" * 40, "dirty": True}), [])
+        m, _built(tt_metal={"sha": "a" * 40, "dirty": True}))
     assert "dirty tree" in card
 
 
 def test_the_card_says_weights_are_not_baked_in():
-    assert "never baked into the image" in _card()
+    assert "not in the image" in _card()
 
 
 def test_the_card_includes_the_authors_quickstart():
     assert "point it here" in _card(card={"quickstart": "point it here"}).lower()
+
+
+def test_the_card_never_shows_the_internal_kind_slug_as_prose():
+    card = _card()
+    assert "serving stack" not in card
+    assert "**serving stack**" not in card
+
+
+def test_the_card_deep_links_every_pushed_pin():
+    from tt_kernel.container_manifest import ContainerManifest
+
+    m = ContainerManifest.model_validate(json.loads(json.dumps(BASE)))
+    built = _built(
+        tt_metal={"sha": "a" * 40, "dirty": False, "pushed": True,
+                  "remote": "git@github.com:tenstorrent/tt-metal.git"},
+        plugin={"sha": "d" * 40,
+                "repo": "https://github.com/tenstorrent/vllm-tt-plugin"},
+        vllm=None,  # no built entry -> the row falls back to runtime.vllm.version
+    )
+    card = build.render_model_card(m, built)
+    # ssh remotes are normalized to browsable https commit URLs
+    assert f"https://github.com/tenstorrent/tt-metal/commit/{'a' * 40}" in card
+    assert f"https://github.com/tenstorrent/vllm-tt-plugin/commit/{'d' * 40}" in card
+    # a released vLLM links to the actual release, and the plugin is named officially
+    assert "https://github.com/vllm-project/vllm/releases/tag/v0.24.0" in card
+    assert "vllm-tt-plugin" in card
+    assert "| plugin |" not in card
+
+
+def test_a_commit_that_is_not_public_is_not_shown_at_all():
+    from tt_kernel.container_manifest import ContainerManifest
+
+    m = ContainerManifest.model_validate(json.loads(json.dumps(BASE)))
+    built = _built(
+        tt_metal={"sha": "a" * 40, "dirty": False, "pushed": False,
+                  "remote": "https://github.com/tenstorrent/tt-metal"},
+        plugin={"sha": "d" * 40, "path": "/home/me/vllm-tt-plugin", "dirty": True},
+    )
+    card = build.render_model_card(m, built)
+    # not the sha, not a link to it — the cell says the commit is unpublished instead
+    assert "a" * 40 not in card
+    assert "d" * 40 not in card
+    assert "commit not published" in card
+    assert "dirty tree" in card
+
+
+def test_the_card_has_no_shipped_code_listing_and_no_what_is_inside():
+    card = _card()
+    assert "Shipped code" not in card
+    assert "What is inside" not in card
+    assert "byte-identical" in card  # the fact moved into Provenance
 
 
 # ------------------------------------------------------------------ interrupt guard
@@ -832,6 +921,25 @@ def test_the_remote_and_branch_are_recorded_for_a_local_checkout(tmp_path, monke
     assert rec["branch"] == "my/fork-branch"
 
 
+def test_the_tracking_fork_is_recorded_when_it_contains_head(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    fork = tmp_path / "fork.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(fork)], check=True)
+    subprocess.run(
+        ["git", "-C", str(metal), "remote", "add", "origin", "https://github.com/upstream/tt-metal.git"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(metal), "remote", "add", "fork", str(fork)], check=True)
+    subprocess.run(["git", "-C", str(metal), "checkout", "-qb", "my/fork-branch"], check=True)
+    subprocess.run(["git", "-C", str(metal), "push", "-qu", "fork", "HEAD"], check=True)
+
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    rec = staged.built["tt_metal"]
+    assert rec["pushed"] is True
+    assert rec["remote"] == str(fork)
+
+
 def test_an_unpushed_commit_is_recorded_as_not_pushed(tmp_path, monkeypatch):
     """Packaging local work stays allowed — it is the hermetic default — but a manifest
     saying "built from <sha>" must not imply anyone can obtain that commit."""
@@ -1016,3 +1124,87 @@ def test_the_source_commits_are_passed_as_build_args(tmp_path, monkeypatch):
     # checkout has one, this fixture does not. Passed through either way, never None.
     assert staged.build_args["MODEL_TT_METAL_DESCRIBE"] == (
         staged.built["tt_metal"]["describe"] or "")
+
+
+# ------------------------------------------------ the card must not assume a vLLM stack
+#
+# The quickstart paragraph used to hardcode "an OpenAI-compatible server" for every kind.
+# A diffusion transformer has no tokens and no KV cache, so there is no completions API to
+# be compatible with -- the server is the model's own ASGI app. Telling a FLUX.2 consumer
+# to point an OpenAI client at it is a wrong instruction shipped to every such model.
+
+
+def _dit_manifest():
+    from tt_kernel.container_manifest import ContainerManifest
+
+    raw = json.loads(json.dumps(BASE))
+    raw["kind"] = "tt-dit-server"
+    raw["runtime"] = {"app": "models.tt_dit.server.flux2.app:app"}
+    raw.pop("serve_profiles", None)
+    raw.pop("default_profile", None)
+    raw["serve"] = {"hardware": "p150x4", "mesh_device": "P150x4", "port": 8000}
+    return ContainerManifest.model_validate(raw)
+
+
+def test_a_diffusion_card_does_not_claim_an_openai_api():
+    card = build.render_model_card(_dit_manifest(), _built())
+    assert "OpenAI" not in card
+    assert "the model's own HTTP server" in card
+
+
+def test_a_vllm_card_still_says_openai_compatible():
+    assert "an OpenAI-compatible server" in _card()
+
+
+def test_every_kind_describes_the_server_it_starts():
+    """The card reads SERVER_DESC off the launcher, so a new kind that forgets it would
+    render an AttributeError rather than a card."""
+    from tt_kernel.launchers import KINDS
+
+    for name, launcher in KINDS.items():
+        desc = getattr(launcher, "SERVER_DESC", None)
+        assert desc, f"kind {name} has no SERVER_DESC"
+        assert not desc.endswith("."), f"{name}: SERVER_DESC is a clause, not a sentence"
+
+
+def test_the_card_documents_the_port_serve_opens_not_the_manifests_bind_port():
+    """BASE pins serve.port: 8000, which is what the image binds under bare `docker run`.
+    `tt-model serve` -- the command the card prints -- ignores it and opens DEFAULT_PORT,
+    so rendering the manifest port would document an endpoint those commands never open."""
+    from tt_kernel.manifest import DEFAULT_PORT
+
+    card = _card()
+    assert f"port {DEFAULT_PORT}" in card
+    assert "port 8000" not in card
+    assert "next free port" in card
+
+
+def test_the_card_does_not_keep_its_own_copy_of_the_default_port():
+    """The default moved 8000 -> 20000 in manifest.DEFAULT_PORT and the card was the one
+    site left behind, publishing a port consumers could not reach. It must read the
+    constant, not restate it."""
+    import json as _json
+
+    from tt_kernel.container_manifest import ContainerManifest
+    from tt_kernel.manifest import DEFAULT_PORT
+
+    raw = _json.loads(_json.dumps(BASE))
+    raw["serve"].pop("port", None)
+    card = build.render_model_card(ContainerManifest.model_validate(raw), _built())
+    assert f"port {DEFAULT_PORT}" in card
+    assert "port 8000" not in card
+    # serve walks upward past a busy port, so an unpinned port must not read as a promise
+    assert "next free port" in card
+
+
+def test_the_manifest_bind_port_never_reaches_the_card():
+    """Superseded an earlier test that asserted a pinned port was stated verbatim -- that
+    encoded the bug: it documented 8000 while serve opened 20000."""
+    import json as _json
+
+    from tt_kernel.container_manifest import ContainerManifest
+
+    raw = _json.loads(_json.dumps(BASE))
+    raw["serve"]["port"] = 9999
+    card = build.render_model_card(ContainerManifest.model_validate(raw), _built())
+    assert "9999" not in card
