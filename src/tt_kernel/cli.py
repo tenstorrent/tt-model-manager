@@ -221,36 +221,29 @@ def _print_report(report: CompatibilityReport) -> None:
                      marker=" ", style=style)
 
 
-def _ensure_repo(repo_id: str, private: Optional[bool], *, publish: bool = False) -> None:
+def _ensure_repo(repo_id: str, private: Optional[bool]) -> None:
     """Make sure ``repo_id`` exists, without ever changing visibility as a side effect.
 
-    ``private`` is deliberately tri-state:
+    ``private`` is tri-state:
 
-    - ``None``  — the user said nothing. A push is a *content* operation, so an existing
-      repo keeps whatever visibility it has. (Previously the flag was a plain ``bool``
-      defaulting to ``False`` and ``set_visibility`` ran on every push, so a bare
-      ``tt-kernel push you/private-model`` silently published a private repo.)
-    - ``True`` / ``False`` — the user passed ``--private`` / ``--public`` and means it. We
-      honour it and print what changed, so a visibility flip is never invisible.
+    - ``None``  — the user said nothing. A NEW repo is created **private** (tt-model's safe
+      default: a bundle can point at proprietary weights, so we never make something public by
+      omission). An EXISTING repo keeps whatever visibility it already has — a push is a
+      *content* operation and must never silently flip visibility.
+    - ``True`` / ``False`` — the user passed ``--private`` / ``--public`` and means it. We honour
+      it and print what changed, so a visibility flip is never invisible.
 
-    At *creation* time there is no prior state to preserve, so the flag (or the documented
-    public default) simply becomes the new repo's visibility.
+    Listing in the community catalog is a separate axis, gated by the callers (``--publish``
+    requires an explicit ``--public``), so this function never reasons about the catalog.
     """
+    private_on_create = True if private is None else private  # private by default
     if not hub.repo_exists(repo_id):
-        typer.echo(f"Creating repo {repo_id} ({'private' if private else 'public'})")
-        hub.create_repo(repo_id, private=bool(private))
+        typer.echo(f"Creating repo {repo_id} ({'private' if private_on_create else 'public'})")
+        hub.create_repo(repo_id, private=private_on_create)
         return
 
     # The repo already exists and belongs to whoever set its visibility.
     if private is None:
-        # A catalog listing is public by definition. Rather than quietly flipping the repo
-        # (the exact bug this function exists to prevent), make the user say --public.
-        if publish and _is_private_or_unknown(repo_id):
-            raise _err(
-                f"{repo_id} already exists and is private, but --publish lists it in the "
-                "public community catalog. Re-run with --public to make it public (tt-kernel "
-                "will not change visibility unless you ask), or drop --publish to push privately."
-            )
         typer.echo(f"Repo {repo_id} exists; leaving its visibility unchanged")
         return
 
@@ -261,15 +254,6 @@ def _ensure_repo(repo_id: str, private: Optional[bool], *, publish: bool = False
     hub.set_visibility(repo_id, private=private)
     typer.secho(f"! Changed visibility of {repo_id} to {want} (as requested)",
                 fg=typer.colors.YELLOW)
-
-
-def _is_private_or_unknown(repo_id: str) -> bool:
-    """True unless we can positively confirm the repo is public.
-
-    Used only to gate ``--publish``: if the Hub will not tell us, err toward asking the user
-    instead of assuming a repo is safe to list.
-    """
-    return hub.is_private_safe(repo_id) is not False
 
 
 # -------------------------------------------------------------------------- start
@@ -471,8 +455,12 @@ def package(
     out: Optional[str] = typer.Option(
         None, "--out", help="Stage the running folder here (kept even without a push target)."
     ),
-    private: bool = typer.Option(True, "--private/--public", help="Repo visibility when pushing."),
-    publish: bool = typer.Option(False, "--publish", help="List in the community catalog (requires --public)."),
+    private: Optional[bool] = typer.Option(
+        None, "--private/--public", help="Repo visibility, applied when the repo is CREATED "
+        "(default: private); an existing repo is left as-is unless you pass the flag."),
+    publish: bool = typer.Option(
+        False, "--publish", help="Also list the pushed repo in the community catalog. Implies --public "
+        "(the catalog is a public index); use --public alone to make the repo public but NOT listed."),
 ) -> None:
     """Package what's on your box into ONE self-contained (v5) bundle and (optionally) push it.
 
@@ -498,8 +486,12 @@ def package(
             "(or pass --container <tt-model.yaml> to build a container package instead)."
         )
 
-    if publish and private:
-        raise _err("--publish requires --public (a catalog listing is public by definition).")
+    if publish and private is True:  # explicit --private contradicts --publish
+        raise _err("--publish and --private conflict: a catalog listing is public by definition. "
+                   "Use --publish alone (it makes the repo public), or --public without --publish "
+                   "to make the repo public but NOT listed.")
+    if publish:
+        private = False  # --publish implies --public: a listed repo is public by definition
     if repo_id is None and not out:
         raise _err("Nothing to do: pass a target repo_id to push, or --out to stage locally.")
 
@@ -614,9 +606,7 @@ def package(
         tags.append(mesh_topology.lower())
     if publish:
         tags.append(TT_MODEL_CATALOG_TAG)
-    typer.echo(f"Creating repo {repo_id} (private={private})")
-    hub.create_repo(repo_id, private=private)
-    hub.set_visibility(repo_id, private=private)
+    _ensure_repo(repo_id, private)  # private by default; never flips an existing repo silently
     total_mb = sum(w.size for w in manifest.bundled.wheels) / 1e6
     typer.echo(f"Uploading bundle (~{total_mb:.0f} MB of wheels via LFS) ...")
     hub.push_folder(repo_id, upload_from, commit_message=f"tt-model package {manifest.name} (self-contained)")
@@ -666,8 +656,12 @@ def package_thin(
     env: Optional[List[str]] = typer.Option(None, "--env", help="KEY=VALUE serving env (repeatable)."),
     name: Optional[str] = typer.Option(None, "--name"),
     out: Optional[str] = typer.Option(None, "--out", help="Stage the bundle here (kept even without a push target)."),
-    private: bool = typer.Option(True, "--private/--public", help="Repo visibility when pushing."),
-    publish: bool = typer.Option(False, "--publish", help="List in the community catalog (requires --public)."),
+    private: Optional[bool] = typer.Option(
+        None, "--private/--public", help="Repo visibility, applied when the repo is CREATED "
+        "(default: private); an existing repo is left as-is unless you pass the flag."),
+    publish: bool = typer.Option(
+        False, "--publish", help="Also list the pushed repo in the community catalog. Implies --public "
+        "(the catalog is a public index); use --public alone to make the repo public but NOT listed."),
 ) -> None:
     """Package a v6 THIN bundle (issue #29): ship ``model.py`` + pip dependency pins
     (ttnn / TTTv2 / models wheel) + optional ``generic_op`` wheels. The per-model venv is built from
@@ -678,8 +672,12 @@ def package_thin(
     real; until then the generated requirements.txt carries TODO pins for those two (ttnn already
     resolves from PyPI).
     """
-    if publish and private:
-        raise _err("--publish requires --public (a catalog listing is public by definition).")
+    if publish and private is True:  # explicit --private contradicts --publish
+        raise _err("--publish and --private conflict: a catalog listing is public by definition. "
+                   "Use --publish alone (it makes the repo public), or --public without --publish "
+                   "to make the repo public but NOT listed.")
+    if publish:
+        private = False  # --publish implies --public: a listed repo is public by definition
     if repo_id is None and not out:
         raise _err("Nothing to do: pass a repo_id to push, or --out to stage locally.")
     model_path = Path(model_py).expanduser()
@@ -756,9 +754,7 @@ def package_thin(
         tags.append(mesh_topology.lower())
     if publish:
         tags.append(TT_MODEL_CATALOG_TAG)
-    typer.echo(f"Creating repo {repo_id} (private={private})")
-    hub.create_repo(repo_id, private=private)
-    hub.set_visibility(repo_id, private=private)
+    _ensure_repo(repo_id, private)  # private by default; never flips an existing repo silently
     hub.push_folder(repo_id, staged, commit_message=f"tt-model package-thin {manifest.name} (v6 thin)")
     try:
         hub.tag_repo(repo_id, tags)
@@ -1456,25 +1452,31 @@ def search(
 # ----------------------------------------------------------------------- publish
 @app.command(rich_help_panel="Publish models")
 def publish(
-    repo_id: str = typer.Argument(..., help="An already-pushed public bundle as namespace/name."),
+    repo_id: str = typer.Argument(..., help="An already-pushed bundle as namespace/name."),
 ) -> None:
-    """List an existing public bundle in the community catalog (opt-in).
+    """List an existing bundle in the community catalog (opt-in).
 
-    Use this to add a bundle you pushed earlier without ``--publish``. The catalog only
-    ever holds a pointer to your public HF repo; it stores none of your content, and your
-    repo stays entirely under your governance. Delist with ``tt-model unpublish``.
+    Use this to add a bundle you pushed earlier without ``--publish``. The catalog is a public
+    index, so publishing makes the repo public first: if it is private, this makes it public
+    (announced) and then lists it. The catalog only ever holds a pointer to your public HF repo;
+    it stores none of your content, and your repo stays under your governance. Delist with
+    ``tt-model unpublish`` (delisting does not make the repo private again).
     """
     try:
-        if hub.is_private(repo_id):
-            raise _err(f"{repo_id} is private; the catalog is public. Make it public first "
-                       "(`tt-model push ... --public`) before listing.")
-    except typer.Exit:
-        raise
+        was_private = hub.is_private(repo_id)
     except Exception as exc:  # noqa: BLE001
         raise _err(f"Could not read {repo_id} on the Hub: {exc}")
+    if was_private:
+        # The catalog is public by definition; publishing implies public (same as the --publish
+        # flag on push). Make the visibility change loud — it is never a silent side effect.
+        typer.secho(
+            f"! {repo_id} is private — making it public so it can be listed in the public catalog.",
+            fg=typer.colors.YELLOW,
+        )
+        hub.set_visibility(repo_id, private=False)
     hub.set_catalog_listing(repo_id, listed=True)
     typer.secho(
-        f"✓ Listed {repo_id} in the community catalog (pointer only; content stays yours). "
+        f"✓ Listed {repo_id} in the community catalog (public pointer only; content stays yours). "
         f"Delist with `tt-model unpublish {repo_id}`.",
         fg=typer.colors.GREEN,
     )
@@ -1640,13 +1642,13 @@ def push(
         None, "--repo", help="Target repo, overriding the one recorded in the manifest."
     ),
     private: Optional[bool] = typer.Option(
-        None, "--private/--public", help="Repo visibility. Applied when the repo is CREATED. "
-        "For a repo that already exists, passing the flag changes its visibility and says "
-        "so; omitting it leaves visibility exactly as it is."
+        None, "--private/--public", help="Repo visibility. Applied when the repo is CREATED "
+        "(default: private). For a repo that already exists, passing the flag changes its "
+        "visibility and says so; omitting it leaves visibility exactly as it is."
     ),
     publish: bool = typer.Option(
-        False, "--publish", help="Also list the package in the community catalog "
-        "(requires a public repo)."
+        False, "--publish", help="Also list the pushed repo in the community catalog. Implies --public "
+        "(the catalog is a public index); use --public alone to make the repo public but NOT listed."
     ),
 ) -> None:
     """Publish a CONTAINER (v5.1) package directory to the Hub.
@@ -1659,8 +1661,12 @@ def push(
     ``--publish`` adds the community-catalog tag after the upload, exactly as
     ``tt-model publish`` would. The catalog only ever holds a pointer to your public repo.
     """
-    if publish and private:
-        raise _err("--publish requires --public (a catalog listing is public by definition).")
+    if publish and private is True:  # explicit --private contradicts --publish
+        raise _err("--publish and --private conflict: a catalog listing is public by definition. "
+                   "Use --publish alone (it makes the repo public), or --public without --publish "
+                   "to make the repo public but NOT listed.")
+    if publish:
+        private = False  # --publish implies --public: a listed repo is public by definition
     from . import container_cli
 
     out = Path(staged_dir).expanduser()
@@ -1675,7 +1681,7 @@ def push(
     target = repo or (cmani.container.built or {}).get("repo")
     if not target:
         raise _err(f"{out} records no target repo; pass --repo namespace/name.")
-    _ensure_repo(target, private, publish=publish)
+    _ensure_repo(target, private)
     try:
         container_cli.push_container(str(out), cmani, target)
     except container_cli.ContainerCliError as e:

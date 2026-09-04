@@ -16,17 +16,22 @@ from tt_kernel import TT_MODEL_CATALOG_TAG, cli, hub
 runner = CliRunner()
 
 
-def test_publish_requires_public(monkeypatch):
-    """`publish` refuses a private repo (the catalog is public by definition)."""
-    calls = []
+def test_publish_makes_a_private_repo_public_then_lists(monkeypatch):
+    """`publish` implies public: a private repo is made public (announced) and then listed —
+    publishing is the public+register step in one, not a refusal."""
+    listings = []
+    flipped = []
     monkeypatch.setattr(hub, "is_private", lambda repo_id: True)
+    monkeypatch.setattr(hub, "set_visibility",
+                        lambda repo_id, private: flipped.append((repo_id, private)))
     monkeypatch.setattr(hub, "set_catalog_listing",
-                        lambda repo_id, listed: calls.append((repo_id, listed)))
+                        lambda repo_id, listed: listings.append((repo_id, listed)))
 
     res = runner.invoke(cli.app, ["publish", "me/private-bundle"])
-    assert res.exit_code == 1
-    assert "private" in res.output.lower()
-    assert calls == []  # nothing was listed
+    assert res.exit_code == 0, res.output
+    assert flipped == [("me/private-bundle", False)]  # made public first
+    assert listings == [("me/private-bundle", True)]  # then listed
+    assert "public" in res.output.lower()             # and the flip was announced
 
 
 def test_publish_lists_public_repo(monkeypatch):
