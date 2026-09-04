@@ -232,10 +232,14 @@ def test_stage_package_dangling_symlink_and_cache_excludes(tmp_path):
 
 def test_stage_package_materialized_escaping_dir_is_filtered(tmp_path):
     """Regression: materializing a symlink that escapes the tree and points at a real directory
-    must apply the SAME exclude filter as the initial staging copy, anchored at that dir's own
-    root. Otherwise the materialization re-imports exactly the junk the exclude list removes —
-    empirically, an escaping `build -> <outside dir>` shipped `.git/HEAD`, `__pycache__/junk.pyc`,
-    and `python_env/huge.bin`. (Pre-`symlinks=True`, the followed link was filtered too.)
+    must still drop junk at every depth (VCS, byte-caches, ...) — empirically, an escaping link
+    shipped `.git/HEAD` and `__pycache__/junk.pyc`. (Pre-`symlinks=True`, the followed link was
+    filtered too.)
+
+    It must NOT apply the metal-tree's ROOT-ONLY excludes (`python_env`/`build`/`tt_cache`/...) to
+    the materialized target: those assume a metal-checkout layout that an arbitrary symlink target
+    doesn't share, and applying them anyway silently drops real content — asserted below via a
+    `python_env` dir at the materialized root that must ship, not vanish.
     """
     wheels = tmp_path / "in_wheels"
     wheels.mkdir()
@@ -249,11 +253,10 @@ def test_stage_package_materialized_escaping_dir_is_filtered(tmp_path):
     (outside / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     (outside / "__pycache__").mkdir()
     (outside / "__pycache__" / "junk.pyc").write_bytes(b"\x00junk")
-    (outside / "python_env").mkdir()  # a ROOT-ONLY exclude, at the materialized root
-    (outside / "python_env" / "huge.bin").write_bytes(b"x" * 64)
-    # A nested python_env DEEPER than the materialized root must survive (same root-anchoring).
-    (outside / "pkg" / "python_env").mkdir(parents=True)
-    (outside / "pkg" / "python_env" / "keep.txt").write_text("nested, kept\n")
+    # `python_env` sits at the materialized root too, but — unlike the metal tree itself — this is
+    # NOT a metal checkout, so the root-only exclude must NOT apply: it is real content and ships.
+    (outside / "python_env").mkdir()
+    (outside / "python_env" / "real_config.txt").write_text("kept: not a metal tree\n")
 
     metal = tmp_path / "metal_src"
     metal.mkdir()
@@ -273,9 +276,50 @@ def test_stage_package_materialized_escaping_dir_is_filtered(tmp_path):
     # The junk the exclude list exists to remove must NOT have been re-imported:
     assert not (mat / ".git").exists()          # _METAL_IGNORE_ANYWHERE (VCS)
     assert not (mat / "__pycache__").exists()   # _METAL_IGNORE_ANYWHERE (byte-cache)
-    assert not (mat / "python_env").exists()    # _METAL_IGNORE_ROOT_ONLY at the materialized root
-    # ...but a python_env nested below the materialized root is kept (root-anchoring, not a blanket drop).
-    assert (mat / "pkg" / "python_env" / "keep.txt").read_text() == "nested, kept\n"
+    # A materialized target isn't a metal checkout: root-only excludes don't apply, so this ships.
+    assert (mat / "python_env" / "real_config.txt").read_text() == "kept: not a metal tree\n"
+
+
+def test_stage_package_materialized_junk_named_target_is_dropped(tmp_path):
+    """Security regression: a symlink under an escaping directory, itself named innocuously but
+    resolving DIRECTLY to a junk-named directory (e.g. a `.git`), must not be materialized.
+
+    `copytree`'s `ignore=` only ever filters the *children* of a directory it walks — it never
+    checks the root of the copy against the exclude patterns. Without a check at the point of
+    materialization, `hist -> /outside/.git` survives the initial filter (its own name doesn't
+    match `.git`), and copying its target as the root of a fresh `copytree` would ship the `.git`
+    directory's contents whole — verified here with a fake credential in `.git/config`.
+    """
+    wheels = tmp_path / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
+
+    outside = tmp_path / "outside_repo"
+    outside.mkdir()
+    (outside / ".git").mkdir()
+    (outside / ".git" / "config").write_text("[credentials]\ntoken = super-secret\n")
+    (outside / "pkg").mkdir()
+    # Absolute link, named "hist" (not ".git") -> the real .git dir. Its own name isn't excluded.
+    (outside / "pkg" / "hist").symlink_to((outside / ".git").resolve(), target_is_directory=True)
+    (outside / "model.py").write_text("# real model code\n")
+
+    metal = tmp_path / "metal_src"
+    metal.mkdir()
+    (metal / "requirements.txt").write_text("torch==2.11.0\n")
+    (metal / "escapes").symlink_to(outside)
+
+    vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
+    staged = tmp_path / "staged"
+    packaging.stage_package(
+        staged, name="m", arch="blackhole", ttnn_wheel=ttnn,
+        metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
+    )
+
+    mat = staged / "metal" / "escapes"
+    assert (mat / "model.py").is_file()  # real content still ships
+    # The .git reached via a non-".git"-named symlink must not have been materialized at all.
+    assert not (mat / "pkg" / "hist").exists()
+    assert not any(p.name == "config" for p in mat.rglob("*"))
 
 
 def test_stage_package_special_file_raises_styled_error(tmp_path):

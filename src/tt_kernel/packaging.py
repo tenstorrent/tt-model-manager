@@ -93,14 +93,14 @@ _METAL_IGNORE_ROOT_ONLY = frozenset(
 
 
 def _metal_ignore(anchor: Path):
-    """A ``copytree`` ``ignore`` callable that drops junk at every depth (``_METAL_IGNORE_ANYWHERE``)
-    plus the regenerable root-only caches/build output (``_METAL_IGNORE_ROOT_ONLY``) at ``anchor``
-    — the top of the tree being copied — mirroring tt-metal's root-anchored ``.gitignore``.
+    """A ``copytree`` ``ignore`` callable for staging the metal tree itself: drops junk at every
+    depth (``_METAL_IGNORE_ANYWHERE``) plus the regenerable root-only caches/build output
+    (``_METAL_IGNORE_ROOT_ONLY``) at ``anchor`` — the top of the tree being copied — mirroring
+    tt-metal's root-anchored ``.gitignore``.
 
-    The same filter is used for the initial metal-tree copy AND for materializing a symlink that
-    escapes the tree: an escaping ``build -> /outside`` would otherwise re-import that outside dir's
-    ``.git`` / ``__pycache__`` / ``python_env`` / build output verbatim — exactly what the exclude
-    list exists to remove (and what the pre-``symlinks=True`` copy filtered via the followed link).
+    Only used for the initial metal-tree copy. A materialized escaping symlink is filtered by
+    ``_METAL_IGNORE_ANYWHERE`` alone (see ``_normalize_staged_symlinks``) — its target usually
+    isn't another metal checkout, so the root-only excludes don't apply there.
     """
     anchor = anchor.resolve()
 
@@ -111,6 +111,19 @@ def _metal_ignore(anchor: Path):
         return ignored
 
     return _ignore
+
+
+def _is_junk_basename(name: str) -> bool:
+    """Whether ``name`` alone (VCS dirs, byte-caches, venvs, ...) matches ``_METAL_IGNORE_ANYWHERE``.
+
+    ``copytree``'s ``ignore=`` only ever filters *children* of a directory it is walking — it never
+    checks the root of the copy against the patterns. That leaves a gap when a symlink itself named
+    something innocuous (e.g. ``hist``) resolves to a junk-named directory (e.g. ``.git``): the
+    symlink survives the initial filter by name, and if it were then handed to ``copytree`` as the
+    root of a fresh copy, the junk directory's own name would never be checked and its contents
+    would ship whole. Callers must check this before materializing a symlink target.
+    """
+    return name in _METAL_IGNORE_ANYWHERE(None, [name])
 
 
 def _normalize_staged_symlinks(root: Path) -> None:
@@ -142,12 +155,20 @@ def _normalize_staged_symlinks(root: Path) -> None:
         except ValueError:
             pass  # points outside -> materialize below so the host path never ships
         link.unlink()
+        if _is_junk_basename(target.name):
+            # The escaping link's target is ITSELF junk (a `.git`, `__pycache__`, a venv, ...),
+            # reached under a non-junk name (e.g. `hist -> /outside/.git`). copytree's ignore=
+            # never checks the root of a copy against the patterns, only its children, so handing
+            # this straight to copytree would ship the junk directory's contents whole. Drop it,
+            # exactly as if it had appeared as a normal excluded child.
+            return
         if target.is_dir():
-            # Filter the materialized copy the same way the initial staging copy is filtered,
-            # anchored at THIS target's root — otherwise an escaping dir re-imports the very
-            # caches/VCS/build output the exclude list removes (the regression the copytree with
-            # no ``ignore=`` introduced when it stopped following the link through the main filter).
-            shutil.copytree(target, link, symlinks=True, ignore=_metal_ignore(target))
+            # Filter the materialized copy for junk at every depth (VCS, byte-caches, venvs, ...).
+            # NOT the root-only build/python_env/tt_cache excludes: those are metal-tree-specific
+            # assumptions (mirroring tt-metal's own root-anchored .gitignore) that don't hold for
+            # an arbitrary escaping target, which usually isn't another metal checkout — applying
+            # them here would silently drop real shipped content (e.g. a compiled build/kernel.so).
+            shutil.copytree(target, link, symlinks=True, ignore=_METAL_IGNORE_ANYWHERE)
             _walk(link)  # the fresh copy may itself carry links that escape the tree
         else:
             shutil.copy2(target, link)
