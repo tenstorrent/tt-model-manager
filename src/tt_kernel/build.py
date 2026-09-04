@@ -918,6 +918,7 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     """
     from . import TT_MODEL_TAG
     from .launchers import launcher_for
+    from .manifest import DEFAULT_PORT
 
     tt_metal = built.get("tt_metal") or {}
     tags = sorted({TT_MODEL_TAG, m.arch, m.kind, "tt-model-container"})
@@ -967,7 +968,10 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         f"[`{m.weights_repo}`](https://huggingface.co/{m.weights_repo}) weights"
         + (f" at `{m.weights_ref.revision}`" if m.weights_ref.revision else "")
         + " (into your HF cache; they are not in the image). `serve` starts "
-        f"{launcher_for(m.kind).SERVER_DESC} on port {m.serve.port or 8000}; the first "
+        f"{launcher_for(m.kind).SERVER_DESC} on port "
+        f"{m.serve.port or DEFAULT_PORT}"
+        + ("" if m.serve.port else " (or the next free port, if that one is busy)")
+        + "; the first "
         "start compiles kernels for your device, which takes several minutes, and the "
         f"server is ready when it logs `{launcher_for(m.kind).READY_LINE}`.",
         "",

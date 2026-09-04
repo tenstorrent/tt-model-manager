@@ -1110,3 +1110,26 @@ def test_every_kind_describes_the_server_it_starts():
         desc = getattr(launcher, "SERVER_DESC", None)
         assert desc, f"kind {name} has no SERVER_DESC"
         assert not desc.endswith("."), f"{name}: SERVER_DESC is a clause, not a sentence"
+
+
+def test_the_card_does_not_keep_its_own_copy_of_the_default_port():
+    """The default moved 8000 -> 20000 in manifest.DEFAULT_PORT and the card was the one
+    site left behind, publishing a port consumers could not reach. It must read the
+    constant, not restate it."""
+    import json as _json
+
+    from tt_kernel.container_manifest import ContainerManifest
+    from tt_kernel.manifest import DEFAULT_PORT
+
+    raw = _json.loads(_json.dumps(BASE))
+    raw["serve"].pop("port", None)
+    card = build.render_model_card(ContainerManifest.model_validate(raw), _built())
+    assert f"port {DEFAULT_PORT}" in card
+    assert "port 8000" not in card
+    # serve walks upward past a busy port, so an unpinned port must not read as a promise
+    assert "next free port" in card
+
+
+def test_an_explicit_port_is_stated_without_the_walk_caveat():
+    card = _card()  # BASE pins serve.port
+    assert "next free port" not in card
