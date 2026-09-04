@@ -438,9 +438,13 @@ TTNN_DIR="$("$PYBIN" -c 'import importlib.util,os;print(os.path.dirname(importli
 # _ttnncpp.so lives in ttnn.libs/ for an auditwheel-repaired (portable) wheel, or build/lib/ for a
 # raw one; preload it to avoid the glibc "static TLS block" error on late dlopen.
 # Prefer the auditwheel-vendored copy in *.libs/ (that's the one _ttnn.so actually loads via
-# RPATH); fall back to build/lib for a raw (unrepaired) wheel.
-LD_PRELOAD="$(ls "$TTNN_DIR"/../*.libs/_ttnncpp*.so 2>/dev/null | head -1)"
-[ -n "$LD_PRELOAD" ] || LD_PRELOAD="$(ls "$TTNN_DIR"/build/lib/_ttnncpp*.so 2>/dev/null | head -1)"
+# RPATH); fall back to build/lib for a raw (unrepaired) wheel — e.g. the plain `ttnn` PyPI wheel
+# a v6 thin bundle installs, which isn't auditwheel-repaired at all.
+# `|| true` on each probe: under `set -e -o pipefail`, a `ls <no-match> | head -1` pipe fails
+# (pipefail surfaces ls's nonzero exit) and set -e would kill the script on THIS line, before the
+# fallback below — or the deliberate `:?` error a few lines down — ever runs.
+LD_PRELOAD="$(ls "$TTNN_DIR"/../*.libs/_ttnncpp*.so 2>/dev/null | head -1)" || true
+[ -n "$LD_PRELOAD" ] || LD_PRELOAD="$(ls "$TTNN_DIR"/build/lib/_ttnncpp*.so 2>/dev/null | head -1)" || true
 export LD_PRELOAD="${{LD_PRELOAD:?could not locate _ttnncpp.so in the ttnn install}}"
 export TT_METAL_HOME="$TTNN_DIR"
 # EXTRA_MODELS_DIR is a PARENT of per-model bundle folders; the plugin scans its children for

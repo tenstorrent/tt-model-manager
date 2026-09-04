@@ -8,6 +8,7 @@ manifest are asserted.
 
 import json
 import os
+import subprocess
 
 from typer.testing import CliRunner
 
@@ -66,6 +67,31 @@ def test_render_run_sh_no_tool_flags_without_capability():
     """No tool_parser declared => neither flag appears (bare --enable-auto-tool-choice is an error)."""
     run = packaging.render_run_sh(_run_sh_manifest())
     assert "--enable-auto-tool-choice" not in run and "--tool-call-parser" not in run
+
+
+def test_run_sh_ld_preload_fallback_survives_a_raw_unrepaired_wheel(tmp_path):
+    """A plain (non-auditwheel-repaired) ttnn wheel -- e.g. the real PyPI ttnn a v6 thin bundle
+    installs -- has no sibling ../*.libs/_ttnncpp*.so, only build/lib/_ttnncpp.so. Before the
+    fix, the first `ls <no-match> | head -1` pipe failing under `set -e -o pipefail` killed
+    run.sh right there -- before the documented build/lib fallback (or the deliberate `:?` error)
+    ever ran -- silently, with no output, exit code 2. Executes the actual generated snippet
+    under bash rather than asserting on its text, since only real execution catches this class
+    of bug (found by actually running a staged v6 bundle's run.sh against a real PyPI wheel).
+    """
+    run = packaging.render_run_sh(_run_sh_manifest())
+    lines = run.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith('LD_PRELOAD="$(ls'))
+    end = next(i for i, l in enumerate(lines) if "could not locate _ttnncpp.so" in l)
+    snippet = "\n".join(lines[start:end + 1])
+
+    ttnn_dir = tmp_path / "site-packages" / "ttnn"
+    (ttnn_dir / "build" / "lib").mkdir(parents=True)
+    (ttnn_dir / "build" / "lib" / "_ttnncpp.so").write_bytes(b"")
+
+    script = f'set -euo pipefail\nTTNN_DIR="{ttnn_dir}"\n{snippet}\necho "RESOLVED=$LD_PRELOAD"\n'
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, f"LD_PRELOAD fallback died: {result.stdout}{result.stderr}"
+    assert f"RESOLVED={ttnn_dir}/build/lib/_ttnncpp.so" in result.stdout
 
 
 def test_stage_package_layout(tmp_path):
