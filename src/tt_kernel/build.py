@@ -958,11 +958,11 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         "## Quickstart",
         "",
         "```bash",
-        f"tt-model pull  {m.repo}",
+        f"tt-model pull  {m.repo} --with-weights",
         f"tt-model serve {m.repo}",
         "```",
         "",
-        f"`pull` downloads the Docker image and the "
+        f"`pull --with-weights` downloads the Docker image and the "
         f"[`{m.weights_repo}`](https://huggingface.co/{m.weights_repo}) weights"
         + (f" at `{m.weights_ref.revision}`" if m.weights_ref.revision else "")
         + " (into your HF cache; they are not in the image). `serve` starts an "

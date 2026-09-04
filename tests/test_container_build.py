@@ -349,7 +349,9 @@ def test_the_card_leads_with_the_authors_description():
 
 def test_the_quickstart_sets_expectations():
     card = _card()
-    assert "tt-model pull" in card and "tt-model serve" in card
+    assert "tt-model pull  you/my-model --with-weights" in card
+    assert "`pull --with-weights` downloads the Docker image" in card
+    assert "tt-model serve" in card
     assert "several minutes" in card
     assert "Application startup complete" in card
 
