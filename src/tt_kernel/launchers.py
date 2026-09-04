@@ -111,6 +111,11 @@ class VllmPluginLauncher:
     #: the log line whose appearance means the OpenAI server is accepting requests
     READY_LINE = "Application startup complete"
 
+    #: how the card describes what ``serve`` starts. Beside READY_LINE because it is
+    #: the same category of fact -- what this stack exposes -- and the card must not
+    #: hardcode it: a diffusion server is NOT an OpenAI API.
+    SERVER_DESC = "an OpenAI-compatible server"
+
     #: vLLM's PyPI metadata is generated on a CUDA machine; without the CPU index a plain
     #: install resolves the CUDA dependency set (~4 GB of nvidia-* wheels, no device here)
     PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
@@ -365,6 +370,11 @@ class VllmForkLauncher:
 
     #: the log line whose appearance means the OpenAI server is accepting requests
     READY_LINE = "Server ready at"
+
+    #: how the card describes what ``serve`` starts. Beside READY_LINE because it is
+    #: the same category of fact -- what this stack exposes -- and the card must not
+    #: hardcode it: a diffusion server is NOT an OpenAI API.
+    SERVER_DESC = "an OpenAI-compatible server"
 
     #: where the fork checkout lives in both build stages
     FORK_DIR = "/opt/vllm"
@@ -663,6 +673,13 @@ class TtDitServerLauncher:
     #: uvicorn logs this once the ASGI lifespan has finished, which for these servers
     #: means the pipeline is warm and the device is claimed.
     READY_LINE = "Application startup complete"
+
+    #: how the card describes what ``serve`` starts. Beside READY_LINE because it is
+    #: the same category of fact -- what this stack exposes -- and the card must not
+    #: hardcode it: a diffusion server is NOT an OpenAI API.
+    #: A diffusion transformer has no tokens and no KV cache, so there is no chat/
+    #: completions API to be compatible WITH -- the server is the model's own ASGI app.
+    SERVER_DESC = "the model's own HTTP server"
 
     PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
     DEFAULT_PACKAGES = ("fastapi", "uvicorn", "pydantic>=2", "pillow")

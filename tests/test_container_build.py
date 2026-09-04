@@ -1069,3 +1069,44 @@ def test_the_source_commits_are_passed_as_build_args(tmp_path, monkeypatch):
     # checkout has one, this fixture does not. Passed through either way, never None.
     assert staged.build_args["MODEL_TT_METAL_DESCRIBE"] == (
         staged.built["tt_metal"]["describe"] or "")
+
+
+# ------------------------------------------------ the card must not assume a vLLM stack
+#
+# The quickstart paragraph used to hardcode "an OpenAI-compatible server" for every kind.
+# A diffusion transformer has no tokens and no KV cache, so there is no completions API to
+# be compatible with -- the server is the model's own ASGI app. Telling a FLUX.2 consumer
+# to point an OpenAI client at it is a wrong instruction shipped to every such model.
+
+
+def _dit_manifest():
+    from tt_kernel.container_manifest import ContainerManifest
+
+    raw = json.loads(json.dumps(BASE))
+    raw["kind"] = "tt-dit-server"
+    raw["runtime"] = {"app": "models.tt_dit.server.flux2.app:app"}
+    raw.pop("serve_profiles", None)
+    raw.pop("default_profile", None)
+    raw["serve"] = {"hardware": "p150x4", "mesh_device": "P150x4", "port": 8000}
+    return ContainerManifest.model_validate(raw)
+
+
+def test_a_diffusion_card_does_not_claim_an_openai_api():
+    card = build.render_model_card(_dit_manifest(), _built())
+    assert "OpenAI" not in card
+    assert "the model's own HTTP server" in card
+
+
+def test_a_vllm_card_still_says_openai_compatible():
+    assert "an OpenAI-compatible server" in _card()
+
+
+def test_every_kind_describes_the_server_it_starts():
+    """The card reads SERVER_DESC off the launcher, so a new kind that forgets it would
+    render an AttributeError rather than a card."""
+    from tt_kernel.launchers import KINDS
+
+    for name, launcher in KINDS.items():
+        desc = getattr(launcher, "SERVER_DESC", None)
+        assert desc, f"kind {name} has no SERVER_DESC"
+        assert not desc.endswith("."), f"{name}: SERVER_DESC is a clause, not a sentence"

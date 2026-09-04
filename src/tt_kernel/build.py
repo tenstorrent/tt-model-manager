@@ -965,9 +965,9 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         f"`pull --with-weights` downloads the Docker image and the "
         f"[`{m.weights_repo}`](https://huggingface.co/{m.weights_repo}) weights"
         + (f" at `{m.weights_ref.revision}`" if m.weights_ref.revision else "")
-        + " (into your HF cache; they are not in the image). `serve` starts an "
-        f"OpenAI-compatible server on port {m.serve.port or 8000}; the first start "
-        "compiles kernels for your device, which takes several minutes, and the "
+        + " (into your HF cache; they are not in the image). `serve` starts "
+        f"{launcher_for(m.kind).SERVER_DESC} on port {m.serve.port or 8000}; the first "
+        "start compiles kernels for your device, which takes several minutes, and the "
         f"server is ready when it logs `{launcher_for(m.kind).READY_LINE}`.",
         "",
     ]
