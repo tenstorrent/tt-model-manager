@@ -312,7 +312,26 @@ def _access_denied(repo_id: str, text: str) -> dict:
     }
 
 
-def _not_found(repo_id: str, text: str) -> dict:
+def _not_found(repo_id: str, text: str, *, weights: bool = False) -> dict:
+    if weights:
+        # A WEIGHTS 404 is a different situation from a bundle 404, and the bundle wording
+        # is actively wrong here on both halves. "Either the id is wrong" invites the user
+        # to correct something they never typed — the weights id is the package AUTHOR's
+        # pin, read out of the manifest — so a 404 means the pin went stale (renamed or
+        # removed since publication), not that they mistyped. And `tt-model search` ANDs
+        # the TT_MODEL_TAG into every query, so it lists tt-model bundles only and can
+        # never return a plain weights repo: offering it here is advice guaranteed to
+        # come back empty.
+        return {
+            "cause": "no such weights repo, or no access",
+            "detail": f"The Hub returned 404 for {repo_id}. That id is the package author's pin, "
+                      "not something you typed — so either it was renamed or removed since this "
+                      "package was published, or it is private and your token cannot see it.",
+            "evidence": _evidence(text),
+            "actions": [f"open https://huggingface.co/{repo_id}   # does it still exist?",
+                        "tt-model login                     # if it is private",
+                        "otherwise the package's pin is stale — tell its author"],
+        }
     return {
         "cause": "no such bundle, or no access",
         "detail": f"The Hub returned 404 for {repo_id}. Either the id is wrong, or the repo is "
@@ -345,7 +364,7 @@ def classify_repo_id(repo_id: str) -> Optional[dict]:
     }
 
 
-def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
+def classify_hub_error(exc: BaseException, repo_id: str, *, weights: bool = False) -> dict:
     """Map a huggingface_hub exception to ``{cause, detail, evidence, actions}``.
 
     Pure: exception in, dict out. Keys match what ``console.failure_card`` renders.
@@ -354,7 +373,14 @@ def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
     repo" and "private repo you cannot see" — it will not distinguish them for an
     unauthorised caller — so asserting "it does not exist" would be a guess that sends
     the user down the wrong path half the time.
+
+    ``weights=True`` says ``repo_id`` names the model WEIGHTS rather than a tt-model
+    bundle. Same failure taxonomy, different subject: the consumer never typed a weights
+    id (it is the author's pin), a weights repo is not expected to carry a manifest, and
+    ``tt-model search`` cannot find one. Leaving that unsaid is how bundle-shaped advice
+    ends up in front of someone whose bundle downloaded perfectly.
     """
+    subject = "weights repo" if weights else "bundle"
     name = type(exc).__name__
     text = str(exc)
     low = text.lower()
@@ -370,7 +396,7 @@ def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
         return {
             "cause": "cannot reach the Hub",
             "detail": "The request never got a response — this looks like a network or DNS problem, "
-                      "not a missing bundle.",
+                      f"not a missing {subject}.",
             "evidence": _evidence(text),
             "actions": ["check your connection, then re-run",
                         "HF_HUB_OFFLINE=1 tt-model list   # what is already installed"],
@@ -386,7 +412,7 @@ def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
     # RepositoryNotFoundError before the status checks: the Hub answers an unauthenticated
     # caller with 401 for a repo that simply does not exist, and the type is the honest signal.
     if name == "RepositoryNotFoundError" or status == 404:
-        return _not_found(repo_id, text)
+        return _not_found(repo_id, text, weights=weights)
 
     if status == 401:
         return _access_denied(repo_id, text)
@@ -401,9 +427,11 @@ def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
         }
 
     if "not found" in low:
-        return _not_found(repo_id, text)
+        return _not_found(repo_id, text, weights=weights)
 
-    if name == "EntryNotFoundError" or MANIFEST_NAME in text:
+    # Bundles only: a weights repo is never expected to carry a manifest, so telling its
+    # owner it "is not a tt-model bundle" would describe a fault that does not exist.
+    if not weights and (name == "EntryNotFoundError" or MANIFEST_NAME in text):
         return {
             "cause": "not a tt-model bundle",
             "detail": f"The repo exists but has no {MANIFEST_NAME}, so there is nothing for tt-model "

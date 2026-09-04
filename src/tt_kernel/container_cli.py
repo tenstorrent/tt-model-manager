@@ -282,17 +282,28 @@ def _weights_download_failed(ref, exc: BaseException) -> None:
 
     So reuse the same classifier the failure cards use, keyed on the WEIGHTS repo id rather
     than the package id — those are different repos, and the actionable one here is the
-    weights. Rendered as notes rather than a card because the pull has not failed.
+    weights. ``weights=True`` because the taxonomy is shared but the subject is not: the
+    consumer never typed this id, so bundle advice ("the id is wrong", "tt-model search
+    for it") would point them at something they cannot fix and a search that cannot match.
+    Rendered as notes rather than a card because the pull has not failed.
+
+    Defensive by design. This runs INSIDE the ``except`` that keeps the fetch non-fatal, so
+    anything it raises would convert a warning into a failed pull — the opposite of the
+    contract — where the one-line message it replaced could not fail at all. The classifier
+    is pure and total, but that is a property to depend on deliberately, not by accident.
     """
-    d = hub.classify_hub_error(exc, ref.repo_id)
-    console.note(f"weights {ref.repo_id} not downloaded — {d['cause']}: {d['detail']}",
-                 marker="⚠", style="warning")
-    for action in d.get("actions", ()):
-        console.note(action, marker="→")
+    try:
+        d = hub.classify_hub_error(exc, ref.repo_id, weights=True)
+        console.note(f"weights {ref.repo_id} not downloaded — {d['cause']}: {d['detail']}",
+                     marker="⚠", style="warning")
+        for action in d.get("actions", ()):
+            console.note(action, marker="→")
+    except Exception:  # noqa: BLE001
+        console.note(f"weights {getattr(ref, 'repo_id', '?')} not downloaded "
+                     f"({type(exc).__name__})", marker="⚠", style="warning")
     console.note(
         "the image is loaded, so the model will try to fetch them itself at first boot "
         "(slower, inside the container, and no progress is shown here)",
-        marker="○",
     )
 
 

@@ -1475,6 +1475,35 @@ def test_a_failed_weights_fetch_still_says_the_pull_survived(capsys):
     assert "the image is loaded" in capsys.readouterr().out
 
 
+def test_a_weights_404_says_the_pin_is_stale_not_that_you_mistyped(capsys):
+    """The consumer never typed the weights id, so bundle wording sends them after a fix
+    that is not theirs to make — and `tt-model search` filters on TT_MODEL_TAG, so it can
+    never return a plain weights repo. Both would be advice that cannot work."""
+    cls = type("RepositoryNotFoundError", (Exception,), {})
+    exc = cls("404 Client Error.\n\nRepository Not Found for url: x.")
+    exc.response = type("R", (), {"status_code": 404})()
+    container_cli._weights_download_failed(_Ref(), exc)
+    out = capsys.readouterr().out
+    assert "tt-model search" not in out
+    assert "https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct" in out
+    assert "the image is loaded" in out  # still non-fatal
+
+
+def test_reporting_the_failure_can_never_itself_fail_the_pull(capsys):
+    """This runs inside the `except` that keeps a failed fetch non-fatal, so a raise here
+    would turn a warning into a failed pull — the exact opposite of the contract, and
+    something the one-line message it replaced could not do. An exception whose __str__
+    raises stands in for anything the classifier might choke on."""
+    class _Evil(Exception):
+        def __str__(self):
+            raise RuntimeError("boom")
+
+    container_cli._weights_download_failed(_Ref(), _Evil())  # must not raise
+    out = capsys.readouterr().out
+    assert "Qwen/Qwen3-Coder-30B-A3B-Instruct" in out  # still named
+    assert "the image is loaded" in out                # still says the pull survived
+
+
 def test_a_weights_404_is_not_dressed_up_as_a_gate(capsys):
     """The same classifier bug reached here through the shared code path."""
     cls = type("RepositoryNotFoundError", (Exception,), {})
