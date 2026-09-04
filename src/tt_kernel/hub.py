@@ -354,6 +354,11 @@ def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
     repo" and "private repo you cannot see" — it will not distinguish them for an
     unauthorised caller — so asserting "it does not exist" would be a guess that sends
     the user down the wrong path half the time.
+
+    Branches are ordered by the strongest evidence available: exception class first
+    (``GatedRepoError``, ``EntryNotFoundError``), then status code, then message text last.
+    A status code alone can't tell a missing repo from a missing file — both 404 — which is
+    why ``EntryNotFoundError`` is checked before the 404 branch below rather than after it.
     """
     name = type(exc).__name__
     text = str(exc)
@@ -383,13 +388,38 @@ def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
     if name == "GatedRepoError":
         return _access_denied(repo_id, text)
 
+    # Before the repo-level 404 check below: a missing FILE answers 404 too, and
+    # EntryNotFoundError carries that same status code. Checking status == 404 first would
+    # render "this repo ships no manifest" as "no such repo, or no access" — the type is
+    # the only thing that tells the two apart.
+    if name == "EntryNotFoundError" or MANIFEST_NAME in text:
+        return {
+            "cause": "not a tt-model bundle",
+            "detail": f"The repo exists but has no {MANIFEST_NAME}, so there is nothing for tt-model "
+                      "to install.",
+            "evidence": _evidence(text),
+            "actions": ["tt-model search --catalog     # bundles published for tt-model"],
+        }
+
     # RepositoryNotFoundError before the status checks: the Hub answers an unauthenticated
     # caller with 401 for a repo that simply does not exist, and the type is the honest signal.
     if name == "RepositoryNotFoundError" or status == 404:
         return _not_found(repo_id, text)
 
+    # A bare 401 that huggingface_hub did NOT fold into RepositoryNotFoundError above is a
+    # credentials problem ("Invalid credentials in Authorization header"), not a gate. This
+    # used to share the gated card's "accept the terms at <repo url>" action — which sends
+    # someone with an expired or missing token to go click a button that was never the
+    # problem, since there is no gate to accept here at all.
     if status == 401:
-        return _access_denied(repo_id, text)
+        return {
+            "cause": "your token was rejected",
+            "detail": f"The Hub refused this request for {repo_id} with 401. The token is missing, "
+                      "expired, or lacks read scope — this is about credentials, not about the "
+                      "repo's terms.",
+            "evidence": _evidence(text),
+            "actions": ["tt-model login", "hf auth whoami   # who the Hub thinks you are"],
+        }
 
     if status == 403:
         return {
@@ -402,15 +432,6 @@ def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
 
     if "not found" in low:
         return _not_found(repo_id, text)
-
-    if name == "EntryNotFoundError" or MANIFEST_NAME in text:
-        return {
-            "cause": "not a tt-model bundle",
-            "detail": f"The repo exists but has no {MANIFEST_NAME}, so there is nothing for tt-model "
-                      "to install.",
-            "evidence": _evidence(text),
-            "actions": ["tt-model search --catalog     # bundles published for tt-model"],
-        }
 
     return {
         "cause": "the Hub request failed",
