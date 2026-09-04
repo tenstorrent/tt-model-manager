@@ -322,6 +322,88 @@ def test_stage_package_materialized_junk_named_target_is_dropped(tmp_path):
     assert not any(p.name == "config" for p in mat.rglob("*"))
 
 
+def test_stage_package_materialized_link_into_junk_dir_is_dropped(tmp_path):
+    """Security regression, the FILE form of the junk-named-target leak: a symlink under an
+    innocuous name resolving to a file *inside* an excluded directory (`gitcfg -> /outside/.git/
+    config`) must not be materialized either.
+
+    Checking only the target's own basename closes the directory form (`hist -> .git`) but not
+    this one — the basename is `config`, and the `copy2` branch that handles a file target applies
+    no filtering at all. The whole escaping path is classified, so the `.git` component is caught
+    wherever it sits. Covered at both depths: under an escaping directory, and straight off the
+    metal root.
+    """
+    wheels = tmp_path / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
+
+    outside = tmp_path / "outside_repo"
+    outside.mkdir()
+    (outside / ".git").mkdir()
+    (outside / ".git" / "config").write_text("[credentials]\ntoken = super-secret\n")
+    (outside / "pkg").mkdir()
+    (outside / "pkg" / "model.py").write_text("# real model code\n")
+    # Named "gitcfg" (not ".git", not "config"-excluded) -> a single file inside the .git dir.
+    (outside / "pkg" / "gitcfg").symlink_to((outside / ".git" / "config").resolve())
+
+    metal = tmp_path / "metal_src"
+    metal.mkdir()
+    (metal / "requirements.txt").write_text("torch==2.11.0\n")
+    (metal / "escapes").symlink_to(outside)
+    # The same bypass one level up: straight off the metal root, no escaping directory involved.
+    (metal / "hostcfg").symlink_to((outside / ".git" / "config").resolve())
+
+    vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
+    staged = tmp_path / "staged"
+    packaging.stage_package(
+        staged, name="m", arch="blackhole", ttnn_wheel=ttnn,
+        metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
+    )
+
+    dst_metal = staged / "metal"
+    assert (dst_metal / "escapes" / "pkg" / "model.py").is_file()  # real content still ships
+    assert not (dst_metal / "escapes" / "pkg" / "gitcfg").exists()
+    assert not (dst_metal / "hostcfg").exists()
+    assert not any("super-secret" in p.read_text(errors="ignore")
+                   for p in dst_metal.rglob("*") if p.is_file())
+
+
+def test_stage_package_ambient_junk_named_parent_dir_still_ships(tmp_path):
+    """The path-wide junk check must judge only what the link reaches INTO, not the host's ambient
+    layout: staging from a workspace that happens to sit under a junk-matching directory name
+    (`generated/`, a `build_*` CI dir) must not start dropping ordinary escaping content.
+
+    The shared prefix between the staged tree and the target is skipped for exactly this reason —
+    without that, every escaping link in such a workspace would silently vanish.
+    """
+    workspace = tmp_path / "generated"  # matches _METAL_IGNORE_ANYWHERE, and holds EVERYTHING
+    workspace.mkdir()
+
+    wheels = workspace / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
+
+    outside = workspace / "outside_lib"
+    outside.mkdir()
+    (outside / "kernel.so").write_text("compiled\n")
+
+    metal = workspace / "metal_src"
+    metal.mkdir()
+    (metal / "requirements.txt").write_text("torch==2.11.0\n")
+    (metal / "lib.so").symlink_to((outside / "kernel.so").resolve())
+
+    vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
+    staged = workspace / "staged"
+    packaging.stage_package(
+        staged, name="m", arch="blackhole", ttnn_wheel=ttnn,
+        metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
+    )
+
+    materialized = staged / "metal" / "lib.so"
+    assert materialized.is_file() and not materialized.is_symlink()
+    assert materialized.read_text() == "compiled\n"
+
+
 def test_stage_package_special_file_raises_styled_error(tmp_path):
     """A copytree abort (here a fifo → SpecialFileError) surfaces as StagingError with the path,
     not a raw traceback; the CLI renders it via _err (non-zero exit, no crash)."""

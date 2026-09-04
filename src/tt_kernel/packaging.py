@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import os
 import re
 import shutil
 import socket
@@ -114,16 +115,29 @@ def _metal_ignore(anchor: Path):
 
 
 def _is_junk_basename(name: str) -> bool:
-    """Whether ``name`` alone (VCS dirs, byte-caches, venvs, ...) matches ``_METAL_IGNORE_ANYWHERE``.
-
-    ``copytree``'s ``ignore=`` only ever filters *children* of a directory it is walking — it never
-    checks the root of the copy against the patterns. That leaves a gap when a symlink itself named
-    something innocuous (e.g. ``hist``) resolves to a junk-named directory (e.g. ``.git``): the
-    symlink survives the initial filter by name, and if it were then handed to ``copytree`` as the
-    root of a fresh copy, the junk directory's own name would never be checked and its contents
-    would ship whole. Callers must check this before materializing a symlink target.
-    """
+    """Whether ``name`` alone (VCS dirs, byte-caches, venvs, ...) matches ``_METAL_IGNORE_ANYWHERE``."""
     return name in _METAL_IGNORE_ANYWHERE(None, [name])
+
+
+def _junk_component(target: Path, root: Path) -> Optional[str]:
+    """The first junk-named component of ``target`` below its common ancestor with ``root``, or None.
+
+    ``copytree``'s ``ignore=`` only ever filters *children* of a directory it walks — it never checks
+    the root of a copy against the patterns — and ``copy2`` filters nothing at all. That leaves a
+    symlink under an innocuous name free to reach excluded content: ``hist -> /outside/.git`` would
+    materialize the repo whole, and ``gitcfg -> /outside/.git/config`` the credential file inside it.
+    So classify the whole escaping path, not just its last component.
+
+    Only the components BELOW the common ancestor with the staged tree are judged — the part of the
+    path the link actually reaches into. The shared prefix is the host's ambient layout (a bundle
+    staged under ``~/generated/``, a CI workspace named ``build_42``) and reading it as junk would
+    drop ordinary content for a reason that has nothing to do with the link.
+    """
+    try:
+        rel = target.relative_to(os.path.commonpath([root, target]))
+    except ValueError:  # no shared prefix at all (different mounts/roots) -> judge the whole path
+        rel = target
+    return next((part for part in rel.parts if _is_junk_basename(part)), None)
 
 
 def _normalize_staged_symlinks(root: Path) -> None:
@@ -155,12 +169,12 @@ def _normalize_staged_symlinks(root: Path) -> None:
         except ValueError:
             pass  # points outside -> materialize below so the host path never ships
         link.unlink()
-        if _is_junk_basename(target.name):
-            # The escaping link's target is ITSELF junk (a `.git`, `__pycache__`, a venv, ...),
-            # reached under a non-junk name (e.g. `hist -> /outside/.git`). copytree's ignore=
-            # never checks the root of a copy against the patterns, only its children, so handing
-            # this straight to copytree would ship the junk directory's contents whole. Drop it,
-            # exactly as if it had appeared as a normal excluded child.
+        if _junk_component(target, root):
+            # The escaping link reaches INTO junk (a `.git`, `__pycache__`, a venv, ...) under a
+            # non-junk name: `hist -> /outside/.git`, or `gitcfg -> /outside/.git/config` for a
+            # single file inside one. Neither copytree's ignore= (children only) nor copy2 (no
+            # filtering) would catch it, so materializing would ship the excluded content anyway.
+            # Drop it, exactly as if it had appeared as a normal excluded entry.
             return
         if target.is_dir():
             # Filter the materialized copy for junk at every depth (VCS, byte-caches, venvs, ...).
