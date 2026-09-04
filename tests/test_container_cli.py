@@ -1436,3 +1436,53 @@ def test_weights_cached_is_offline_and_swallows_failures(monkeypatch, tmp_path):
     assert container_cli.weights_cached(m.weights) is None
     assert seen["local_files_only"] is True
     assert seen["repo_id"] == "org/w" and seen["revision"] == "deadbeef"
+
+
+# ------------------------------------------------------- a weights fetch that failed
+# The pull stays green here by design: the image is loaded and the container can fetch its
+# own weights. What is under test is whether the warning is USEFUL, because it used to be
+# the exception's class name and nothing else.
+
+
+class _Ref:
+    repo_id = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+    revision = None
+    allow_patterns = None
+    ignore_patterns = None
+    repo_type = "model"
+
+
+def _gated_exc():
+    cls = type("GatedRepoError", (Exception,), {})
+    return cls("403 Client Error.\n\nCannot access gated repo for url "
+               "https://huggingface.co/api/models/Qwen/Qwen3-Coder-30B-A3B-Instruct.")
+
+
+def test_a_gated_weights_repo_is_named_and_linked(capsys):
+    """A gate is fixed by one click, so the warning has to carry the repo and its URL. The
+    consumer never typed the weights id — it is the author's pin inside the manifest — so
+    "GatedRepoError" alone left them with nothing to act on."""
+    container_cli._weights_download_failed(_Ref(), _gated_exc())
+    out = capsys.readouterr().out
+    assert "Qwen/Qwen3-Coder-30B-A3B-Instruct" in out
+    assert "https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct" in out
+    assert "accept the terms" in out
+
+
+def test_a_failed_weights_fetch_still_says_the_pull_survived(capsys):
+    """Non-fatal is the contract; the note must say so or the user re-runs for nothing."""
+    container_cli._weights_download_failed(_Ref(), _gated_exc())
+    assert "the image is loaded" in capsys.readouterr().out
+
+
+def test_a_weights_404_is_not_dressed_up_as_a_gate(capsys):
+    """The same classifier bug reached here through the shared code path."""
+    cls = type("RepositoryNotFoundError", (Exception,), {})
+    exc = cls("404 Client Error.\n\nRepository Not Found for url: x.\n"
+              "If you are trying to access a private or gated repo, make sure you are "
+              "authenticated.")
+    exc.response = type("R", (), {"status_code": 404})()
+    container_cli._weights_download_failed(_Ref(), exc)
+    out = capsys.readouterr().out
+    assert "accept the terms" not in out
+

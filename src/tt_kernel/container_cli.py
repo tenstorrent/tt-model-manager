@@ -263,14 +263,37 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
                 path = _download_weights(manifest.weights)
                 st.detail(str(path))
         except Exception as e:  # noqa: BLE001
-            console.note(
-                f"weights not downloaded ({e.__class__.__name__}); the image is loaded and "
-                "the model will fetch them at first boot (slower, inside the container)",
-                marker="⚠", style="warning",
-            )
+            _weights_download_failed(manifest.weights, e)
 
     console.milestone(f"pulled {repo_id}")
     console.note(f"next:  tt-model serve {repo_id}", marker="→")
+
+
+def _weights_download_failed(ref, exc: BaseException) -> None:
+    """Explain a failed weights fetch, without failing the pull.
+
+    Staying non-fatal is correct: the image is already loaded, the HF cache is bind-mounted,
+    and the model can fetch its own weights at first boot. But this used to report the
+    exception's CLASS NAME and nothing else — "weights not downloaded (GatedRepoError)" — so
+    the one case the user can actually fix was the one they were told least about. It named
+    neither the repo (which is the author's pin, not something the consumer typed, so they
+    have no way to guess it) nor what to do about it, and a gate is resolved by one click on
+    a page whose URL we are holding.
+
+    So reuse the same classifier the failure cards use, keyed on the WEIGHTS repo id rather
+    than the package id — those are different repos, and the actionable one here is the
+    weights. Rendered as notes rather than a card because the pull has not failed.
+    """
+    d = hub.classify_hub_error(exc, ref.repo_id)
+    console.note(f"weights {ref.repo_id} not downloaded — {d['cause']}: {d['detail']}",
+                 marker="⚠", style="warning")
+    for action in d.get("actions", ()):
+        console.note(action, marker="→")
+    console.note(
+        "the image is loaded, so the model will try to fetch them itself at first boot "
+        "(slower, inside the container, and no progress is shown here)",
+        marker="○",
+    )
 
 
 def _download_weights(ref) -> Path:
