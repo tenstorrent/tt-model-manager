@@ -143,11 +143,13 @@ class Deps(BaseModel):
 
     ``requirements`` (a file shipped in the bundle) lists the pins — ``ttnn`` (team-provided /
     PyPI), the ``tt-metal-models`` wheel, etc. ``wheels_dir`` is a bundle folder of shipped wheels
-    (the ``vllm-tt-plugin`` and the model's ``generic_op`` custom-op wheel) added to the install via
-    ``--find-links`` and installed BY PATH. ``vllm`` describes the separate empty-target vLLM install
-    step (see ``Vllm``) — vLLM is NOT in ``requirements`` or ``wheels`` because it needs its own
-    ordered build. ``model_dir`` is where ``model.py`` lives (added to PYTHONPATH at serve). SFPI and
-    firmware are external, box-managed deps — never in here.
+    added to the install via ``--find-links``: ``wheels`` (the ``vllm-tt-plugin`` and the model's
+    ``generic_op`` custom-op wheel) are installed BY PATH, while ``models_wheels`` are staged there
+    only so ``--find-links`` can satisfy a ``requirements.txt`` pin locally (e.g. a hand-built
+    ``tt-metal-models`` wheel, ahead of its PyPI publish). ``vllm`` describes the separate
+    empty-target vLLM install step (see ``Vllm``) — vLLM is NOT in ``requirements`` or ``wheels``
+    because it needs its own ordered build. ``model_dir`` is where ``model.py`` lives (added to
+    PYTHONPATH at serve). SFPI and firmware are external, box-managed deps — never in here.
     """
 
     python: Optional[str] = None            # pinned interpreter (major.minor), uv provisions
@@ -156,6 +158,10 @@ class Deps(BaseModel):
     # and any ``generic_op`` custom-op wheel. Installed AFTER vLLM (see ``vllm``).
     wheels: List[str] = Field(default_factory=list)
     wheels_dir: Optional[str] = None         # bundle dir holding those wheels -> also on --find-links
+    # Bundle-relative wheels that satisfy a requirements.txt pin locally rather than by explicit
+    # path — e.g. a locally-built tt-metal-models wheel, ahead of it publishing to an index. Never
+    # installed directly; only made visible to the requirements install via --find-links.
+    models_wheels: List[str] = Field(default_factory=list)
     # vLLM core install (empty-target, for the plugin). None => bundle serves no vLLM (non-vLLM model).
     vllm: Optional["Vllm"] = None
     model_dir: str = "."                     # where model.py lives (bundle root), added to PYTHONPATH
