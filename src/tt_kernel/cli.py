@@ -823,28 +823,17 @@ def pull(
         )
 
 
-def _install_self_contained(
-    repo_id, snapshot, manifest, *, force, arch, models_dir, with_weights,
-    revision=None, resolved_revision=None,
-) -> None:
-    """Install a bundle that builds its OWN venv — v5 fat (embedded wheels) or v6 thin (pip pins):
-    materialize it, run its ``install.sh`` to build the venv, (optionally) weights, and record it so
-    ``serve`` runs from that venv. Consumer needs only a TT card + firmware (+ SFPI for v6). No host
-    tt-metal/vLLM is required or touched.
-
-    ``resolved_revision`` is the concrete commit sha the caller resolved BEFORE the download and
-    then fetched — recorded verbatim so the pin matches exactly what is on disk (querying it here,
-    after the download, could record a sha a mid-flight push had already moved past). ``revision``
-    is the user's original request, kept only to mark a deliberate ``@revision`` pin.
+def _gate_compat_and_wheels(manifest, *, force, arch, verb: str) -> None:
+    """Shared install/refresh gate: a fatal incompatibility is refused, non-fatal warnings need
+    ``--force``, and a v5-fat bundle's shipped wheels are checked against this interpreter/platform.
+    ``verb`` ("install"/"refresh") only shapes the error text.
     """
-    env = metal.local_env(arch_override=arch)
-    report = compare(manifest, env)
+    report = compare(manifest, metal.local_env(arch_override=arch))
     _print_report(report)
     if report.has_fatal:
-        raise _err("Refusing to install: fatal incompatibility (see above).")
+        raise _err(f"Refusing to {verb}: fatal incompatibility (see above).")
     if report.issues and not force:
-        raise _err("Refusing to install: re-run with --force to override the warnings above.")
-
+        raise _err(f"Refusing to {verb}: re-run with --force to override the warnings above.")
     # v5 fat: the shipped wheels are the author's build (cp312/linux_x86_64), not universal — verify
     # their tags. v6 thin ships no platform wheels (its deps resolve via pip at install), so skip.
     if manifest.bundled is not None:
@@ -855,6 +844,97 @@ def _install_self_contained(
             if not force:
                 raise _err("Shipped wheel(s) not built for this interpreter/platform; "
                            "--force to attempt anyway (likely to fail at pip install).")
+
+
+def _materialize_and_record(
+    repo_id, snapshot, manifest, *, dest: Path, with_weights,
+    revision=None, resolved_revision=None, verb: str = "installed",
+) -> Optional[Path]:
+    """Copy the staged ``snapshot`` to ``dest``, build its venv, optionally fetch weights, and
+    record the install — WITHOUT destroying a working install until the new one is proven good.
+
+    When an install already exists at ``dest`` (an update, a ``--force`` reinstall, or a
+    ``--refresh``) it is renamed aside first and dropped only once the venv build, any weight
+    fetch, and ``localdb.record`` all succeed. ANY failure rmtrees the half-built new tree and
+    moves the original back, so a re-install that breaks leaves the user exactly where they started;
+    a failed FIRST install (no prior tree) just removes its own partial tree and writes no record.
+
+    A venv is not relocatable — its scripts and ``pyvenv.cfg`` hardcode absolute paths — so the
+    interpreter is always built AT the final ``dest``; renaming the OLD tree aside (rather than
+    building the new one in a sibling and moving it in) gives the same safety without moving a built
+    venv. Returns the weights path if one was fetched, else ``None``.
+    """
+    aside = dest.parent / f"{dest.name}.old-{os.getpid()}"
+    if aside.exists():
+        shutil.rmtree(aside)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    moved_aside = False
+    if dest.exists():
+        os.rename(dest, aside)  # move the working install aside — restored on any failure below
+        moved_aside = True
+    try:
+        shutil.copytree(snapshot, dest)
+        typer.echo("Installing shipped wheels + deps into a fresh venv (downloads torch/deps) ...")
+        try:
+            venv_python = runtime.install_self_contained(dest, dest / "venv")
+        except subprocess.CalledProcessError as exc:
+            raise _err(f"install.sh failed (exit {exc.returncode}). See output above.")
+        except FileNotFoundError as exc:
+            raise _err(str(exc))
+
+        weights_path: Optional[Path] = None
+        if with_weights and manifest.weights:
+            # A user who pre-staged weights keeps them across a reinstall (resumable from the HF
+            # cache) instead of silently dropping them and refetching at load time.
+            typer.echo(f"Downloading weights {manifest.weights.repo_id} ...")
+            weights_path = runtime.download_weights(manifest.weights, dest / "weights")
+
+        run_script = dest / ((manifest.bundled.run_script if manifest.bundled else None) or "run.sh")
+        localdb.record(repo_id, {
+            "repo_id": repo_id,
+            "self_contained": True,  # "has its own venv" — true for v5 fat and v6 thin; serve runs run.sh
+            "install_dir": str(dest),
+            "bundle_path": str(dest),  # holds vllm_metadata.json (== EXTRA_MODELS_DIR entry)
+            "python": str(venv_python),
+            "run_script": str(run_script),
+            "arch": manifest.arch,
+            "weights": manifest.weights.repo_id if manifest.weights else None,
+            "weights_path": str(weights_path) if weights_path else None,
+            # The exact commit sha we downloaded (resolved by the caller before the fetch), so
+            # `serve` can tell this install apart from a newer published revision. `pinned` means
+            # the user asked for a specific @revision — don't nag them to update off that choice.
+            "revision": resolved_revision,
+            "pinned": revision is not None,
+        })
+    except BaseException:  # noqa: BLE001 — roll back: drop the half-built new tree, restore original
+        shutil.rmtree(dest, ignore_errors=True)
+        if moved_aside:
+            os.rename(aside, dest)
+        raise
+    if moved_aside:
+        shutil.rmtree(aside, ignore_errors=True)  # new install proven good; drop the old copy
+    typer.secho(f"✓ {verb} self-contained bundle -> {dest}", fg=typer.colors.GREEN)
+    return weights_path
+
+
+def _install_self_contained(
+    repo_id, snapshot, manifest, *, force, arch, models_dir, with_weights,
+    revision=None, resolved_revision=None,
+) -> None:
+    """Install a bundle that builds its OWN venv — v5 fat (embedded wheels) or v6 thin (pip pins):
+    materialize it, run its ``install.sh`` to build the venv, (optionally) weights, and record it so
+    ``serve`` runs from that venv. Consumer needs only a TT card + firmware (+ SFPI for v6). No host
+    tt-metal/vLLM is required or touched.
+
+    An update over an existing install goes through the same non-destructive stage-aside/rollback as
+    ``--refresh`` (``_materialize_and_record``), so a failed re-install never wipes a working one.
+
+    ``resolved_revision`` is the concrete commit sha the caller resolved BEFORE the download and
+    then fetched — recorded verbatim so the pin matches exactly what is on disk (querying it here,
+    after the download, could record a sha a mid-flight push had already moved past). ``revision``
+    is the user's original request, kept only to mark a deliberate ``@revision`` pin.
+    """
+    _gate_compat_and_wheels(manifest, force=force, arch=arch, verb="install")
 
     dest = runtime.resolve_models_dir(models_dir, repo_id)
     prev = localdb.get(repo_id) or {}
@@ -870,42 +950,11 @@ def _install_self_contained(
             return
         old = (prev.get("revision") or "?")[:8]
         typer.secho(f"↻ updating {repo_id}: {old} → {resolved_revision[:8]}", fg=typer.colors.CYAN)
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(snapshot, dest)
 
-    typer.echo("Installing shipped wheels + deps into a fresh venv (downloads torch/deps) ...")
-    try:
-        venv_python = runtime.install_self_contained(dest, dest / "venv")
-    except subprocess.CalledProcessError as exc:
-        raise _err(f"install.sh failed (exit {exc.returncode}). See output above.")
-    except FileNotFoundError as exc:
-        raise _err(str(exc))
-
-    weights_path: Optional[Path] = None
-    if with_weights and manifest.weights:
-        typer.echo(f"Downloading weights {manifest.weights.repo_id} ...")
-        weights_path = runtime.download_weights(manifest.weights, dest / "weights")
-
-    run_script = dest / ((manifest.bundled.run_script if manifest.bundled else None) or "run.sh")
-    localdb.record(repo_id, {
-        "repo_id": repo_id,
-        "self_contained": True,  # "has its own venv" — true for v5 fat and v6 thin; serve runs run.sh
-        "install_dir": str(dest),
-        "bundle_path": str(dest),  # holds vllm_metadata.json (== EXTRA_MODELS_DIR entry)
-        "python": str(venv_python),
-        "run_script": str(run_script),
-        "arch": manifest.arch,
-        "weights": manifest.weights.repo_id if manifest.weights else None,
-        "weights_path": str(weights_path) if weights_path else None,
-        # The exact commit sha we downloaded (resolved by the caller before the fetch), so `serve`
-        # can tell this install apart from a newer published revision. `pinned` means the user
-        # asked for a specific @revision — don't nag them to update off a version they chose.
-        "revision": resolved_revision,
-        "pinned": revision is not None,
-    })
-    typer.secho(f"✓ installed self-contained bundle -> {dest}", fg=typer.colors.GREEN)
+    weights_path = _materialize_and_record(
+        repo_id, snapshot, manifest, dest=dest, with_weights=with_weights,
+        revision=revision, resolved_revision=resolved_revision, verb="installed",
+    )
     if not weights_path and manifest.weights:
         typer.secho(f"  (weights fetched at serve time from {manifest.weights.repo_id}; "
                     "pass --with-weights to pre-download)", fg=typer.colors.CYAN)
@@ -944,83 +993,16 @@ def _refresh_install(
     repo_id, snapshot, manifest, *, force, arch, dest: Path, with_weights,
     revision=None, resolved_revision=None,
 ) -> None:
-    """Install a refreshed bundle over an existing one WITHOUT destroying the working install
-    until the new one is proven good.
-
-    Runs the same compat/wheel gates as ``_install_self_contained``, then renames the current
-    install aside, materializes the new tree and builds its venv **at the final ``dest``**, and
-    only records the new revision once the venv build (and optional weight fetch) succeed. Any
-    failure rmtrees the half-built new tree and moves the original back, so a refresh that breaks
-    leaves the user exactly where they started.
-
-    Why build at ``dest`` and not in a sibling we rename in: a venv is not relocatable (its
-    scripts and ``pyvenv.cfg`` hardcode absolute paths), so the interpreter must be built at the
-    path we record. Renaming the *old* tree aside first gives us the same safety (original intact
-    and restorable) without moving the fresh venv after it is built.
+    """Install a refreshed bundle over an existing one WITHOUT destroying the working install until
+    the new one is proven good. The compat/wheel gate and the stage-aside/rollback materialize are
+    shared with ``_install_self_contained``'s update path (see ``_materialize_and_record``); this
+    just installs at the caller-provided ``dest`` (the existing install's recorded dir).
     """
-    env = metal.local_env(arch_override=arch)
-    report = compare(manifest, env)
-    _print_report(report)
-    if report.has_fatal:
-        raise _err("Refusing to refresh: fatal incompatibility (see above).")
-    if report.issues and not force:
-        raise _err("Refusing to refresh: re-run with --force to override the warnings above.")
-    if manifest.bundled is not None:
-        bad = packaging.host_incompatible_wheels(manifest.bundled)
-        if bad:
-            for b in bad:
-                typer.secho(f"  ! {b}", fg=typer.colors.YELLOW)
-            if not force:
-                raise _err("Shipped wheel(s) not built for this interpreter/platform; "
-                           "--force to attempt anyway (likely to fail at pip install).")
-
-    aside = dest.parent / f"{dest.name}.old-{os.getpid()}"
-    if aside.exists():
-        shutil.rmtree(aside)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    moved_aside = False
-    if dest.exists():
-        os.rename(dest, aside)  # move the working install aside — restored on any failure below
-        moved_aside = True
-    try:
-        shutil.copytree(snapshot, dest)
-        typer.echo("Installing shipped wheels + deps into a fresh venv (downloads torch/deps) ...")
-        try:
-            venv_python = runtime.install_self_contained(dest, dest / "venv")
-        except subprocess.CalledProcessError as exc:
-            raise _err(f"install.sh failed (exit {exc.returncode}). See output above.")
-        except FileNotFoundError as exc:
-            raise _err(str(exc))
-
-        weights_path: Optional[Path] = None
-        if with_weights and manifest.weights:
-            # The user pre-staged weights; keep them across the refresh (resumable from the HF
-            # cache) instead of silently dropping them and refetching at load time.
-            typer.echo(f"Downloading weights {manifest.weights.repo_id} ...")
-            weights_path = runtime.download_weights(manifest.weights, dest / "weights")
-
-        run_script = dest / ((manifest.bundled.run_script if manifest.bundled else None) or "run.sh")
-        localdb.record(repo_id, {
-            "repo_id": repo_id,
-            "self_contained": True,
-            "install_dir": str(dest),
-            "bundle_path": str(dest),
-            "python": str(venv_python),
-            "run_script": str(run_script),
-            "arch": manifest.arch,
-            "weights": manifest.weights.repo_id if manifest.weights else None,
-            "weights_path": str(weights_path) if weights_path else None,
-            "revision": resolved_revision,
-            "pinned": revision is not None,
-        })
-    except BaseException:  # noqa: BLE001 — roll back: drop the half-built new tree, restore original
-        shutil.rmtree(dest, ignore_errors=True)
-        if moved_aside:
-            os.rename(aside, dest)
-        raise
-    if moved_aside:
-        shutil.rmtree(aside, ignore_errors=True)  # new install proven good; drop the old copy
-    typer.secho(f"✓ refreshed self-contained bundle -> {dest}", fg=typer.colors.GREEN)
+    _gate_compat_and_wheels(manifest, force=force, arch=arch, verb="refresh")
+    _materialize_and_record(
+        repo_id, snapshot, manifest, dest=dest, with_weights=with_weights,
+        revision=revision, resolved_revision=resolved_revision, verb="refreshed",
+    )
 
 
 def _refresh_self_contained(

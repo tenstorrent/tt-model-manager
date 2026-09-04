@@ -186,6 +186,75 @@ def test_pull_updates_a_stale_bundle_without_force(monkeypatch, tmp_path):
     assert localdb.get("myorg/llama-3.2-3b-tt")["revision"] == "rev-new"
 
 
+def test_pull_update_failure_preserves_working_install(monkeypatch, tmp_path):
+    # Regression for stisiTT's review of #45 (finding #1) applied to the pull/UPDATE path: #45 made
+    # `serve --refresh` non-destructive, but the same destroy-then-rebuild lived in the plain
+    # `pull` update. An install.sh failure while UPDATING an existing bundle must NOT wipe the
+    # working install: the old tree (incl. the user's run.sh edits + the venv) survives, the record
+    # still points at the old revision, and no `.old-*` aside is left behind.
+    import subprocess as _sp
+
+    _isolate(monkeypatch, tmp_path)
+    staged = _staged_bundle(tmp_path)
+    state = {"raise_next": False}
+
+    def _fake_download(repo_id, revision, dest):
+        import shutil
+        snap = Path(dest) / "snap"
+        shutil.copytree(staged, snap)
+        return snap
+
+    def _fake_install(bundle_dir, venv_dir):
+        if state["raise_next"]:
+            raise _sp.CalledProcessError(1, ["install.sh"])  # update's build blows up
+        (venv_dir / "bin").mkdir(parents=True)
+        py = venv_dir / "bin" / "python"
+        py.write_text("ORIGINAL-INTERP\n")
+        return py
+
+    monkeypatch.setattr(cli.hub, "download_bundle", _fake_download)
+    monkeypatch.setattr(cli.runtime, "install_self_contained", _fake_install)
+
+    monkeypatch.setattr(cli.hub, "latest_revision", lambda *a, **k: "rev-old")
+    assert _runner.invoke(cli.app, ["pull", "myorg/llama-3.2-3b-tt"]).exit_code == 0
+    install_dir = Path(localdb.get("myorg/llama-3.2-3b-tt")["install_dir"])
+    # the user edits run.sh after installing; an update must not silently lose it
+    (install_dir / "run.sh").write_text("#!/usr/bin/env bash\n# ORIGINAL-EDIT\n")
+
+    # a newer revision is published, but its install.sh fails mid-update
+    state["raise_next"] = True
+    monkeypatch.setattr(cli.hub, "latest_revision", lambda *a, **k: "rev-new")
+    res = _runner.invoke(cli.app, ["pull", "myorg/llama-3.2-3b-tt"])
+    assert res.exit_code != 0  # pull surfaces the failure (unlike serve --refresh, which degrades)
+
+    after = localdb.get("myorg/llama-3.2-3b-tt")
+    assert after["revision"] == "rev-old", "record must not move to the half-built install"
+    assert Path(after["install_dir"]) == install_dir
+    assert "ORIGINAL-EDIT" in (install_dir / "run.sh").read_text()  # user's run.sh survived
+    assert Path(after["python"]).is_file() and "ORIGINAL-INTERP" in Path(after["python"]).read_text()
+    assert not list(install_dir.parent.glob(f"{install_dir.name}.old-*")), "no aside left behind"
+
+
+def test_pull_update_success_swaps_in_new_tree_and_cleans_aside(monkeypatch, tmp_path):
+    # The success side of the stage-aside/rollback: a normal update swaps the new tree in at the
+    # same dest, records the new revision, and drops the `.old-*` aside once the build is proven.
+    _isolate(monkeypatch, tmp_path)
+    staged = _staged_bundle(tmp_path)
+    seen = _install_fakes(staged, monkeypatch)
+
+    monkeypatch.setattr(cli.hub, "latest_revision", lambda *a, **k: "rev-old")
+    assert _runner.invoke(cli.app, ["pull", "myorg/llama-3.2-3b-tt"]).exit_code == 0
+    install_dir = Path(localdb.get("myorg/llama-3.2-3b-tt")["install_dir"])
+
+    monkeypatch.setattr(cli.hub, "latest_revision", lambda *a, **k: "rev-new")
+    res = _runner.invoke(cli.app, ["pull", "myorg/llama-3.2-3b-tt"])
+    assert res.exit_code == 0, res.output
+    assert seen["installs"] == 2
+    assert localdb.get("myorg/llama-3.2-3b-tt")["revision"] == "rev-new"
+    assert install_dir.is_dir() and (install_dir / "venv" / "bin" / "python").is_file()
+    assert not list(install_dir.parent.glob(f"{install_dir.name}.old-*")), "aside must be cleaned up"
+
+
 def test_pull_reuses_when_up_to_date(monkeypatch, tmp_path):
     _isolate(monkeypatch, tmp_path)
     seen = _install_fakes(_staged_bundle(tmp_path), monkeypatch)
