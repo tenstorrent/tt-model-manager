@@ -230,6 +230,68 @@ def test_stage_package_dangling_symlink_and_cache_excludes(tmp_path):
     assert not any(p.is_symlink() and not p.exists() for p in dst_metal.rglob("*"))
 
 
+def test_stage_package_self_referential_escaping_dir_terminates(tmp_path):
+    """Regression: a self-referential escaping directory link must not recurse forever.
+
+    `copytree(..., symlinks=True)` preserves an absolute link inside the materialized copy
+    verbatim, so `outside/dir/self -> outside/dir` lands in the copy still pointing back outside.
+    The follow-up walk resolves it, sees an escaping directory, and materializes the whole thing
+    again — writing an ever-deeper tree until a raw RecursionError kills packaging (the
+    StagingError wrapper never gets to render it) and leaves the partial copy on disk. It is NOT
+    a symlink loop, so `resolve(strict=True)` succeeds and the dangling/loop guard never fires.
+
+    Also pins the two cases the cycle guard must NOT catch: independent links to the same outside
+    directory each still materialize, and a link to a SUBDIRECTORY of a target being materialized
+    is finite and must ship.
+    """
+    wheels = tmp_path / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
+
+    outside = tmp_path / "outside"
+    cyclic = outside / "cyclic"
+    (cyclic / "sub").mkdir(parents=True)
+    (cyclic / "model.py").write_text("# real model code\n")
+    (cyclic / "sub" / "helper.py").write_text("# helper\n")
+    (cyclic / "self").symlink_to(cyclic.resolve(), target_is_directory=True)      # points at itself
+    (cyclic / "sub" / "up").symlink_to(cyclic.resolve(), target_is_directory=True)  # at an ancestor
+    (cyclic / "alias").symlink_to((cyclic / "sub").resolve(), target_is_directory=True)  # finite
+
+    shared = outside / "shared_lib"
+    shared.mkdir()
+    (shared / "kernel.so").write_text("compiled\n")
+
+    metal = tmp_path / "metal_src"
+    metal.mkdir()
+    (metal / "requirements.txt").write_text("torch==2.11.0\n")
+    (metal / "escapes").symlink_to(cyclic.resolve(), target_is_directory=True)
+    # Two INDEPENDENT links to one outside dir: not a cycle, both must still materialize.
+    (metal / "lib_a").symlink_to(shared.resolve(), target_is_directory=True)
+    (metal / "lib_b").symlink_to(shared.resolve(), target_is_directory=True)
+
+    vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
+    staged = tmp_path / "staged"
+    packaging.stage_package(  # must terminate, not RecursionError
+        staged, name="m", arch="blackhole", ttnn_wheel=ttnn,
+        metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
+    )
+
+    mat = staged / "metal" / "escapes"
+    assert (mat / "model.py").is_file()  # the escaping dir itself still materializes
+    assert (mat / "sub" / "helper.py").is_file()
+    assert (mat / "alias" / "helper.py").is_file()  # link to a subdir of the target: finite, ships
+    # The two cycle-forming links are dropped rather than re-materialized.
+    assert not (mat / "self").exists()
+    assert not (mat / "sub" / "up").exists()
+    # Bounded: without the guard this tree nests until the interpreter gives up.
+    assert max(len(p.relative_to(mat).parts) for p in mat.rglob("*")) <= 3
+    # Independent duplicates are untouched by the guard.
+    assert (staged / "metal" / "lib_a" / "kernel.so").read_text() == "compiled\n"
+    assert (staged / "metal" / "lib_b" / "kernel.so").read_text() == "compiled\n"
+    # And the pass still leaves no symlinks that dangle or leak the host.
+    assert not any(p.is_symlink() and not p.exists() for p in (staged / "metal").rglob("*"))
+
+
 def test_stage_package_special_file_raises_styled_error(tmp_path):
     """A copytree abort (here a fifo → SpecialFileError) surfaces as StagingError with the path,
     not a raw traceback; the CLI renders it via _err (non-zero exit, no crash)."""
