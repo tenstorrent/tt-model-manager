@@ -302,6 +302,49 @@ def _evidence(text: str) -> str:
     return line.split(" (Request ID:")[0].strip()
 
 
+def _access_denied(repo_id: str, text: str) -> dict:
+    return {
+        "cause": "you do not have access",
+        "detail": f"The Hub recognised {repo_id} but refused it for this token — it is gated, "
+                  "or the token is missing, expired, or lacks read scope.",
+        "evidence": _evidence(text),
+        "actions": ["tt-model login", f"accept the terms at https://huggingface.co/{repo_id}"],
+    }
+
+
+def _not_found(repo_id: str, text: str) -> dict:
+    return {
+        "cause": "no such bundle, or no access",
+        "detail": f"The Hub returned 404 for {repo_id}. Either the id is wrong, or the repo is "
+                  "private and your token cannot see it — the Hub reports both the same way.",
+        "evidence": _evidence(text),
+        "actions": [f"tt-model search {repo_id.split('/')[-1]}   # find the right id",
+                    "tt-model login                     # if it is private"],
+    }
+
+
+def classify_repo_id(repo_id: str) -> Optional[dict]:
+    """A card for an id that cannot name a bundle, or None when the shape is fine.
+
+    Every bundle is one Hub repo named ``namespace/name``. A bare ``kabadoo`` is asked of
+    the Hub as a canonical (namespace-less) model id, which can only ever 404 — so rather
+    than make the round trip and then hedge ("no such bundle, or no access"), say the
+    definite thing. Pure, like :func:`classify_hub_error`, so the wording is testable.
+    Callers must try their LOCAL resolutions (a manifest path, an installed record) first;
+    this only judges what would be sent to the Hub.
+    """
+    if "/" in repo_id:
+        return None
+    return {
+        "cause": "not a repo id",
+        "detail": f"{repo_id} names no namespace. A bundle is a Hub repo written as "
+                  "namespace/name (for example tenstorrent/llama-3.1-8b).",
+        "evidence": "",
+        "actions": [f"tt-model search {repo_id}      # find the right id",
+                    "tt-model search --catalog    # bundles published for tt-model"],
+    }
+
+
 def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
     """Map a huggingface_hub exception to ``{cause, detail, evidence, actions}``.
 
@@ -333,14 +376,20 @@ def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
                         "HF_HUB_OFFLINE=1 tt-model list   # what is already installed"],
         }
 
-    if status == 401 or name == "GatedRepoError" or "gated" in low:
-        return {
-            "cause": "you do not have access",
-            "detail": f"The Hub recognised {repo_id} but refused it for this token — it is gated, "
-                      "or the token is missing, expired, or lacks read scope.",
-            "evidence": _evidence(text),
-            "actions": ["tt-model login", f"accept the terms at https://huggingface.co/{repo_id}"],
-        }
+    # Gated is decided by the exception TYPE, never by the word "gated" in the message:
+    # since huggingface_hub 1.27 every Repository-Not-Found message ends with "If you are
+    # trying to access a private or gated repo, make sure you are authenticated", so a
+    # substring match turned every typo into "the Hub recognised X but refused it".
+    if name == "GatedRepoError":
+        return _access_denied(repo_id, text)
+
+    # RepositoryNotFoundError before the status checks: the Hub answers an unauthenticated
+    # caller with 401 for a repo that simply does not exist, and the type is the honest signal.
+    if name == "RepositoryNotFoundError" or status == 404:
+        return _not_found(repo_id, text)
+
+    if status == 401:
+        return _access_denied(repo_id, text)
 
     if status == 403:
         return {
@@ -351,15 +400,8 @@ def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
             "actions": ["tt-model login", f"open https://huggingface.co/{repo_id}"],
         }
 
-    if status == 404 or name == "RepositoryNotFoundError" or "not found" in low:
-        return {
-            "cause": "no such bundle, or no access",
-            "detail": f"The Hub returned 404 for {repo_id}. Either the id is wrong, or the repo is "
-                      "private and your token cannot see it — the Hub reports both the same way.",
-            "evidence": _evidence(text),
-            "actions": [f"tt-model search {repo_id.split('/')[-1]}   # find the right id",
-                        "tt-model login                     # if it is private"],
-        }
+    if "not found" in low:
+        return _not_found(repo_id, text)
 
     if name == "EntryNotFoundError" or MANIFEST_NAME in text:
         return {

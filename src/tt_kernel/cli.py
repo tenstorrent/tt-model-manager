@@ -196,6 +196,17 @@ def _hub(op, repo_id: str, *, what: str, consequence: Optional[str] = None):
         raise _fail_card(what, hub.classify_hub_error(exc, repo_id), consequence=consequence)
 
 
+def _require_repo_id(repo_id: str, *, what: str, consequence: Optional[str] = None) -> None:
+    """Refuse an id that cannot name a Hub bundle (no ``namespace/``) before asking the Hub.
+
+    Call this only after every LOCAL resolution has been tried — a bare name may be an
+    installed record or a manifest path — and right before the first Hub request.
+    """
+    card = hub.classify_repo_id(repo_id)
+    if card is not None:
+        raise _fail_card(what, card, consequence=consequence)
+
+
 def _routine(msg: str, fg: str = typer.colors.GREEN) -> None:
     """A confirmation worth printing on its own, but not inside a phase.
 
@@ -783,6 +794,7 @@ def pull(
     TT card + firmware. Pass ``--with-weights`` to fetch the HF weights now instead of at load.
     """
     repo_id, revision = _split_revision(repo_id)
+    _require_repo_id(repo_id, what="Pull", consequence="Nothing was installed.")
     # Resolve the requested revision to a concrete sha BEFORE downloading, then fetch exactly that
     # sha — so the install records the commit it actually holds (not one a push may have moved to
     # between the download and a later query). None => Hub unreachable; fall back to plain download.
@@ -1249,7 +1261,9 @@ def serve(
         raise _err(f"{repo_id} is not installed. Run `tt-model pull {repo_id}` first "
                    "(or drop --local-only to install now).")
 
-    # Not installed yet: install then serve.
+    # Not installed yet: install then serve. Every local resolution (manifest path, pulled
+    # container, installed record) has been tried above, so the id is about to go to the Hub.
+    _require_repo_id(repo_id, what="Pull", consequence="Nothing was installed.")
     resolved = hub.latest_revision(repo_id, revision, timeout=None)  # resolve before fetch
     with tempfile.TemporaryDirectory() as td:
         snapshot = _hub(lambda: hub.download_bundle(repo_id, resolved or revision, dest=td),
@@ -1355,6 +1369,7 @@ def info(
 ) -> None:
     """Print a bundle's manifest and its compatibility verdict vs the local env."""
     repo_id, revision = _split_revision(repo_id)
+    _require_repo_id(repo_id, what="Inspect")
     manifest = _hub(lambda: hub.fetch_manifest(repo_id, revision), repo_id,
                     what="Inspect")
     console.raw(manifest.to_json())
