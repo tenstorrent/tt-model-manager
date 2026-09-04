@@ -73,6 +73,42 @@ def _git(repo: Path, *args: str) -> Optional[str]:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def _remote_url_containing_head(metal: Path, remote_refs: Optional[str]) -> Optional[str]:
+    """Return the most relevant remote that actually contains ``HEAD``.
+
+    A fork checkout commonly keeps upstream as ``origin`` and pushes the working
+    branch to another remote.  Recording origin merely because it has that conventional
+    name creates a plausible-looking but broken model-card link.  Prefer the current
+    branch's tracking remote when it contains HEAD, then any containing remote, and use
+    origin only as orientation when the commit has not been pushed anywhere.
+    """
+    remotes = (_git(metal, "remote") or "").splitlines()
+    refs = {
+        line.strip().lstrip("* ").split(" -> ", 1)[0]
+        for line in (remote_refs or "").splitlines()
+        if line.strip()
+    }
+
+    branch = _git(metal, "rev-parse", "--abbrev-ref", "HEAD")
+    tracking_remote = (
+        _git(metal, "config", "--get", f"branch.{branch}.remote")
+        if branch and branch != "HEAD"
+        else None
+    )
+
+    def contains_head(remote: str) -> bool:
+        return any(ref.startswith(f"{remote}/") for ref in refs)
+
+    candidates = []
+    if tracking_remote and tracking_remote in remotes and contains_head(tracking_remote):
+        candidates.append(tracking_remote)
+    candidates.extend(remote for remote in remotes if contains_head(remote) and remote not in candidates)
+    if "origin" in remotes and "origin" not in candidates:
+        candidates.append("origin")
+    candidates.extend(remote for remote in remotes if remote not in candidates)
+    return _git(metal, "remote", "get-url", candidates[0]) if candidates else None
+
+
 def scm_version(metal: Path) -> str:
     """The version the ttnn editable install should carry.
 
@@ -231,7 +267,7 @@ def resolve_metal_source(m: ContainerManifest, scratch: Path) -> MetalSource:
             context=filtered,
             origin=metal,
             sha=_git(metal, "rev-parse", "HEAD"),
-            remote=_git(metal, "remote", "get-url", "origin"),
+            remote=_remote_url_containing_head(metal, on_remote),
             branch=_git(metal, "rev-parse", "--abbrev-ref", "HEAD"),
             pushed=bool(on_remote),
             # tt-metal's OWN describe invocation (cmake/version.cmake), so the stub tag

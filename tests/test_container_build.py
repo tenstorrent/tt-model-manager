@@ -864,6 +864,25 @@ def test_the_remote_and_branch_are_recorded_for_a_local_checkout(tmp_path, monke
     assert rec["branch"] == "my/fork-branch"
 
 
+def test_the_tracking_fork_is_recorded_when_it_contains_head(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    metal = _fake_metal(tmp_path)
+    fork = tmp_path / "fork.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(fork)], check=True)
+    subprocess.run(
+        ["git", "-C", str(metal), "remote", "add", "origin", "https://github.com/upstream/tt-metal.git"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(metal), "remote", "add", "fork", str(fork)], check=True)
+    subprocess.run(["git", "-C", str(metal), "checkout", "-qb", "my/fork-branch"], check=True)
+    subprocess.run(["git", "-C", str(metal), "push", "-qu", "fork", "HEAD"], check=True)
+
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    rec = staged.built["tt_metal"]
+    assert rec["pushed"] is True
+    assert rec["remote"] == str(fork)
+
+
 def test_an_unpushed_commit_is_recorded_as_not_pushed(tmp_path, monkeypatch):
     """Packaging local work stays allowed — it is the hermetic default — but a manifest
     saying "built from <sha>" must not imply anyone can obtain that commit."""
