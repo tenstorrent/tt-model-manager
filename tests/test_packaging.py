@@ -369,14 +369,12 @@ def test_stage_package_materialized_link_into_junk_dir_is_dropped(tmp_path):
 
 
 def test_stage_package_ambient_junk_named_parent_dir_still_ships(tmp_path):
-    """The path-wide junk check must judge only what the link reaches INTO, not the host's ambient
-    layout: staging from a workspace that happens to sit under a junk-matching directory name
-    (`generated/`, a `build_*` CI dir) must not start dropping ordinary escaping content.
-
-    The shared prefix between the staged tree and the target is skipped for exactly this reason —
-    without that, every escaping link in such a workspace would silently vanish.
+    """The path-wide junk check must judge content markers only (`.git`, `__pycache__`, venvs, ...),
+    not location words like `generated`/`build_*`/`dist` — so a workspace that happens to sit under
+    such a name (`generated/`, a `build_42` CI dir), staged to an unrelated `--out`, must not start
+    dropping ordinary escaping content.
     """
-    workspace = tmp_path / "generated"  # matches _METAL_IGNORE_ANYWHERE, and holds EVERYTHING
+    workspace = tmp_path / "generated"  # would match the old, too-broad pattern set
     workspace.mkdir()
 
     wheels = workspace / "in_wheels"
@@ -393,7 +391,7 @@ def test_stage_package_ambient_junk_named_parent_dir_still_ships(tmp_path):
     (metal / "lib.so").symlink_to((outside / "kernel.so").resolve())
 
     vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
-    staged = workspace / "staged"
+    staged = tmp_path / "staged"  # OUTSIDE workspace: no shared "generated" prefix to hide behind
     packaging.stage_package(
         staged, name="m", arch="blackhole", ttnn_wheel=ttnn,
         metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
@@ -402,6 +400,40 @@ def test_stage_package_ambient_junk_named_parent_dir_still_ships(tmp_path):
     materialized = staged / "metal" / "lib.so"
     assert materialized.is_file() and not materialized.is_symlink()
     assert materialized.read_text() == "compiled\n"
+
+
+def test_stage_package_materialized_build_release_symlink_ships(tmp_path):
+    """Regression: `_METAL_IGNORE_ANYWHERE`'s location patterns (`build_*`, `dist`, `generated`,
+    `model_cache`) must NOT be applied to an escaping target's path — they describe regenerable
+    output at a KNOWN tree's root, not universal junk. tt-metal's own `build -> build_Release`
+    convention (`build_metal.sh`) means an absolute symlink into a real build commonly resolves
+    through a `build_Release` component; that must still ship.
+    """
+    wheels = tmp_path / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
+
+    checkout = tmp_path / "metal_checkout"
+    (checkout / "build_Release" / "lib").mkdir(parents=True)
+    so_path = checkout / "build_Release" / "lib" / "_ttnn.so"
+    so_path.write_bytes(b"\x7fELF-real-compiled-shared-object")
+    (checkout / "build").symlink_to(checkout / "build_Release", target_is_directory=True)
+
+    metal = tmp_path / "metal_src"
+    (metal / "ttnn").mkdir(parents=True)
+    (metal / "requirements.txt").write_text("torch==2.11.0\n")
+    (metal / "ttnn" / "_ttnn.so").symlink_to(so_path)  # absolute link straight to the real file
+
+    vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
+    staged = tmp_path / "staged"
+    packaging.stage_package(
+        staged, name="m", arch="blackhole", ttnn_wheel=ttnn,
+        metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
+    )
+
+    shipped = staged / "metal" / "ttnn" / "_ttnn.so"
+    assert shipped.is_file() and not shipped.is_symlink()
+    assert shipped.read_bytes() == b"\x7fELF-real-compiled-shared-object"
 
 
 def test_stage_package_special_file_raises_styled_error(tmp_path):
