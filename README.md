@@ -274,6 +274,13 @@ full package → pull → serve round-trip without a card. See the Testing secti
 [docs/self_contained_packages.md](docs/self_contained_packages.md) and
 [docs/thin_packages.md](docs/thin_packages.md).
 
+## Related tooling
+
+Bringing a model up on tt-metal before packaging it here? [`tenstorrent/skills`](https://github.com/tenstorrent/skills)
+is a separate Claude Code / Codex plugin marketplace for tt-metal bring-up, review, and
+debugging work. It's complementary, not a replacement for anything in this repo — `tt-model`
+packages, publishes, and serves models that are already working.
+
 ## Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on:

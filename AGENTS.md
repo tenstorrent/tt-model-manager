@@ -93,6 +93,19 @@ rendered from the manifest by `render_install_sh`/`render_run_sh` in `packaging.
 rendered script there (with a test), never by editing a staged bundle — a bundle in the wild
 carries whatever it was published with.
 
+## Related tooling
+
+[`tenstorrent/skills`](https://github.com/tenstorrent/skills) is a separate Claude Code / Codex
+plugin marketplace for **tt-metal bring-up, review, and debugging** work (`tt-model-bringup`,
+`tt-autodebug`, `tt-review-skills`, `tt-skills`). It does not overlap with or replace anything in
+this repo — `tt-model` packages/publishes/serves already-built models, while that marketplace
+helps an agent bring a model up on tt-metal in the first place. This repo's own skills
+(`tt-model-yaml`, `tt-model-package-test`, under `.claude/skills/` and `.codex/skills/`) are
+specific to authoring and testing `tt-model` packages and aren't published there. Install it
+with `/plugin marketplace add git@github.com:tenstorrent/skills.git` then `/plugin install
+tt-skills@tenstorrent-skills` (Claude Code) if bring-up work on the model you're packaging would
+benefit from it.
+
 ## Don't
 - Don't vendor `torch`/`vllm`/`transformers` — they are pip deps.
 - Don't commit wheels or other large binaries to git (LFS on push only).
