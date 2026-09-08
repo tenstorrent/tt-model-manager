@@ -748,7 +748,16 @@ class TtDitServerLauncher:
                 'uv pip install --python "$VENV/bin/python" -r /ctx/requirements.lock '
                 f"--extra-index-url {self.PYTORCH_CPU_INDEX} --index-strategy unsafe-best-match"
             ]
-        packages = [str(p) for p in (rt.get("packages") or ())] or list(self.DEFAULT_PACKAGES)
+        # DEFAULT_PACKAGES is the base HTTP stack every tt-dit-server needs (fastapi/uvicorn/
+        # pydantic/pillow); runtime.packages is what a model needs BEYOND that (diffusers,
+        # transformers, ...), never a replacement for it. An author naming their own version
+        # of a default (e.g. a stricter pydantic pin) still wins — matching the "an author-
+        # supplied torch wins" rule below — so defaults are filtered by name, not just unioned.
+        extra = [str(p) for p in (rt.get("packages") or ())]
+        extra_names = {re.split(r"[<>=!~\[; ]", p, maxsplit=1)[0].strip().lower() for p in extra}
+        packages = [p for p in self.DEFAULT_PACKAGES
+                    if re.split(r"[<>=!~\[; ]", p, maxsplit=1)[0].strip().lower() not in extra_names]
+        packages += extra
 
         # Nothing in an HTTP stack depends on torch, and diffusers/transformers declare it
         # optional — so unlike the vLLM kinds, where torch arrives as an engine dependency,
