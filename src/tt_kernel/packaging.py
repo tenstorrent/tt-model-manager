@@ -21,7 +21,6 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
-import os
 import re
 import shutil
 import socket
@@ -91,6 +90,10 @@ _METAL_IGNORE_ANYWHERE = shutil.ignore_patterns(
 _METAL_IGNORE_ROOT_ONLY = frozenset(
     {".cpmcache", "python_env", "tt_cache", "build", "built", "built_kernels"}
 )
+# Content that is never legitimate shipped content regardless of where it sits, unlike the
+# location-specific patterns above — used to judge a whole resolved path, not just one directory's
+# children.
+_JUNK_ANYWHERE_ON_PATH = shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "venv", ".venv")
 
 
 def _metal_ignore(anchor: Path):
@@ -115,29 +118,20 @@ def _metal_ignore(anchor: Path):
 
 
 def _is_junk_basename(name: str) -> bool:
-    """Whether ``name`` alone (VCS dirs, byte-caches, venvs, ...) matches ``_METAL_IGNORE_ANYWHERE``."""
-    return name in _METAL_IGNORE_ANYWHERE(None, [name])
+    """Whether ``name`` alone (VCS dirs, byte-caches, venvs, ...) matches ``_JUNK_ANYWHERE_ON_PATH``."""
+    return name in _JUNK_ANYWHERE_ON_PATH(None, [name])
 
 
-def _junk_component(target: Path, root: Path) -> Optional[str]:
-    """The first junk-named component of ``target`` below its common ancestor with ``root``, or None.
+def _junk_component(target: Path) -> Optional[str]:
+    """The first junk-named component anywhere in ``target``'s resolved path, or None.
 
     ``copytree``'s ``ignore=`` only ever filters *children* of a directory it walks — it never checks
     the root of a copy against the patterns — and ``copy2`` filters nothing at all. That leaves a
     symlink under an innocuous name free to reach excluded content: ``hist -> /outside/.git`` would
     materialize the repo whole, and ``gitcfg -> /outside/.git/config`` the credential file inside it.
     So classify the whole escaping path, not just its last component.
-
-    Only the components BELOW the common ancestor with the staged tree are judged — the part of the
-    path the link actually reaches into. The shared prefix is the host's ambient layout (a bundle
-    staged under ``~/generated/``, a CI workspace named ``build_42``) and reading it as junk would
-    drop ordinary content for a reason that has nothing to do with the link.
     """
-    try:
-        rel = target.relative_to(os.path.commonpath([root, target]))
-    except ValueError:  # no shared prefix at all (different mounts/roots) -> judge the whole path
-        rel = target
-    return next((part for part in rel.parts if _is_junk_basename(part)), None)
+    return next((part for part in target.parts if _is_junk_basename(part)), None)
 
 
 def _normalize_staged_symlinks(root: Path) -> None:
@@ -169,7 +163,7 @@ def _normalize_staged_symlinks(root: Path) -> None:
         except ValueError:
             pass  # points outside -> materialize below so the host path never ships
         link.unlink()
-        if _junk_component(target, root):
+        if _junk_component(target):
             # The escaping link reaches INTO junk (a `.git`, `__pycache__`, a venv, ...) under a
             # non-junk name: `hist -> /outside/.git`, or `gitcfg -> /outside/.git/config` for a
             # single file inside one. Neither copytree's ignore= (children only) nor copy2 (no
