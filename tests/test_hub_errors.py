@@ -12,6 +12,7 @@ imagined.
 import pytest
 from typer.testing import CliRunner
 
+from tt_kernel import MANIFEST_NAME
 from tt_kernel.hub import classify_hub_error, classify_repo_id
 
 runner = CliRunner()
@@ -82,10 +83,14 @@ def test_not_found_type_wins_over_a_401_status():
     assert d["cause"] == "no such bundle, or no access"
 
 
-def test_401_is_access_not_missing():
+def test_a_bare_401_is_a_credentials_problem_not_a_gate():
+    """A bare 401 (not a RepositoryNotFoundError, not a GatedRepoError) means the token
+    itself was rejected. It used to share the gated card, so an expired token told the
+    user to go "accept the terms" — a button that was never the problem here."""
     d = classify_hub_error(_exc("HfHubHTTPError", UNAUTHORIZED, 401), "x/y")
-    assert d["cause"] == "you do not have access"
+    assert d["cause"] == "your token was rejected"
     assert any("login" in a for a in d["actions"])
+    assert not any("accept the terms" in a for a in d["actions"])
 
 
 def test_403_is_authorisation():
@@ -110,6 +115,20 @@ def test_offline_beats_not_found():
 def test_missing_manifest_is_not_a_bundle():
     d = classify_hub_error(
         _exc("EntryNotFoundError", "tt_kernel_manifest.json does not exist"), "x/y")
+    assert d["cause"] == "not a tt-model bundle"
+
+
+def test_a_real_missing_manifest_404_is_not_reported_as_a_missing_repo():
+    """The Hub answers 404 for a missing FILE too, and a real EntryNotFoundError carries
+    that exact status code — the earlier fixture above omits both the "404 Client Error."
+    prefix and a status, so it never exercised the ``status == 404`` branch at all. With a
+    realistic exception, status alone can't tell "no such repo" from "repo exists, no
+    manifest" apart; only the class can. Checking the status-404 branch before the class
+    check turned "this repo ships no manifest" into "no such bundle, or no access"."""
+    real = ("404 Client Error. (Request ID: Root=1-6a9843cb-aaaa;bbbb)\n\n"
+            "Entry Not Found for url: https://huggingface.co/x/y/resolve/main/"
+            f"{MANIFEST_NAME}.")
+    d = classify_hub_error(_exc("EntryNotFoundError", real, 404), "x/y")
     assert d["cause"] == "not a tt-model bundle"
 
 
