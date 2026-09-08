@@ -969,6 +969,36 @@ def _pinned_sha(sha: str, repo: Optional[str], *, public: bool = True,
 TT_MODEL_MANAGER_URL = "https://github.com/tenstorrent/tt-model-manager"
 
 
+def _card_tags(m: ContainerManifest) -> set:
+    """Repo tags for a container package, including every board it declares.
+
+    ``hub.search`` filters on these, so an untagged package cannot be found by the one
+    question a consumer actually asks -- "what runs on my box". The v5 and v6 paths have
+    always tagged their mesh topology; the container path tagged none, which left every
+    v5.1 package invisible to that search.
+
+    EVERY profile is tagged, not just the default: one image serves them all, and tagging
+    only the default would hide a model from owners of the other board it was authored
+    for. Resolved, never raw -- ``serve_profiles`` entries inherit ``hardware`` from the
+    flat ``serve:`` block, so a raw read yields None for exactly the single-profile
+    manifests this is meant to cover.
+
+    Board labels say what the author VALIDATED. They are narrower than what will actually
+    run: ``compare()`` gates on arch + device_count, and P150x4 and P300x2 are both a
+    (1, 4) mesh, so a p300x2 package runs unwarned on a p150x4 box. Tagging the chip count
+    too would say that, but it is vocabulary no consumer parses yet -- see the tt-cli
+    ``_classify`` fallthrough, which files unknown tags under "arch".
+    """
+    from . import TT_MODEL_TAG
+
+    tags = {TT_MODEL_TAG, m.arch, m.kind, "tt-model-container"}
+    for name in m.profile_names():
+        hardware = m.resolve_profile(name).hardware
+        if hardware:
+            tags.add(hardware.strip().lower())
+    return tags
+
+
 def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     """The generated README.md for the HF repo.
 
@@ -982,7 +1012,7 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     from .manifest import DEFAULT_PORT
 
     tt_metal = built.get("tt_metal") or {}
-    tags = sorted({TT_MODEL_TAG, m.arch, m.kind, "tt-model-container"})
+    tags = sorted(_card_tags(m))
     lines = [
         "---",
         "tags:",
