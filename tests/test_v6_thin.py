@@ -20,7 +20,7 @@ _runner = CliRunner()
 
 
 def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=None,
-                vllm_wheel=None, with_vllm=True):
+                models_wheels=None, vllm_wheel=None, with_vllm=True):
     model_py = tmp_path / "model.py"
     model_py.write_text("class QwenForCausalLM:  # the runner\n    pass\n")
     staged = tmp_path / "thin"
@@ -29,6 +29,7 @@ def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=Non
         vllm_metadata={"arch": "QwenForCausalLM", "main_class": "model:QwenForCausalLM"},
         tt_kernel_version="0.0.0", requirements=requirements,
         plugin_wheel=plugin_wheel, extra_wheels=extra_wheels,
+        models_wheels=models_wheels,
         vllm_wheel=vllm_wheel, with_vllm=with_vllm,
         weights=WeightsRef(repo="Qwen/Qwen3-4B"), mesh=Mesh(devices=1, topology="P150"),
         resources=Resources(max_num_seqs=32, block_size=64),
@@ -134,6 +135,23 @@ def test_thin_ships_plugin_and_ops_as_wheels_by_path(tmp_path):
     assert f'"$HERE/wheels/{pw.name}"' in inst and f'"$HERE/wheels/{ow.name}"' in inst
     assert '--find-links "$HERE/wheels"' in inst
     assert '-r "$HERE/requirements.txt"' in inst
+
+
+def test_thin_models_wheel_resolves_a_local_pin_via_find_links(tmp_path):
+    # A hand-built tt-metal-models wheel, staged ahead of tenstorrent/tt-metal#54478 publishing to
+    # an index: it must NOT be installed by path (it's not in deps.wheels) but must still make the
+    # requirements.txt pin resolvable via --find-links.
+    mw = tmp_path / "tt_metal_models-0.77.0-py3-none-any.whl"; mw.write_bytes(b"PK\x03\x04")
+    staged, m = _stage_thin(tmp_path, models_wheels=[mw])
+    assert m.deps.models_wheels == [f"wheels/{mw.name}"]
+    assert m.deps.wheels == []                    # not installed by explicit path
+    assert m.deps.wheels_dir == "wheels"
+    assert (staged / "wheels" / mw.name).is_file()
+    inst = (staged / "install.sh").read_text()
+    # find-links now precedes the requirements install, not just the by-path wheel step
+    req_line = next(line for line in inst.splitlines() if '-r "$HERE/requirements.txt"' in line)
+    assert '--find-links "$HERE/wheels"' in req_line
+    assert f'"$HERE/wheels/{mw.name}"' not in inst  # never named as an explicit install target
 
 
 def test_thin_scripts_are_owner_rw_only_not_executable(tmp_path):

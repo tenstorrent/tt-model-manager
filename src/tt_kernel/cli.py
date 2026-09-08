@@ -642,6 +642,11 @@ def package_thin(
         "ship a custom vLLM fork); shipped in wheels/ and installed by path."),
     ops_wheel: Optional[List[str]] = typer.Option(
         None, "--ops-wheel", help="A generic_op custom-op wheel to ship in wheels/ (repeatable)."),
+    models_wheel: Optional[List[str]] = typer.Option(
+        None, "--models-wheel", help="A locally-built wheel that satisfies a requirements.txt pin "
+        "not yet on an index (e.g. a hand-built tt-metal-models wheel from tenstorrent/tt-metal#54478, "
+        "ahead of its publish). Staged in wheels/ and added to --find-links so the pin resolves "
+        "locally instead of failing; NOT installed by path itself. Repeatable."),
     vllm_wheel: Optional[str] = typer.Option(
         None, "--vllm-wheel", help="Optional PREBUILT empty-target vLLM wheel (stock vLLM built with "
         "VLLM_TARGET_DEVICE=empty — NOT the CUDA vllm, NOT a fork). Ships in wheels/ for a hermetic "
@@ -730,6 +735,7 @@ def package_thin(
         requirements=Path(requirements).expanduser() if requirements else None,
         plugin_wheel=Path(plugin_wheel).expanduser() if plugin_wheel else None,
         extra_wheels=[Path(w).expanduser() for w in (ops_wheel or [])],
+        models_wheels=[Path(w).expanduser() for w in (models_wheel or [])],
         vllm_wheel=Path(vllm_wheel).expanduser() if vllm_wheel else None,
         vllm_version=vllm_version, with_vllm=with_vllm,
         weights=weights_block, device_count=device_count, mesh=mesh, env=env_map,
@@ -739,6 +745,9 @@ def package_thin(
     typer.secho(f"✓ Staged v6 thin bundle {manifest.name} at {staged}", fg=typer.colors.GREEN)
     typer.echo(f"  runner: {model_path.name}   deps: {manifest.deps.requirements}"
                + (f" + {len(manifest.deps.wheels)} bundled wheel(s)" if manifest.deps.wheels else ""))
+    if manifest.deps.models_wheels:
+        typer.echo(f"  local pins: {len(manifest.deps.models_wheels)} models wheel(s) "
+                   "resolved via --find-links (not on an index yet)")
     if with_vllm:
         vspec = manifest.deps.vllm
         if vspec and vspec.wheel:
