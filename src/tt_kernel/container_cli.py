@@ -15,6 +15,7 @@ looks like the rest of the tool. The modules underneath (``build``, ``container`
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import tempfile
 from pathlib import Path
@@ -618,7 +619,13 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                                      rootless=container.docker_is_rootless())
 
     if print_only:
-        console.raw(" ".join(run_argv))
+        # shlex.join, not " ".join: the argv carries tokens a shell would take apart --
+        # chiefly the JSON of --additional-config / --tt-config and anything the author put
+        # in serve.args, e.g. --override-generation-config '{"temperature": 0.6}'. Joined
+        # raw, the printed line is not the command we would have run: the shell splits the
+        # JSON across several words and eats its quotes. shlex.quote is a no-op on tokens
+        # that need no quoting, so the ordinary flags print exactly as they always have.
+        console.raw(shlex.join(run_argv))
         return
 
     name = container.container_name(manifest, profile)
