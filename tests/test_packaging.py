@@ -8,6 +8,7 @@ manifest are asserted.
 
 import json
 import os
+import subprocess
 
 from typer.testing import CliRunner
 
@@ -66,6 +67,31 @@ def test_render_run_sh_no_tool_flags_without_capability():
     """No tool_parser declared => neither flag appears (bare --enable-auto-tool-choice is an error)."""
     run = packaging.render_run_sh(_run_sh_manifest())
     assert "--enable-auto-tool-choice" not in run and "--tool-call-parser" not in run
+
+
+def test_run_sh_ld_preload_fallback_survives_a_raw_unrepaired_wheel(tmp_path):
+    """A plain (non-auditwheel-repaired) ttnn wheel -- e.g. the real PyPI ttnn a v6 thin bundle
+    installs -- has no sibling ../*.libs/_ttnncpp*.so, only build/lib/_ttnncpp.so. Before the
+    fix, the first `ls <no-match> | head -1` pipe failing under `set -e -o pipefail` killed
+    run.sh right there -- before the documented build/lib fallback (or the deliberate `:?` error)
+    ever ran -- silently, with no output, exit code 2. Executes the actual generated snippet
+    under bash rather than asserting on its text, since only real execution catches this class
+    of bug (found by actually running a staged v6 bundle's run.sh against a real PyPI wheel).
+    """
+    run = packaging.render_run_sh(_run_sh_manifest())
+    lines = run.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith('LD_PRELOAD="$(ls'))
+    end = next(i for i, l in enumerate(lines) if "could not locate _ttnncpp.so" in l)
+    snippet = "\n".join(lines[start:end + 1])
+
+    ttnn_dir = tmp_path / "site-packages" / "ttnn"
+    (ttnn_dir / "build" / "lib").mkdir(parents=True)
+    (ttnn_dir / "build" / "lib" / "_ttnncpp.so").write_bytes(b"")
+
+    script = f'set -euo pipefail\nTTNN_DIR="{ttnn_dir}"\n{snippet}\necho "RESOLVED=$LD_PRELOAD"\n'
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, f"LD_PRELOAD fallback died: {result.stdout}{result.stderr}"
+    assert f"RESOLVED={ttnn_dir}/build/lib/_ttnncpp.so" in result.stdout
 
 
 def test_stage_package_layout(tmp_path):
@@ -230,66 +256,210 @@ def test_stage_package_dangling_symlink_and_cache_excludes(tmp_path):
     assert not any(p.is_symlink() and not p.exists() for p in dst_metal.rglob("*"))
 
 
-def test_stage_package_self_referential_escaping_dir_terminates(tmp_path):
-    """Regression: a self-referential escaping directory link must not recurse forever.
+def test_stage_package_materialized_escaping_dir_is_filtered(tmp_path):
+    """Regression: materializing a symlink that escapes the tree and points at a real directory
+    must still drop junk at every depth (VCS, byte-caches, ...) — empirically, an escaping link
+    shipped `.git/HEAD` and `__pycache__/junk.pyc`. (Pre-`symlinks=True`, the followed link was
+    filtered too.)
 
-    `copytree(..., symlinks=True)` preserves an absolute link inside the materialized copy
-    verbatim, so `outside/dir/self -> outside/dir` lands in the copy still pointing back outside.
-    The follow-up walk resolves it, sees an escaping directory, and materializes the whole thing
-    again — writing an ever-deeper tree until a raw RecursionError kills packaging (the
-    StagingError wrapper never gets to render it) and leaves the partial copy on disk. It is NOT
-    a symlink loop, so `resolve(strict=True)` succeeds and the dangling/loop guard never fires.
-
-    Also pins the two cases the cycle guard must NOT catch: independent links to the same outside
-    directory each still materialize, and a link to a SUBDIRECTORY of a target being materialized
-    is finite and must ship.
+    It must NOT apply the metal-tree's ROOT-ONLY excludes (`python_env`/`build`/`tt_cache`/...) to
+    the materialized target: those assume a metal-checkout layout that an arbitrary symlink target
+    doesn't share, and applying them anyway silently drops real content — asserted below via a
+    `python_env` dir at the materialized root that must ship, not vanish.
     """
     wheels = tmp_path / "in_wheels"
     wheels.mkdir()
     ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
 
-    outside = tmp_path / "outside"
-    cyclic = outside / "cyclic"
-    (cyclic / "sub").mkdir(parents=True)
-    (cyclic / "model.py").write_text("# real model code\n")
-    (cyclic / "sub" / "helper.py").write_text("# helper\n")
-    (cyclic / "self").symlink_to(cyclic.resolve(), target_is_directory=True)      # points at itself
-    (cyclic / "sub" / "up").symlink_to(cyclic.resolve(), target_is_directory=True)  # at an ancestor
-    (cyclic / "alias").symlink_to((cyclic / "sub").resolve(), target_is_directory=True)  # finite
-
-    shared = outside / "shared_lib"
-    shared.mkdir()
-    (shared / "kernel.so").write_text("compiled\n")
+    # A real OUTSIDE directory a metal symlink escapes into — full of what the excludes remove.
+    outside = tmp_path / "outside_build"
+    outside.mkdir()
+    (outside / "wanted.txt").write_text("real content the author wants\n")
+    (outside / ".git").mkdir()
+    (outside / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (outside / "__pycache__").mkdir()
+    (outside / "__pycache__" / "junk.pyc").write_bytes(b"\x00junk")
+    # `python_env` sits at the materialized root too, but — unlike the metal tree itself — this is
+    # NOT a metal checkout, so the root-only exclude must NOT apply: it is real content and ships.
+    (outside / "python_env").mkdir()
+    (outside / "python_env" / "real_config.txt").write_text("kept: not a metal tree\n")
 
     metal = tmp_path / "metal_src"
     metal.mkdir()
     (metal / "requirements.txt").write_text("torch==2.11.0\n")
-    (metal / "escapes").symlink_to(cyclic.resolve(), target_is_directory=True)
-    # Two INDEPENDENT links to one outside dir: not a cycle, both must still materialize.
-    (metal / "lib_a").symlink_to(shared.resolve(), target_is_directory=True)
-    (metal / "lib_b").symlink_to(shared.resolve(), target_is_directory=True)
+    (metal / "escapes").symlink_to(outside)  # the escaping directory link
 
     vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
     staged = tmp_path / "staged"
-    packaging.stage_package(  # must terminate, not RecursionError
+    packaging.stage_package(
         staged, name="m", arch="blackhole", ttnn_wheel=ttnn,
         metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
     )
 
     mat = staged / "metal" / "escapes"
-    assert (mat / "model.py").is_file()  # the escaping dir itself still materializes
-    assert (mat / "sub" / "helper.py").is_file()
-    assert (mat / "alias" / "helper.py").is_file()  # link to a subdir of the target: finite, ships
-    # The two cycle-forming links are dropped rather than re-materialized.
-    assert not (mat / "self").exists()
-    assert not (mat / "sub" / "up").exists()
-    # Bounded: without the guard this tree nests until the interpreter gives up.
-    assert max(len(p.relative_to(mat).parts) for p in mat.rglob("*")) <= 3
-    # Independent duplicates are untouched by the guard.
-    assert (staged / "metal" / "lib_a" / "kernel.so").read_text() == "compiled\n"
-    assert (staged / "metal" / "lib_b" / "kernel.so").read_text() == "compiled\n"
-    # And the pass still leaves no symlinks that dangle or leak the host.
-    assert not any(p.is_symlink() and not p.exists() for p in (staged / "metal").rglob("*"))
+    assert mat.is_dir() and not mat.is_symlink()  # materialized, not a leaked link
+    assert (mat / "wanted.txt").read_text() == "real content the author wants\n"
+    # The junk the exclude list exists to remove must NOT have been re-imported:
+    assert not (mat / ".git").exists()          # _METAL_IGNORE_ANYWHERE (VCS)
+    assert not (mat / "__pycache__").exists()   # _METAL_IGNORE_ANYWHERE (byte-cache)
+    # A materialized target isn't a metal checkout: root-only excludes don't apply, so this ships.
+    assert (mat / "python_env" / "real_config.txt").read_text() == "kept: not a metal tree\n"
+
+
+def test_stage_package_materialized_junk_named_target_is_dropped(tmp_path):
+    """Security regression: a symlink under an escaping directory, itself named innocuously but
+    resolving DIRECTLY to a junk-named directory (e.g. a `.git`), must not be materialized.
+
+    `copytree`'s `ignore=` only ever filters the *children* of a directory it walks — it never
+    checks the root of the copy against the exclude patterns. Without a check at the point of
+    materialization, `hist -> /outside/.git` survives the initial filter (its own name doesn't
+    match `.git`), and copying its target as the root of a fresh `copytree` would ship the `.git`
+    directory's contents whole — verified here with a fake credential in `.git/config`.
+    """
+    wheels = tmp_path / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
+
+    outside = tmp_path / "outside_repo"
+    outside.mkdir()
+    (outside / ".git").mkdir()
+    (outside / ".git" / "config").write_text("[credentials]\ntoken = super-secret\n")
+    (outside / "pkg").mkdir()
+    # Absolute link, named "hist" (not ".git") -> the real .git dir. Its own name isn't excluded.
+    (outside / "pkg" / "hist").symlink_to((outside / ".git").resolve(), target_is_directory=True)
+    (outside / "model.py").write_text("# real model code\n")
+
+    metal = tmp_path / "metal_src"
+    metal.mkdir()
+    (metal / "requirements.txt").write_text("torch==2.11.0\n")
+    (metal / "escapes").symlink_to(outside)
+
+    vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
+    staged = tmp_path / "staged"
+    packaging.stage_package(
+        staged, name="m", arch="blackhole", ttnn_wheel=ttnn,
+        metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
+    )
+
+    mat = staged / "metal" / "escapes"
+    assert (mat / "model.py").is_file()  # real content still ships
+    # The .git reached via a non-".git"-named symlink must not have been materialized at all.
+    assert not (mat / "pkg" / "hist").exists()
+    assert not any(p.name == "config" for p in mat.rglob("*"))
+
+
+def test_stage_package_materialized_link_into_junk_dir_is_dropped(tmp_path):
+    """Security regression, the FILE form of the junk-named-target leak: a symlink under an
+    innocuous name resolving to a file *inside* an excluded directory (`gitcfg -> /outside/.git/
+    config`) must not be materialized either.
+
+    Checking only the target's own basename closes the directory form (`hist -> .git`) but not
+    this one — the basename is `config`, and the `copy2` branch that handles a file target applies
+    no filtering at all. The whole escaping path is classified, so the `.git` component is caught
+    wherever it sits. Covered at both depths: under an escaping directory, and straight off the
+    metal root.
+    """
+    wheels = tmp_path / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
+
+    outside = tmp_path / "outside_repo"
+    outside.mkdir()
+    (outside / ".git").mkdir()
+    (outside / ".git" / "config").write_text("[credentials]\ntoken = super-secret\n")
+    (outside / "pkg").mkdir()
+    (outside / "pkg" / "model.py").write_text("# real model code\n")
+    # Named "gitcfg" (not ".git", not "config"-excluded) -> a single file inside the .git dir.
+    (outside / "pkg" / "gitcfg").symlink_to((outside / ".git" / "config").resolve())
+
+    metal = tmp_path / "metal_src"
+    metal.mkdir()
+    (metal / "requirements.txt").write_text("torch==2.11.0\n")
+    (metal / "escapes").symlink_to(outside)
+    # The same bypass one level up: straight off the metal root, no escaping directory involved.
+    (metal / "hostcfg").symlink_to((outside / ".git" / "config").resolve())
+
+    vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
+    staged = tmp_path / "staged"
+    packaging.stage_package(
+        staged, name="m", arch="blackhole", ttnn_wheel=ttnn,
+        metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
+    )
+
+    dst_metal = staged / "metal"
+    assert (dst_metal / "escapes" / "pkg" / "model.py").is_file()  # real content still ships
+    assert not (dst_metal / "escapes" / "pkg" / "gitcfg").exists()
+    assert not (dst_metal / "hostcfg").exists()
+    assert not any("super-secret" in p.read_text(errors="ignore")
+                   for p in dst_metal.rglob("*") if p.is_file())
+
+
+def test_stage_package_ambient_junk_named_parent_dir_still_ships(tmp_path):
+    """The path-wide junk check must judge content markers only (`.git`, `__pycache__`, venvs, ...),
+    not location words like `generated`/`build_*`/`dist` — so a workspace that happens to sit under
+    such a name (`generated/`, a `build_42` CI dir), staged to an unrelated `--out`, must not start
+    dropping ordinary escaping content.
+    """
+    workspace = tmp_path / "generated"  # would match the old, too-broad pattern set
+    workspace.mkdir()
+
+    wheels = workspace / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
+
+    outside = workspace / "outside_lib"
+    outside.mkdir()
+    (outside / "kernel.so").write_text("compiled\n")
+
+    metal = workspace / "metal_src"
+    metal.mkdir()
+    (metal / "requirements.txt").write_text("torch==2.11.0\n")
+    (metal / "lib.so").symlink_to((outside / "kernel.so").resolve())
+
+    vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
+    staged = tmp_path / "staged"  # OUTSIDE workspace: no shared "generated" prefix to hide behind
+    packaging.stage_package(
+        staged, name="m", arch="blackhole", ttnn_wheel=ttnn,
+        metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
+    )
+
+    materialized = staged / "metal" / "lib.so"
+    assert materialized.is_file() and not materialized.is_symlink()
+    assert materialized.read_text() == "compiled\n"
+
+
+def test_stage_package_materialized_build_release_symlink_ships(tmp_path):
+    """Regression: `_METAL_IGNORE_ANYWHERE`'s location patterns (`build_*`, `dist`, `generated`,
+    `model_cache`) must NOT be applied to an escaping target's path — they describe regenerable
+    output at a KNOWN tree's root, not universal junk. tt-metal's own `build -> build_Release`
+    convention (`build_metal.sh`) means an absolute symlink into a real build commonly resolves
+    through a `build_Release` component; that must still ship.
+    """
+    wheels = tmp_path / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
+
+    checkout = tmp_path / "metal_checkout"
+    (checkout / "build_Release" / "lib").mkdir(parents=True)
+    so_path = checkout / "build_Release" / "lib" / "_ttnn.so"
+    so_path.write_bytes(b"\x7fELF-real-compiled-shared-object")
+    (checkout / "build").symlink_to(checkout / "build_Release", target_is_directory=True)
+
+    metal = tmp_path / "metal_src"
+    (metal / "ttnn").mkdir(parents=True)
+    (metal / "requirements.txt").write_text("torch==2.11.0\n")
+    (metal / "ttnn" / "_ttnn.so").symlink_to(so_path)  # absolute link straight to the real file
+
+    vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
+    staged = tmp_path / "staged"
+    packaging.stage_package(
+        staged, name="m", arch="blackhole", ttnn_wheel=ttnn,
+        metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
+    )
+
+    shipped = staged / "metal" / "ttnn" / "_ttnn.so"
+    assert shipped.is_file() and not shipped.is_symlink()
+    assert shipped.read_bytes() == b"\x7fELF-real-compiled-shared-object"
 
 
 def test_stage_package_special_file_raises_styled_error(tmp_path):
@@ -395,3 +565,65 @@ def test_cli_package_requires_ttnn_wheel(tmp_path):
          "--arch-name", "X", "--main-class", "m:C", "--out", str(tmp_path / "s")],
     )
     assert res.exit_code != 0
+
+
+def test_stage_package_self_referential_escaping_dir_terminates(tmp_path):
+    """Regression: a self-referential escaping directory link must not recurse forever.
+
+    `copytree(..., symlinks=True)` preserves an absolute link inside the materialized copy
+    verbatim, so `outside/dir/self -> outside/dir` lands in the copy still pointing back outside.
+    The follow-up walk resolves it, sees an escaping directory, and materializes the whole thing
+    again — writing an ever-deeper tree until a raw RecursionError kills packaging (the
+    StagingError wrapper never gets to render it) and leaves the partial copy on disk. It is NOT
+    a symlink loop, so `resolve(strict=True)` succeeds and the dangling/loop guard never fires.
+
+    Also pins the two cases the cycle guard must NOT catch: independent links to the same outside
+    directory each still materialize, and a link to a SUBDIRECTORY of a target being materialized
+    is finite and must ship.
+    """
+    wheels = tmp_path / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn-bytes")
+
+    outside = tmp_path / "outside"
+    cyclic = outside / "cyclic"
+    (cyclic / "sub").mkdir(parents=True)
+    (cyclic / "model.py").write_text("# real model code\n")
+    (cyclic / "sub" / "helper.py").write_text("# helper\n")
+    (cyclic / "self").symlink_to(cyclic.resolve(), target_is_directory=True)      # points at itself
+    (cyclic / "sub" / "up").symlink_to(cyclic.resolve(), target_is_directory=True)  # at an ancestor
+    (cyclic / "alias").symlink_to((cyclic / "sub").resolve(), target_is_directory=True)  # finite
+
+    shared = outside / "shared_lib"
+    shared.mkdir()
+    (shared / "kernel.so").write_text("compiled\n")
+
+    metal = tmp_path / "metal_src"
+    metal.mkdir()
+    (metal / "requirements.txt").write_text("torch==2.11.0\n")
+    (metal / "escapes").symlink_to(cyclic.resolve(), target_is_directory=True)
+    # Two INDEPENDENT links to one outside dir: not a cycle, both must still materialize.
+    (metal / "lib_a").symlink_to(shared.resolve(), target_is_directory=True)
+    (metal / "lib_b").symlink_to(shared.resolve(), target_is_directory=True)
+
+    vmeta = {"arch": "LlamaForCausalLM", "main_class": "generator_vllm:LlamaForCausalLM"}
+    staged = tmp_path / "staged"
+    packaging.stage_package(  # must terminate, not RecursionError
+        staged, name="m", arch="blackhole", ttnn_wheel=ttnn,
+        metal_dir=metal, vllm_metadata=vmeta, tt_kernel_version="0.0.0",
+    )
+
+    mat = staged / "metal" / "escapes"
+    assert (mat / "model.py").is_file()  # the escaping dir itself still materializes
+    assert (mat / "sub" / "helper.py").is_file()
+    assert (mat / "alias" / "helper.py").is_file()  # link to a subdir of the target: finite, ships
+    # The two cycle-forming links are dropped rather than re-materialized.
+    assert not (mat / "self").exists()
+    assert not (mat / "sub" / "up").exists()
+    # Bounded: without the guard this tree nests until the interpreter gives up.
+    assert max(len(p.relative_to(mat).parts) for p in mat.rglob("*")) <= 3
+    # Independent duplicates are untouched by the guard.
+    assert (staged / "metal" / "lib_a" / "kernel.so").read_text() == "compiled\n"
+    assert (staged / "metal" / "lib_b" / "kernel.so").read_text() == "compiled\n"
+    # And the pass still leaves no symlinks that dangle or leak the host.
+    assert not any(p.is_symlink() and not p.exists() for p in (staged / "metal").rglob("*"))

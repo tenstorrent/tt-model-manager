@@ -9,6 +9,7 @@ important — that the v5 flow through the SAME commands is unchanged.
 
 import json
 import pathlib
+import shlex
 import shutil
 from pathlib import Path
 
@@ -157,6 +158,58 @@ def test_serve_print_emits_the_docker_run_without_running_it(tmp_path, monkeypat
     out = capsys.readouterr().out
     assert "docker run" in out and "--device /dev/tenstorrent" in out
     assert not ran
+
+
+# ------------------------------------------------- --print must be pasteable into a shell
+#
+# `--print` composes the command instead of running it, so its whole value is that you can
+# paste it. Joined with a bare " ".join it was not pasteable: the JSON tokens -- the
+# `--additional-config` this launcher emits, and anything JSON-shaped the author put in
+# serve.args, e.g. --override-generation-config -- reached the shell as several words with
+# their quotes eaten, and vLLM then died citing a value the operator never typed. Issue #76.
+
+JSON_SERVE = {
+    "port": 8000,
+    "block_size": 64,
+    "additional_config": {"tt": {"sample_on_device_mode": "decode_only"}},
+    "args": [["--override-generation-config", '{"temperature": 0.6, "top_p": 0.95}']],
+}
+
+
+def _printed(tmp_path, monkeypatch, capsys, **over) -> str:
+    monkeypatch.setattr(container, "run_checked", lambda argv: pytest.fail("--print ran it"))
+    container_cli.serve_container(_manifest(tmp_path, **over), print_only=True)
+    return capsys.readouterr().out.strip()
+
+
+def test_the_printed_command_survives_a_shell_round_trip(tmp_path, monkeypatch, capsys):
+    """The invariant: what a shell parses out of the printed line is the argv we would
+    have handed docker, token for token."""
+    out = _printed(tmp_path, monkeypatch, capsys, serve=dict(JSON_SERVE))
+    tokens = shlex.split(out)
+    assert tokens[tokens.index("--additional-config") + 1] == \
+        '{"tt": {"sample_on_device_mode": "decode_only"}}'
+    assert tokens[tokens.index("--override-generation-config") + 1] == \
+        '{"temperature": 0.6, "top_p": 0.95}'
+
+
+def test_a_json_argument_is_printed_single_quoted(tmp_path, monkeypatch, capsys):
+    """The reported symptom, in the shape the reader of the line sees."""
+    out = _printed(tmp_path, monkeypatch, capsys, serve=dict(JSON_SERVE))
+    json_arg = '{"tt": {"sample_on_device_mode": "decode_only"}}'
+    assert f"--additional-config '{json_arg}'" in out
+
+
+def test_ordinary_flags_print_exactly_as_before(tmp_path, monkeypatch, capsys):
+    """shlex.quote is a no-op on tokens needing no quoting, so quoting the JSON must not
+    put quotes around the paths, labels, mounts and ports that were already fine -- the
+    docs quote this line verbatim."""
+    out = _printed(tmp_path, monkeypatch, capsys, serve=dict(JSON_SERVE))
+    for fragment in ("docker run", "--device /dev/tenstorrent", "--publish 8000:8000",
+                     "--env HF_HOME=/hf", "--block-size 64",
+                     "--mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G"):
+        assert fragment in out
+    assert "'" not in out.split("--additional-config")[0], "quoted a token that was fine"
 
 
 def test_serve_refuses_when_the_container_is_already_running(tmp_path, monkeypatch):
@@ -1436,3 +1489,82 @@ def test_weights_cached_is_offline_and_swallows_failures(monkeypatch, tmp_path):
     assert container_cli.weights_cached(m.weights) is None
     assert seen["local_files_only"] is True
     assert seen["repo_id"] == "org/w" and seen["revision"] == "deadbeef"
+
+
+# ------------------------------------------------------- a weights fetch that failed
+# The pull stays green here by design: the image is loaded and the container can fetch its
+# own weights. What is under test is whether the warning is USEFUL, because it used to be
+# the exception's class name and nothing else.
+
+
+class _Ref:
+    repo_id = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+    revision = None
+    allow_patterns = None
+    ignore_patterns = None
+    repo_type = "model"
+
+
+def _gated_exc():
+    cls = type("GatedRepoError", (Exception,), {})
+    return cls("403 Client Error.\n\nCannot access gated repo for url "
+               "https://huggingface.co/api/models/Qwen/Qwen3-Coder-30B-A3B-Instruct.")
+
+
+def test_a_gated_weights_repo_is_named_and_linked(capsys):
+    """A gate is fixed by one click, so the warning has to carry the repo and its URL. The
+    consumer never typed the weights id — it is the author's pin inside the manifest — so
+    "GatedRepoError" alone left them with nothing to act on."""
+    container_cli._weights_download_failed(_Ref(), _gated_exc())
+    out = capsys.readouterr().out
+    assert "Qwen/Qwen3-Coder-30B-A3B-Instruct" in out
+    assert "https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct" in out
+    assert "accept the terms" in out
+
+
+def test_a_failed_weights_fetch_still_says_the_pull_survived(capsys):
+    """Non-fatal is the contract; the note must say so or the user re-runs for nothing."""
+    container_cli._weights_download_failed(_Ref(), _gated_exc())
+    assert "the image is loaded" in capsys.readouterr().out
+
+
+def test_a_weights_404_says_the_pin_is_stale_not_that_you_mistyped(capsys):
+    """The consumer never typed the weights id, so bundle wording sends them after a fix
+    that is not theirs to make — and `tt-model search` filters on TT_MODEL_TAG, so it can
+    never return a plain weights repo. Both would be advice that cannot work."""
+    cls = type("RepositoryNotFoundError", (Exception,), {})
+    exc = cls("404 Client Error.\n\nRepository Not Found for url: x.")
+    exc.response = type("R", (), {"status_code": 404})()
+    container_cli._weights_download_failed(_Ref(), exc)
+    out = capsys.readouterr().out
+    assert "tt-model search" not in out
+    assert "https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct" in out
+    assert "the image is loaded" in out  # still non-fatal
+
+
+def test_reporting_the_failure_can_never_itself_fail_the_pull(capsys):
+    """This runs inside the `except` that keeps a failed fetch non-fatal, so a raise here
+    would turn a warning into a failed pull — the exact opposite of the contract, and
+    something the one-line message it replaced could not do. An exception whose __str__
+    raises stands in for anything the classifier might choke on."""
+    class _Evil(Exception):
+        def __str__(self):
+            raise RuntimeError("boom")
+
+    container_cli._weights_download_failed(_Ref(), _Evil())  # must not raise
+    out = capsys.readouterr().out
+    assert "Qwen/Qwen3-Coder-30B-A3B-Instruct" in out  # still named
+    assert "the image is loaded" in out                # still says the pull survived
+
+
+def test_a_weights_404_is_not_dressed_up_as_a_gate(capsys):
+    """The same classifier bug reached here through the shared code path."""
+    cls = type("RepositoryNotFoundError", (Exception,), {})
+    exc = cls("404 Client Error.\n\nRepository Not Found for url: x.\n"
+              "If you are trying to access a private or gated repo, make sure you are "
+              "authenticated.")
+    exc.response = type("R", (), {"status_code": 404})()
+    container_cli._weights_download_failed(_Ref(), exc)
+    out = capsys.readouterr().out
+    assert "accept the terms" not in out
+

@@ -12,6 +12,7 @@ imagined.
 import pytest
 from typer.testing import CliRunner
 
+from tt_kernel import MANIFEST_NAME
 from tt_kernel.hub import classify_hub_error, classify_repo_id
 
 runner = CliRunner()
@@ -82,10 +83,14 @@ def test_not_found_type_wins_over_a_401_status():
     assert d["cause"] == "no such bundle, or no access"
 
 
-def test_401_is_access_not_missing():
+def test_a_bare_401_is_a_credentials_problem_not_a_gate():
+    """A bare 401 (not a RepositoryNotFoundError, not a GatedRepoError) means the token
+    itself was rejected. It used to share the gated card, so an expired token told the
+    user to go "accept the terms" — a button that was never the problem here."""
     d = classify_hub_error(_exc("HfHubHTTPError", UNAUTHORIZED, 401), "x/y")
-    assert d["cause"] == "you do not have access"
+    assert d["cause"] == "your token was rejected"
     assert any("login" in a for a in d["actions"])
+    assert not any("accept the terms" in a for a in d["actions"])
 
 
 def test_403_is_authorisation():
@@ -111,6 +116,76 @@ def test_missing_manifest_is_not_a_bundle():
     d = classify_hub_error(
         _exc("EntryNotFoundError", "tt_kernel_manifest.json does not exist"), "x/y")
     assert d["cause"] == "not a tt-model bundle"
+
+
+def test_a_real_missing_manifest_404_is_not_reported_as_a_missing_repo():
+    """The Hub answers 404 for a missing FILE too, and a real EntryNotFoundError carries
+    that exact status code — the earlier fixture above omits both the "404 Client Error."
+    prefix and a status, so it never exercised the ``status == 404`` branch at all. With a
+    realistic exception, status alone can't tell "no such repo" from "repo exists, no
+    manifest" apart; only the class can. Checking the status-404 branch before the class
+    check turned "this repo ships no manifest" into "no such bundle, or no access"."""
+    real = ("404 Client Error. (Request ID: Root=1-6a9843cb-aaaa;bbbb)\n\n"
+            "Entry Not Found for url: https://huggingface.co/x/y/resolve/main/"
+            f"{MANIFEST_NAME}.")
+    d = classify_hub_error(_exc("EntryNotFoundError", real, 404), "x/y")
+    assert d["cause"] == "not a tt-model bundle"
+
+
+# ------------------------------------------------------- the same taxonomy, for weights
+#
+# `pull` classifies a failed WEIGHTS fetch through this same function. The failure modes
+# are identical; the subject is not, and the bundle wording is wrong on a weights repo in
+# ways that hand the user an action they cannot take.
+
+
+def test_a_weights_404_does_not_blame_an_id_the_user_never_typed():
+    """The weights id is the package AUTHOR's pin, read out of the manifest — the consumer
+    could not have mistyped it, so "either the id is wrong" is advice aimed at the wrong
+    person. A 404 there means the pin went stale, and that is what it has to say."""
+    d = classify_hub_error(
+        _exc("RepositoryNotFoundError", REPO_NOT_FOUND, 404), "Qwen/Qwen3-Coder-30B",
+        weights=True)
+    assert d["cause"] == "no such weights repo, or no access"
+    assert "author's pin" in d["detail"]
+    assert "renamed or removed" in d["detail"]
+
+
+def test_a_weights_404_never_offers_a_search_that_cannot_match():
+    """`tt-model search` ANDs TT_MODEL_TAG into every query, so it lists tt-model bundles
+    and can never return a plain weights repo. Offering it guarantees an empty result."""
+    d = classify_hub_error(
+        _exc("RepositoryNotFoundError", REPO_NOT_FOUND, 404), "Qwen/Qwen3-Coder-30B",
+        weights=True)
+    assert not any("tt-model search" in a for a in d["actions"])
+    # ... and it points at the one page that answers "does this still exist?"
+    assert any("https://huggingface.co/Qwen/Qwen3-Coder-30B" in a for a in d["actions"])
+
+
+def test_a_weights_repo_is_never_called_not_a_tt_model_bundle():
+    """A weights repo is not supposed to carry a manifest. Reporting its absence as a
+    fault describes a defect that does not exist."""
+    d = classify_hub_error(
+        _exc("EntryNotFoundError", "tt_kernel_manifest.json does not exist"), "org/w",
+        weights=True)
+    assert d["cause"] != "not a tt-model bundle"
+
+
+def test_the_bundle_wording_is_unchanged_by_the_weights_flag():
+    """The flag is additive: every existing caller passes nothing and must be unaffected."""
+    for exc in (_exc("RepositoryNotFoundError", REPO_NOT_FOUND, 404),
+                _exc("EntryNotFoundError", "tt_kernel_manifest.json does not exist")):
+        assert classify_hub_error(exc, "x/y") == classify_hub_error(exc, "x/y", weights=False)
+    d = classify_hub_error(_exc("RepositoryNotFoundError", REPO_NOT_FOUND, 404), "x/y")
+    assert d["cause"] == "no such bundle, or no access"
+    assert any("tt-model search" in a for a in d["actions"])
+
+
+def test_a_gate_reads_the_same_either_way():
+    """_access_denied is already subject-agnostic — a gate is a gate, and the one-click fix
+    is the same URL. Pinned so a future edit does not fork it needlessly."""
+    exc = _exc("GatedRepoError", "Access to model x/y is restricted")
+    assert classify_hub_error(exc, "x/y", weights=True) == classify_hub_error(exc, "x/y")
 
 
 def test_unknown_error_still_gives_a_card_and_an_escape_hatch():

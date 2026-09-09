@@ -32,7 +32,8 @@ and both serve the same way. There are exactly two schemas:
 - **v6 "thin"** (schema_version `6`, the `deps` block) builds the venv from pip dependency pins
   (`ttnn` / `tt-metal-models`) plus bundled wheels (the `vllm-tt-plugin` and any `generic_op`
   custom-op wheel) plus an empty-target vLLM build step. No embedded `ttnn` wheel, no metal
-  tree. Author it with **`tt-model package-thin`**. See
+  tree. Author it with **`tt-model package-thin`** (**beta, unsupported** — the format is a
+  draft and may change). See
   **[docs/thin_packages.md](docs/thin_packages.md)**.
 
 Older bundles (pre-v5 schemas) are refused: *re-publish the bundle with a current tt-model.*
@@ -119,7 +120,7 @@ tt-model rm     you/mymodel                         # remove an installed bundle
 
 # Publish models
 tt-model package      you/mymodel ...               # author + push a v5 fat bundle
-tt-model package-thin you/mymodel ...               # author + push a v6 thin bundle
+tt-model package-thin you/mymodel ...               # author + push a v6 thin bundle (BETA, unsupported)
 tt-model publish      you/mymodel                    # list a public bundle in the community catalog
 tt-model unpublish    you/mymodel                    # delist (repo untouched)
 
@@ -273,6 +274,13 @@ The producer/consumer logic is fully unit-tested with mocked pip + HF, so you ca
 full package → pull → serve round-trip without a card. See the Testing sections of
 [docs/self_contained_packages.md](docs/self_contained_packages.md) and
 [docs/thin_packages.md](docs/thin_packages.md).
+
+## Related tooling
+
+Bringing a model up on tt-metal before packaging it here? [`tenstorrent/skills`](https://github.com/tenstorrent/skills)
+is a separate Claude Code / Codex plugin marketplace for tt-metal bring-up, review, and
+debugging work. It's complementary, not a replacement for anything in this repo — `tt-model`
+packages, publishes, and serves models that are already working.
 
 ## Contributing
 

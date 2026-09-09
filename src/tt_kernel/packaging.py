@@ -90,6 +90,48 @@ _METAL_IGNORE_ANYWHERE = shutil.ignore_patterns(
 _METAL_IGNORE_ROOT_ONLY = frozenset(
     {".cpmcache", "python_env", "tt_cache", "build", "built", "built_kernels"}
 )
+# Content that is never legitimate shipped content regardless of where it sits, unlike the
+# location-specific patterns above — used to judge a whole resolved path, not just one directory's
+# children.
+_JUNK_ANYWHERE_ON_PATH = shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "venv", ".venv")
+
+
+def _metal_ignore(anchor: Path):
+    """A ``copytree`` ``ignore`` callable for staging the metal tree itself: drops junk at every
+    depth (``_METAL_IGNORE_ANYWHERE``) plus the regenerable root-only caches/build output
+    (``_METAL_IGNORE_ROOT_ONLY``) at ``anchor`` — the top of the tree being copied — mirroring
+    tt-metal's root-anchored ``.gitignore``.
+
+    Only used for the initial metal-tree copy. A materialized escaping symlink is filtered by
+    ``_METAL_IGNORE_ANYWHERE`` alone (see ``_normalize_staged_symlinks``) — its target usually
+    isn't another metal checkout, so the root-only excludes don't apply there.
+    """
+    anchor = anchor.resolve()
+
+    def _ignore(src, names):
+        ignored = set(_METAL_IGNORE_ANYWHERE(src, names))
+        if Path(src).resolve() == anchor:  # root-anchored only, mirroring tt-metal's .gitignore
+            ignored |= _METAL_IGNORE_ROOT_ONLY.intersection(names)
+        return ignored
+
+    return _ignore
+
+
+def _is_junk_basename(name: str) -> bool:
+    """Whether ``name`` alone (VCS dirs, byte-caches, venvs, ...) matches ``_JUNK_ANYWHERE_ON_PATH``."""
+    return name in _JUNK_ANYWHERE_ON_PATH(None, [name])
+
+
+def _junk_component(target: Path) -> Optional[str]:
+    """The first junk-named component anywhere in ``target``'s resolved path, or None.
+
+    ``copytree``'s ``ignore=`` only ever filters *children* of a directory it walks — it never checks
+    the root of a copy against the patterns — and ``copy2`` filters nothing at all. That leaves a
+    symlink under an innocuous name free to reach excluded content: ``hist -> /outside/.git`` would
+    materialize the repo whole, and ``gitcfg -> /outside/.git/config`` the credential file inside it.
+    So classify the whole escaping path, not just its last component.
+    """
+    return next((part for part in target.parts if _is_junk_basename(part)), None)
 
 
 def _normalize_staged_symlinks(root: Path) -> None:
@@ -133,6 +175,13 @@ def _normalize_staged_symlinks(root: Path) -> None:
         except ValueError:
             pass  # points outside -> materialize below so the host path never ships
         link.unlink()
+        if _junk_component(target):
+            # The escaping link reaches INTO junk (a `.git`, `__pycache__`, a venv, ...) under a
+            # non-junk name: `hist -> /outside/.git`, or `gitcfg -> /outside/.git/config` for a
+            # single file inside one. Neither copytree's ignore= (children only) nor copy2 (no
+            # filtering) would catch it, so materializing would ship the excluded content anyway.
+            # Drop it, exactly as if it had appeared as a normal excluded entry.
+            return
         if any(active == target or active.is_relative_to(target) for active in _materializing):
             # Materializing this target would re-copy a directory whose own copy is still in
             # progress (it IS that directory, or contains it) -> unbounded recursion. A cycle
@@ -141,7 +190,12 @@ def _normalize_staged_symlinks(root: Path) -> None:
             # protect (``cp -rL``, ``tar -czhf``) cannot walk. Drop it, as with a dangling link.
             return
         if target.is_dir():
-            shutil.copytree(target, link, symlinks=True)
+            # Filter the materialized copy for junk at every depth (VCS, byte-caches, venvs, ...).
+            # NOT the root-only build/python_env/tt_cache excludes: those are metal-tree-specific
+            # assumptions (mirroring tt-metal's own root-anchored .gitignore) that don't hold for
+            # an arbitrary escaping target, which usually isn't another metal checkout — applying
+            # them here would silently drop real shipped content (e.g. a compiled build/kernel.so).
+            shutil.copytree(target, link, symlinks=True, ignore=_METAL_IGNORE_ANYWHERE)
             _materializing.append(target)
             try:
                 _walk(link)  # the fresh copy may itself carry links that escape the tree
@@ -310,8 +364,12 @@ def render_install_sh(manifest: Manifest) -> str:
         steps: List[str] = []
         # (1) Engine + models FIRST: ttnn (bundles the tt-metal runtime) and, once published,
         # tt-metal-models. This establishes torch + numpy<2 in the venv before vLLM's deps resolve.
+        # --find-links checks wheels_dir first, so a locally-built wheel there (e.g. a hand-built
+        # tt-metal-models wheel staged ahead of its index publish) satisfies its requirements.txt
+        # pin without a network resolve; anything not present there still falls through to the index.
+        req_find_links = f'--find-links "$HERE/{d.wheels_dir}" ' if d.wheels_dir else ""
         steps.append(
-            f'{pip} --extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{d.requirements}"'
+            f'{pip} {req_find_links}--extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{d.requirements}"'
         )
         # (2) vLLM core for the plugin: STOCK upstream vLLM built with VLLM_TARGET_DEVICE=empty (NOT
         # the CUDA `vllm` on PyPI). Mirrors tenstorrent/vllm-tt-plugin docs/install-vllm-tt.sh: install
@@ -461,9 +519,13 @@ TTNN_DIR="$("$PYBIN" -c 'import importlib.util,os;print(os.path.dirname(importli
 # _ttnncpp.so lives in ttnn.libs/ for an auditwheel-repaired (portable) wheel, or build/lib/ for a
 # raw one; preload it to avoid the glibc "static TLS block" error on late dlopen.
 # Prefer the auditwheel-vendored copy in *.libs/ (that's the one _ttnn.so actually loads via
-# RPATH); fall back to build/lib for a raw (unrepaired) wheel.
-LD_PRELOAD="$(ls "$TTNN_DIR"/../*.libs/_ttnncpp*.so 2>/dev/null | head -1)"
-[ -n "$LD_PRELOAD" ] || LD_PRELOAD="$(ls "$TTNN_DIR"/build/lib/_ttnncpp*.so 2>/dev/null | head -1)"
+# RPATH); fall back to build/lib for a raw (unrepaired) wheel — e.g. the plain `ttnn` PyPI wheel
+# a v6 thin bundle installs, which isn't auditwheel-repaired at all.
+# `|| true` on each probe: under `set -e -o pipefail`, a `ls <no-match> | head -1` pipe fails
+# (pipefail surfaces ls's nonzero exit) and set -e would kill the script on THIS line, before the
+# fallback below — or the deliberate `:?` error a few lines down — ever runs.
+LD_PRELOAD="$(ls "$TTNN_DIR"/../*.libs/_ttnncpp*.so 2>/dev/null | head -1)" || true
+[ -n "$LD_PRELOAD" ] || LD_PRELOAD="$(ls "$TTNN_DIR"/build/lib/_ttnncpp*.so 2>/dev/null | head -1)" || true
 export LD_PRELOAD="${{LD_PRELOAD:?could not locate _ttnncpp.so in the ttnn install}}"
 export TT_METAL_HOME="$TTNN_DIR"
 # EXTRA_MODELS_DIR is a PARENT of per-model bundle folders; the plugin scans its children for
@@ -548,16 +610,9 @@ def stage_package(
     # copytree raise. The root-anchored excludes (.cpmcache/python_env/tt_cache/build/...)
     # are regenerable multi-GB caches + build output — embedding them defeats the point
     # of shipping wheels. _normalize_staged_symlinks then makes the tree self-contained.
-    metal_root = metal_dir.resolve()
-
-    def _ignore(src, names):
-        ignored = set(_METAL_IGNORE_ANYWHERE(src, names))
-        if Path(src).resolve() == metal_root:  # root-anchored only, mirroring tt-metal's .gitignore
-            ignored |= _METAL_IGNORE_ROOT_ONLY.intersection(names)
-        return ignored
-
     try:
-        shutil.copytree(metal_dir, staged / METAL_DIR, symlinks=True, ignore=_ignore)
+        shutil.copytree(metal_dir, staged / METAL_DIR, symlinks=True,
+                        ignore=_metal_ignore(metal_dir))
         # Make the staged tree self-contained: drop dangling links, materialize any that escape it.
         # Inside the try (not after it) so its own unlink/copy2/copytree failures — EACCES/ENOSPC,
         # or a shutil.Error from the recursive copy — surface as a StagingError with context too,
@@ -693,6 +748,7 @@ def stage_thin_package(
     requirements: Optional[Path] = None,
     plugin_wheel: Optional[Path] = None,
     extra_wheels: Optional[List[Path]] = None,
+    models_wheels: Optional[List[Path]] = None,
     vllm_wheel: Optional[Path] = None,
     vllm_version: str = VLLM_VERSION,
     with_vllm: bool = True,
@@ -710,7 +766,9 @@ def stage_thin_package(
     the ``vllm_metadata.json`` (EXTRA_MODELS_DIR contract), generated ``install.sh``/``run.sh``, and
     — in ``wheels/`` — the **bundled wheels installed by path**: the ``vllm-tt-plugin``
     (``--plugin-wheel``, the vLLM integration) and any ``generic_op`` custom-op wheels
-    (``extra_wheels``).
+    (``extra_wheels``). ``models_wheels`` are also staged into ``wheels/`` but are NOT installed by
+    path — they only ride along on ``--find-links`` so a ``requirements.txt`` pin that isn't on an
+    index yet (e.g. a hand-built ``tt-metal-models`` wheel, ahead of its publish) still resolves.
 
     vLLM core is installed by ``install.sh`` as **stock upstream vLLM built with
     ``VLLM_TARGET_DEVICE=empty``** (the plugin's ``docs/install-vllm-tt.sh`` path — NOT the CUDA
@@ -749,6 +807,15 @@ def stage_thin_package(
             shutil.copy2(w, wheels_root / Path(w).name)
             deps_wheels.append(f"{WHEELS_DIR}/{Path(w).name}")
 
+    # Wheels that only need to satisfy a requirements.txt pin locally (not installed by path) — a
+    # locally-built tt-metal-models wheel ahead of its index publish is the motivating case.
+    models_deps_wheels: List[str] = []
+    for w in models_wheels or []:
+        wheels_root = staged / WHEELS_DIR
+        wheels_root.mkdir(exist_ok=True)
+        shutil.copy2(w, wheels_root / Path(w).name)
+        models_deps_wheels.append(f"{WHEELS_DIR}/{Path(w).name}")
+
     # vLLM core: stock upstream vLLM built empty-target (see Vllm). Ship the override file (numpy<2 /
     # opencv pin) so the common-deps install doesn't bump ttnn's numpy; the upstream common.txt is
     # fetched at install. An optional prebuilt empty-target wheel avoids building from source.
@@ -773,7 +840,9 @@ def stage_thin_package(
         python=python_version,
         requirements=REQUIREMENTS,
         wheels=deps_wheels,
-        wheels_dir=(WHEELS_DIR if (deps_wheels or (vllm_spec and vllm_spec.wheel)) else None),
+        models_wheels=models_deps_wheels,
+        wheels_dir=(WHEELS_DIR if (deps_wheels or models_deps_wheels
+                                    or (vllm_spec and vllm_spec.wheel)) else None),
         vllm=vllm_spec,
         model_dir=".",
     )

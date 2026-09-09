@@ -1208,3 +1208,74 @@ def test_the_manifest_bind_port_never_reaches_the_card():
     raw["serve"]["port"] = 9999
     card = build.render_model_card(ContainerManifest.model_validate(raw), _built())
     assert "9999" not in card
+
+
+# ------------------------------------------------------------------- hardware tags
+#
+# hub.search filters on repo tags, so a package that tags no board cannot be found by
+# "what runs on my box". v5/v6 have always tagged their mesh topology; the container path
+# tagged none, leaving every v5.1 package invisible to that query.
+
+
+def _tags_of(card: str) -> list:
+    body = card.split("---")[1]
+    return [l.strip("- ").strip() for l in body.strip().splitlines() if l.startswith("- ")]
+
+
+def test_the_card_tags_the_board_the_model_was_authored_for():
+    tags = _tags_of(_card())          # BASE declares one profile, hardware p150x4
+    assert "p150x4" in tags
+    # unchanged vocabulary still present
+    assert {"blackhole", "vllm-plugin", "tt-model-container"} <= set(tags)
+
+
+def test_hardware_inherited_from_the_flat_serve_block_is_still_tagged():
+    """The trap: serve_profiles entries inherit `hardware` from `serve:`, so the raw
+    profile reads None and a naive implementation tags nothing for exactly the
+    single-profile manifests this exists to cover."""
+    from tt_kernel.container_manifest import ContainerManifest
+
+    raw = json.loads(json.dumps(BASE))
+    raw["serve"]["hardware"] = "p300x2"          # the qwen3 shape: flat serve, no profiles
+    raw["serve"]["mesh_device"] = "P300x2"
+    raw["serve"]["max_num_seqs"] = 32
+    raw["serve"]["max_model_len"] = 131072
+    raw.pop("serve_profiles", None)
+    raw.pop("default_profile", None)
+    m = ContainerManifest.model_validate(raw)
+    # Nothing to read raw: a flat `serve:` stores NO profile object at all -- `default` is
+    # synthesized on resolve. (The wire manifest materialises it with hardware=None, so a
+    # raw read is empty-or-None depending on which end you are holding; both tag nothing.)
+    assert m.serve_profiles == []
+    assert m.resolve_profile(m.profile_names()[0]).hardware == "p300x2"
+    assert "p300x2" in _tags_of(build.render_model_card(m, _built()))
+
+
+def test_every_profile_is_tagged_not_only_the_default():
+    """One image serves all profiles; tagging only the default would hide the model from
+    owners of the other board it was authored for."""
+    from tt_kernel.container_manifest import ContainerManifest
+
+    raw = json.loads(json.dumps(BASE))
+    raw["serve"].pop("hardware", None)
+    raw["serve"].pop("mesh_device", None)
+    raw["serve_profiles"] = [
+        {"name": "p150x2", "hardware": "p150x2", "mesh_device": "P150x2"},
+        {"name": "p150x4", "hardware": "p150x4", "mesh_device": "P150x4"},
+    ]
+    raw["default_profile"] = "p150x4"
+    tags = _tags_of(build.render_model_card(
+        ContainerManifest.model_validate(raw), _built()))
+    assert "p150x2" in tags and "p150x4" in tags
+
+
+def test_a_board_label_is_tagged_lowercase():
+    """v5 writes `mesh_topology.lower()`; the two paths must not diverge on case, or the
+    same board becomes two tags on the Hub."""
+    from tt_kernel.container_manifest import ContainerManifest
+
+    raw = json.loads(json.dumps(BASE))
+    raw["serve_profiles"][0]["hardware"] = "P150x4"
+    tags = _tags_of(build.render_model_card(
+        ContainerManifest.model_validate(raw), _built()))
+    assert "p150x4" in tags and "P150x4" not in tags

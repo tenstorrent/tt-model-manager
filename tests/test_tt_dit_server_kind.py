@@ -205,6 +205,32 @@ def test_install_lines_do_not_install_vllm():
     assert "fastapi" in lines and "uvicorn" in lines
 
 
+def test_authors_own_packages_still_get_the_base_http_stack():
+    """A model that needs extra deps (diffusers, transformers, ...) still needs the base
+    fastapi/uvicorn/pydantic/pillow stack -- runtime.packages is BEYOND the defaults, not a
+    replacement for them. Found on tt-animatediff: declaring its own packages list (no
+    fastapi/uvicorn in it) silently dropped the whole HTTP stack, and the image's own
+    verify.sh died with `ModuleNotFoundError: No module named 'fastapi'`.
+    """
+    lines = "\n".join(launcher_for("tt-dit-server").install_lines(
+        _manifest(runtime={"app": "models.tt_dit.x:app",
+                            "packages": ["diffusers>=0.32.1", "transformers>=4.30.0"]})
+    ))
+    assert "fastapi" in lines and "uvicorn" in lines and "pydantic" in lines and "pillow" in lines
+    assert "diffusers>=0.32.1" in lines and "transformers>=4.30.0" in lines
+
+
+def test_authors_own_version_of_a_default_package_wins():
+    """Naming a default package explicitly (e.g. a stricter pydantic pin) overrides the
+    kind's own default for it, rather than installing both specs."""
+    lines = "\n".join(launcher_for("tt-dit-server").install_lines(
+        _manifest(runtime={"app": "models.tt_dit.x:app", "packages": ["pydantic<2.11"]})
+    ))
+    assert "pydantic<2.11" in lines
+    assert "pydantic>=2" not in lines
+    assert "fastapi" in lines and "uvicorn" in lines and "pillow" in lines  # other defaults survive
+
+
 def test_a_lock_replaces_resolution_entirely():
     lines = launcher_for("tt-dit-server").install_lines(_manifest(runtime={"app": "models.tt_dit.x:app", "lock": True}))
     assert len(lines) == 1
