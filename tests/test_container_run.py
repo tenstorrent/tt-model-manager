@@ -105,6 +105,25 @@ def test_the_rootless_probe_reads_the_daemons_own_security_options(monkeypatch):
     assert container.docker_is_rootless() is False
 
 
+def test_the_rootless_probe_is_false_when_docker_is_missing(monkeypatch):
+    """`serve --print` skips the host preflight so it works anywhere, and probes the mode
+    unconditionally — so the probe must not shell out to a docker that is not installed."""
+    def boom(*a, **k):
+        raise AssertionError("_run must not be called when docker is missing")
+
+    monkeypatch.setattr(container.shutil, "which", lambda *_: None)
+    monkeypatch.setattr(container, "_run", boom)
+    assert container.docker_is_rootless() is False
+
+
+def test_the_rootless_probe_survives_a_docker_that_cannot_be_executed(monkeypatch):
+    """On PATH but not runnable: subprocess raises rather than returning a code."""
+    monkeypatch.setattr(container.shutil, "which", lambda *_: "/usr/bin/docker")
+    monkeypatch.setattr(container, "_run",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("nope")))
+    assert container.docker_is_rootless() is False
+
+
 def test_the_rootless_probe_is_false_when_docker_is_unreachable(monkeypatch):
     """`serve --print` probes unconditionally and has to work with no daemon at all."""
     import subprocess

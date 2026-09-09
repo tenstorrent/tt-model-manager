@@ -92,8 +92,13 @@ def docker_is_rootless() -> bool:
     Returns False when docker is missing or unreachable, so callers that must work on any
     host (``serve --print``) can probe unconditionally.
     """
-    r = _run(["docker", "info", "--format", "{{.SecurityOptions}}"],
-             capture_output=True, text=True)
+    if shutil.which("docker") is None:
+        return False
+    try:
+        r = _run(["docker", "info", "--format", "{{.SecurityOptions}}"],
+                 capture_output=True, text=True)
+    except OSError:
+        return False
     return r.returncode == 0 and "name=rootless" in (r.stdout or "")
 
 
