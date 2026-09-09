@@ -15,6 +15,7 @@ looks like the rest of the tool. The modules underneath (``build``, ``container`
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import tempfile
 from pathlib import Path
@@ -618,7 +619,13 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                                      rootless=container.docker_is_rootless())
 
     if print_only:
-        console.raw(" ".join(run_argv))
+        # Shell-quote every token: run_argv carries JSON-valued flags
+        # (--additional-config, --override-generation-config, …) whose value is one argv
+        # element full of spaces, braces and quotes. A bare space-join renders a line the
+        # shell re-splits into garbage; shlex.quote makes the printed command paste-and-run
+        # exactly what serve would exec. (Name-only `--env HF_TOKEN` needs no quoting, so
+        # this never widens the token that deliberately withholds the secret's value.)
+        console.raw(" ".join(shlex.quote(a) for a in run_argv))
         return
 
     name = container.container_name(manifest, profile)

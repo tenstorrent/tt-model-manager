@@ -9,6 +9,7 @@ important — that the v5 flow through the SAME commands is unchanged.
 
 import json
 import pathlib
+import shlex
 import shutil
 from pathlib import Path
 
@@ -157,6 +158,29 @@ def test_serve_print_emits_the_docker_run_without_running_it(tmp_path, monkeypat
     out = capsys.readouterr().out
     assert "docker run" in out and "--device /dev/tenstorrent" in out
     assert not ran
+
+
+def test_serve_print_shell_quotes_json_flags(tmp_path, monkeypatch, capsys):
+    """Regression for #76: --print must emit a copy-paste-safe command. JSON-valued flags
+    (--additional-config here; --override-generation-config via args) are a single argv
+    element full of spaces/braces/quotes; a bare space-join re-splits in the shell into
+    garbage. The value must survive verbatim AND be shell-quoted."""
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    ac = {"tt": {"sample_on_device_mode": "decode_only", "trace_region_size": 209715200}}
+    serve = {"port": 8000, "block_size": 64, "additional_config": ac}
+    container_cli.serve_container(_manifest(tmp_path, serve=serve), print_only=True)
+    out = capsys.readouterr().out
+
+    raw = json.dumps(ac)                       # e.g. {"tt": {"sample_on_device_mode": ...}}
+    assert raw in out                          # value preserved byte-for-byte
+    assert f"'{raw}'" in out                   # ...and wrapped in single quotes
+    assert f"--additional-config {raw} " not in out  # never the bare, un-quoted form
+
+    # The printed line must re-lex through the shell with the JSON intact as ONE token.
+    cmdline = next(l for l in out.splitlines() if l.lstrip().startswith("docker run"))
+    toks = shlex.split(cmdline)
+    assert raw in toks
+    assert toks[toks.index("--additional-config") + 1] == raw
 
 
 def test_serve_refuses_when_the_container_is_already_running(tmp_path, monkeypatch):
