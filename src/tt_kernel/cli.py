@@ -630,7 +630,8 @@ def package(
 
 
 # ------------------------------------------------------------------- package-thin (v6)
-@app.command(name="package-thin", rich_help_panel="Publish models")
+@app.command(name="package-thin", rich_help_panel="Publish models",
+             short_help="[BETA — unsupported] Package a v6 thin bundle (model.py + pip pins).")
 def package_thin(
     repo_id: Optional[str] = typer.Argument(None, help="HF target namespace/name (omit + --out to stage only)."),
     model_py: str = typer.Option(..., "--model-py", help="Path to the model.py / run.py runner."),
@@ -679,15 +680,26 @@ def package_thin(
         False, "--publish", help="Also list the pushed repo in the community catalog. Implies --public "
         "(the catalog is a public index); use --public alone to make the repo public but NOT listed."),
 ) -> None:
-    """Package a v6 THIN bundle (issue #29): ship ``model.py`` + pip dependency pins
-    (ttnn / TTTv2 / models wheel) + optional ``generic_op`` wheels. The per-model venv is built from
-    those pins at install — NOT from an embedded ttnn wheel or a metal tree. Weights stay a pointer;
-    SFPI is an external box dep.
+    """BETA — NOT SUPPORTED. Package a v6 THIN bundle (issue #29): ship ``model.py`` + pip
+    dependency pins (ttnn / TTTv2 / models wheel) + optional ``generic_op`` wheels. The per-model
+    venv is built from those pins at install — NOT from an embedded ttnn wheel or a metal tree.
+    Weights stay a pointer; SFPI is an external box dep.
+
+    This command is beta and unsupported: the v6 thin format is still a draft, its flags and
+    on-disk layout may change without notice, and bundles it produces are not guaranteed to
+    install or serve. Use ``tt-model package`` (v5 self-contained) for supported packaging.
 
     DRAFT (reflects the plan): fully installable once TTTv2 + the models wheel publish so the pins are
     real; until then the generated requirements.txt carries TODO pins for those two (ttnn already
     resolves from PyPI).
     """
+    console.console.print(console.notice_panel(
+        "[warning]package-thin is BETA and not supported[/warning]",
+        ["[muted]The v6 thin format is a draft: flags and layout may change without notice,[/muted]",
+         "[muted]and the bundles it produces are not guaranteed to install or serve.[/muted]",
+         "",
+         "[muted]supported path:  tt-model package  (v5 self-contained)[/muted]"],
+    ))
     if publish and private is True:  # explicit --private contradicts --publish
         raise _err("--publish and --private conflict: a catalog listing is public by definition. "
                    "Use --publish alone (it makes the repo public), or --public without --publish "
