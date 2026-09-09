@@ -19,10 +19,12 @@ The docker flags are not folklore; each one is load-bearing:
   ``HF_MODULES_CACHE``. Weights are the only thing that ever touches the host.
 - a per-model host dir at ``TT_METAL_CACHE``: the JIT kernel/trace cache. Persisting it
   across boots is the difference between a ~6-minute and a ~15-minute start.
-- ``--user <host uid>:<host gid>``: everything the container writes lands in bind mounts
-  the host user owns (the HF cache, the kernel cache), so it must write AS that user. A
-  baked-in uid cannot work — 1000 and 1001 are both common — and mismatched ownership
-  fails as ``Permission denied`` from the JIT, minutes into a boot.
+- ``--user``: everything the container writes lands in bind mounts the host user owns
+  (the HF cache, the kernel cache), so it must write AS that user. A baked-in uid cannot
+  work — 1000 and 1001 are both common — and mismatched ownership fails as ``Permission
+  denied`` from the JIT, minutes into a boot. The value is NOT simply the host uid:
+  ``--user`` names an identity in the CONTAINER's user namespace, so under rootless
+  Docker it has to be ``0:0``. See ``container_user``.
 """
 
 from __future__ import annotations
@@ -82,8 +84,110 @@ def _docker_version() -> Optional[str]:
     return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
 
 
+def docker_is_rootless() -> bool:
+    """Check if the daemon is running rootless.
+
+    Asked of the DAEMON, because the alternatives are only conventions: a context can be
+    named anything, and DOCKER_HOST pointing into /run/user is a habit, not a guarantee.
+    Returns False when docker is missing or unreachable, so callers that must work on any
+    host (``serve --print``) can probe unconditionally.
+    """
+    if shutil.which("docker") is None:
+        return False
+    try:
+        r = _run(["docker", "info", "--format", "{{.SecurityOptions}}"],
+                 capture_output=True, text=True)
+    except OSError:
+        return False
+    return r.returncode == 0 and "name=rootless" in (r.stdout or "")
+
+
+def container_user(*, rootless: bool) -> str:
+    """The ``--user`` value that makes container writes land as the host user.
+
+    ``--user`` selects an identity in the CONTAINER's user namespace; ``os.getuid()`` is a
+    HOST identity. With no namespace in play the two coincide, which is why the plain host
+    uid is right for a rootful daemon. Rootless Docker maps the invoking user to container
+    uid 0, so passing the host uid there selects an identity that maps back out to an
+    unrelated subuid (100000 + uid - 1) owning nothing: every bind mount becomes
+    unwritable and the host user's own files read as root.
+    """
+    return "0:0" if rootless else f"{os.getuid()}:{os.getgid()}"
+
+
+def _reachable_in_userns(path: Path, *, mode: int) -> bool:
+    """Would the container's mapped identity have ``mode`` (an ``os.access`` mask) here?
+
+    Not ``os.access``: that consults our SUPPLEMENTARY groups, and a rootless container
+    gets a single gid mapping rather than the host user's group list — so access granted
+    only by group membership (the usual ``root:tenstorrent`` device story) disappears
+    inside the namespace. Judged the way the kernel will judge it there: owner bits when
+    we own the file, group bits only for our PRIMARY gid, otherwise other bits.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    if st.st_uid == os.getuid():
+        shift = 6
+    elif st.st_gid == os.getgid():
+        shift = 3
+    else:
+        shift = 0
+    want = 0
+    if mode & os.R_OK:
+        want |= 0o4
+    if mode & os.W_OK:
+        want |= 0o2
+    if mode & os.X_OK:
+        want |= 0o1
+    return (st.st_mode >> shift) & want == want
+
+
+# What to do about a path a rootless container cannot reach. Group membership is
+# deliberately NOT offered: it is the reflex fix, and it does not work here.
+_ROOTLESS_DEVICE_FIX = (
+    "under rootless Docker the container's identity is your own uid, and your "
+    "supplementary groups are NOT mapped into its namespace — so adding yourself to a "
+    "group does not help. The nodes must be readable/writable by you directly.\n"
+    "  now:      sudo setfacl -m u:$USER:rw /dev/tenstorrent/*\n"
+    "  persist:  tt-kmd ships /lib/udev/rules.d/udev-50-tenstorrent.rules with "
+    '`SUBSYSTEM=="tenstorrent", MODE="0666"` — restore that (udev recreates the nodes '
+    "on every boot), then `sudo udevadm control --reload && sudo udevadm trigger "
+    "--subsystem-match=tenstorrent`\n"
+    "  or:       serve against a rootful daemon instead (unset DOCKER_HOST)"
+)
+
+_ROOTLESS_HUGEPAGES_FIX = (
+    "the mount must be writable by your uid directly — a rootless container does not "
+    "carry your supplementary groups into its namespace.\n"
+    f"  now:      sudo mount -o remount,mode=0777 {HUGEPAGES_MOUNT}\n"
+    "  persist:  tt-metal's mount unit already uses mode=0777 — check "
+    "`systemctl cat 'dev-hugepages\\x2d1G.mount'` and restore that option if it has "
+    "been changed\n"
+    "  or:       serve against a rootful daemon instead (unset DOCKER_HOST)"
+)
+
+
+def _unreachable_devices(dev_root: Path) -> List[str]:
+    """Which /dev/tenstorrent nodes a rootless container could not open read-write.
+
+    The directory needs search, then every numbered node needs read-write: umd opens all
+    of them, so one unreachable board is a failed boot rather than a smaller mesh.
+    """
+    if not _reachable_in_userns(dev_root, mode=os.R_OK | os.X_OK):
+        return [str(dev_root)]
+    try:
+        nodes = sorted(p for p in dev_root.iterdir() if p.name.isdigit())
+    except OSError:
+        return [str(dev_root)]
+    return [p.name for p in nodes
+            if not _reachable_in_userns(p, mode=os.R_OK | os.W_OK)]
+
+
 def preflight(*, need_devices: bool, proc_mounts: Optional[Path] = None,
-              dev_root: Optional[Path] = None) -> List[Requirement]:
+              dev_root: Optional[Path] = None,
+              rootless: Optional[bool] = None) -> List[Requirement]:
     """Check what this host must have, before anything slow or opaque happens.
 
     Every one of these fails LATE and unhelpfully if left unchecked: a missing hugepages
@@ -92,8 +196,14 @@ def preflight(*, need_devices: bool, proc_mounts: Optional[Path] = None,
 
     ``need_devices`` is False for operations that only move bytes (``pull``, ``push``):
     those work fine on a machine with no card attached.
+
+    Under a rootless daemon the device and hugepage checks get stricter: the container's
+    identity there cannot rely on group membership, so a host that a rootful run handles
+    fine may be unusable — and that failure would otherwise land minutes into a boot.
     """
     out: List[Requirement] = []
+    if rootless is None:
+        rootless = docker_is_rootless()
 
     version = _docker_version()
     if version is None:
@@ -108,7 +218,9 @@ def preflight(*, need_devices: bool, proc_mounts: Optional[Path] = None,
         major = int(m.group(1)) if m else 0
         ok = major >= MIN_DOCKER_MAJOR
         out.append(Requirement(
-            "docker", ok, version,
+            # the mode rides along in the detail rather than as its own row: it is not a
+            # pass/fail, but it decides what --user must be and is worth seeing.
+            "docker", ok, f"{version} (rootless)" if rootless else version,
             "" if ok else (
                 f"Docker >= {MIN_DOCKER_MAJOR} is required: earlier versions do not emit "
                 "an OCI layout from `docker save`, which packaging and loading rely on "
@@ -120,13 +232,20 @@ def preflight(*, need_devices: bool, proc_mounts: Optional[Path] = None,
         return out
 
     dev = Path(dev_root) if dev_root is not None else Path(TT_DEVICE)
-    out.append(Requirement(
-        "tt devices", dev.exists(), str(dev) if dev.exists() else "missing",
-        "" if dev.exists() else (
+    if not dev.exists():
+        out.append(Requirement(
+            "tt devices", False, "missing",
             f"{TT_DEVICE} does not exist — the Tenstorrent kernel driver (tt-kmd) is not "
-            "loaded, or this is not a machine with a card"
-        ),
-    ))
+            "loaded, or this is not a machine with a card",
+        ))
+    else:
+        unreachable = _unreachable_devices(dev) if rootless else []
+        out.append(Requirement(
+            "tt devices", not unreachable,
+            str(dev) if not unreachable else
+            f"{', '.join(unreachable)} not accessible to your uid",
+            "" if not unreachable else _ROOTLESS_DEVICE_FIX,
+        ))
 
     mounts = Path(proc_mounts) if proc_mounts is not None else Path("/proc/mounts")
     try:
@@ -137,6 +256,13 @@ def preflight(*, need_devices: bool, proc_mounts: Optional[Path] = None,
         len(parts) > 2 and parts[1] == HUGEPAGES_MOUNT and parts[2] == "hugetlbfs"
         for parts in (ln.split() for ln in text.splitlines())
     )
+    if mounted and rootless and not _reachable_in_userns(
+            Path(HUGEPAGES_MOUNT), mode=os.W_OK | os.X_OK):
+        out.append(Requirement(
+            "hugepages", False, f"{HUGEPAGES_MOUNT} not writable by your uid",
+            _ROOTLESS_HUGEPAGES_FIX,
+        ))
+        return out
     out.append(Requirement(
         "hugepages", mounted,
         HUGEPAGES_MOUNT if mounted else f"{HUGEPAGES_MOUNT} not mounted",
@@ -267,11 +393,14 @@ def compose_run(
     weight_cache_dir: Optional[Path] = None,
     hub_cache_dir: Optional[Path] = None,
     include_hf_token: Optional[bool] = None,
+    rootless: bool = False,
 ) -> List[str]:
     """The full ``docker run`` argv for one serve profile.
 
     Pure: the only environment it reads is ``HF_HOME``/``HF_HUB_CACHE``/``HF_TOKEN``, and
     all can be overridden by the caller so tests never depend on the developer's shell.
+    ``rootless`` is passed in rather than probed here for the same reason — the caller
+    resolves it with ``docker_is_rootless()``; the safe default matches a rootful daemon.
     """
     _require_container(m)
     port = profile.port or DEFAULT_PORT
@@ -297,8 +426,8 @@ def compose_run(
     # ROOT and the container (running as the host user) cannot write them.
     cmd += [
         "--name", container_name(m, profile),
-        # write as the host user: see the module docstring
-        "--user", f"{os.getuid()}:{os.getgid()}",
+        # write as the host user: see `container_user`
+        "--user", container_user(rootless=rootless),
         "--label", f"{LABEL}={m.name}",
         "--label", f"{LABEL}.profile={profile.name}",
         "--device", "/dev/tenstorrent",

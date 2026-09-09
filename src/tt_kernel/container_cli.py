@@ -15,6 +15,7 @@ looks like the rest of the tool. The modules underneath (``build``, ``container`
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import tempfile
 from pathlib import Path
@@ -611,10 +612,20 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     launcher = launcher_for(spec.kind)
     argv = launcher.serve_argv(manifest, profile) + list(extra_args or [])
     env = launcher.serve_env(manifest, profile)
-    run_argv = container.compose_run(manifest, profile, argv, env, detach=not print_only)
+    # Probed here, not in compose_run, so composition stays pure. Safe on a host with
+    # no docker at all (returns False), which --print has to keep working on.
+    run_argv = container.compose_run(manifest, profile, argv, env,
+                                     detach=not print_only,
+                                     rootless=container.docker_is_rootless())
 
     if print_only:
-        console.raw(" ".join(run_argv))
+        # shlex.join, not " ".join: the argv carries tokens a shell would take apart --
+        # chiefly the JSON of --additional-config / --tt-config and anything the author put
+        # in serve.args, e.g. --override-generation-config '{"temperature": 0.6}'. Joined
+        # raw, the printed line is not the command we would have run: the shell splits the
+        # JSON across several words and eats its quotes. shlex.quote is a no-op on tokens
+        # that need no quoting, so the ordinary flags print exactly as they always have.
+        console.raw(shlex.join(run_argv))
         return
 
     name = container.container_name(manifest, profile)

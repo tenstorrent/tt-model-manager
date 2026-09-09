@@ -20,7 +20,7 @@ _runner = CliRunner()
 
 
 def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=None,
-                vllm_wheel=None, with_vllm=True):
+                models_wheels=None, vllm_wheel=None, with_vllm=True):
     model_py = tmp_path / "model.py"
     model_py.write_text("class QwenForCausalLM:  # the runner\n    pass\n")
     staged = tmp_path / "thin"
@@ -29,6 +29,7 @@ def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=Non
         vllm_metadata={"arch": "QwenForCausalLM", "main_class": "model:QwenForCausalLM"},
         tt_kernel_version="0.0.0", requirements=requirements,
         plugin_wheel=plugin_wheel, extra_wheels=extra_wheels,
+        models_wheels=models_wheels,
         vllm_wheel=vllm_wheel, with_vllm=with_vllm,
         weights=WeightsRef(repo="Qwen/Qwen3-4B"), mesh=Mesh(devices=1, topology="P150"),
         resources=Resources(max_num_seqs=32, block_size=64),
@@ -136,6 +137,23 @@ def test_thin_ships_plugin_and_ops_as_wheels_by_path(tmp_path):
     assert '-r "$HERE/requirements.txt"' in inst
 
 
+def test_thin_models_wheel_resolves_a_local_pin_via_find_links(tmp_path):
+    # A hand-built tt-metal-models wheel, staged ahead of tenstorrent/tt-metal#54478 publishing to
+    # an index: it must NOT be installed by path (it's not in deps.wheels) but must still make the
+    # requirements.txt pin resolvable via --find-links.
+    mw = tmp_path / "tt_metal_models-0.77.0-py3-none-any.whl"; mw.write_bytes(b"PK\x03\x04")
+    staged, m = _stage_thin(tmp_path, models_wheels=[mw])
+    assert m.deps.models_wheels == [f"wheels/{mw.name}"]
+    assert m.deps.wheels == []                    # not installed by explicit path
+    assert m.deps.wheels_dir == "wheels"
+    assert (staged / "wheels" / mw.name).is_file()
+    inst = (staged / "install.sh").read_text()
+    # find-links now precedes the requirements install, not just the by-path wheel step
+    req_line = next(line for line in inst.splitlines() if '-r "$HERE/requirements.txt"' in line)
+    assert '--find-links "$HERE/wheels"' in req_line
+    assert f'"$HERE/wheels/{mw.name}"' not in inst  # never named as an explicit install target
+
+
 def test_thin_scripts_are_owner_rw_only_not_executable(tmp_path):
     # Least privilege (Cycode SAST): the generated scripts are run via `bash <script>`, so they need
     # no execute bit and no group/other access — mode 0o600.
@@ -177,3 +195,28 @@ def test_cli_package_thin_stage_only(tmp_path):
     m = Manifest.from_json((out / "tt_kernel_manifest.json").read_text())
     assert m.is_thin and m.arch == "blackhole"
     assert (out / "model.py").is_file() and (out / "requirements.txt").is_file()
+
+
+def _plain(text: str) -> str:
+    """Collapse rich's box-drawing + wrapping so a phrase can be matched across lines."""
+    return " ".join(text.replace("│", " ").replace("─", " ").split())
+
+
+def test_cli_package_thin_is_marked_beta_and_unsupported(tmp_path):
+    # v6 thin is a draft format: the CLI must say so both in `--help` (so it is visible before
+    # anyone runs it) and on every run (so a staged bundle is never mistaken for supported output).
+    top = _plain(_runner.invoke(cli.app, ["--help"]).output)
+    assert "BETA" in top.split("package-thin", 1)[1][:120]
+
+    cmd_help = _plain(_runner.invoke(cli.app, ["package-thin", "--help"]).output)
+    assert "BETA" in cmd_help and "NOT SUPPORTED" in cmd_help.upper()
+
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    res = _runner.invoke(cli.app, [
+        "package-thin", "--model-py", str(model_py), "--arch", "blackhole",
+        "--arch-name", "QwenForCausalLM", "--main-class", "model:C",
+        "--out", str(tmp_path / "staged"),
+    ])
+    assert res.exit_code == 0, res.output
+    assert "package-thin is BETA and not supported" in _plain(res.output)
