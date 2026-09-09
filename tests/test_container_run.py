@@ -64,6 +64,56 @@ def test_the_container_runs_as_the_host_user():
     assert argv[argv.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
 
 
+def test_a_rootless_daemon_runs_the_container_as_uid_0(tmp_path):
+    """Rootless docker maps the invoking user to container uid 0, so `--user <host uid>`
+    there selects an identity that maps back out to an unrelated subuid owning none of the
+    bind mounts: the HF cache download dies with PermissionError early in the boot."""
+    argv = _run_argv(_wire(), rootless=True)
+    assert argv[argv.index("--user") + 1] == "0:0"
+
+
+def test_container_user_is_the_host_uid_only_without_a_userns():
+    import os
+
+    assert container.container_user(rootless=False) == f"{os.getuid()}:{os.getgid()}"
+    assert container.container_user(rootless=True) == "0:0"
+
+
+def test_compose_run_never_probes_the_daemon(monkeypatch):
+    """Composition stays pure: `serve --print` must work on a host with no docker, so the
+    mode is resolved by the caller and defaults to the rootful answer."""
+    def boom(*a, **k):
+        raise AssertionError("compose_run must not shell out")
+
+    monkeypatch.setattr(container, "_run", boom)
+    argv = _run_argv(_wire())
+    assert "--user" in argv
+
+
+def test_the_rootless_probe_reads_the_daemons_own_security_options(monkeypatch):
+    """Asked of the daemon, not inferred from the context name or DOCKER_HOST."""
+    import subprocess
+
+    def fake(cmd, **kw):
+        assert cmd[:2] == ["docker", "info"]
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(container, "_run", fake)
+    out = "[name=seccomp,profile=builtin name=rootless name=cgroupns]"
+    assert container.docker_is_rootless() is True
+    out = "[name=apparmor name=seccomp,profile=builtin name=cgroupns]"
+    assert container.docker_is_rootless() is False
+
+
+def test_the_rootless_probe_is_false_when_docker_is_unreachable(monkeypatch):
+    """`serve --print` probes unconditionally and has to work with no daemon at all."""
+    import subprocess
+
+    monkeypatch.setattr(container, "_run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "no"))
+    assert container.docker_is_rootless() is False
+
+
 def test_mount_sources_are_created_as_the_host_user(tmp_path):
     """Otherwise the docker daemon creates them as ROOT and the container cannot write."""
     m = _wire()
@@ -422,14 +472,21 @@ GOOD_MOUNTS = (
 
 
 def _pf(tmp_path, monkeypatch, *, version="29.5.3", mounts=GOOD_MOUNTS, devices=True,
-        need_devices=True):
+        need_devices=True, rootless=False, dev_mode=0o666):
     monkeypatch.setattr(container, "_docker_version", lambda: version)
     m = tmp_path / "mounts"
     m.write_text(mounts)
     dev = tmp_path / "tenstorrent"
     if devices:
-        dev.mkdir()
-    return container.preflight(need_devices=need_devices, proc_mounts=m, dev_root=dev)
+        dev.mkdir(exist_ok=True)  # callers may preflight the same host twice
+        # stand-ins for the char devices: preflight only ever stats them
+        for n in ("0", "1"):
+            node = dev / n
+            node.touch()
+            node.chmod(dev_mode)
+    # passed explicitly so the suite never asks a real daemon for its mode
+    return container.preflight(need_devices=need_devices, proc_mounts=m, dev_root=dev,
+                               rootless=rootless)
 
 
 def _fail_names(reqs):
@@ -603,3 +660,113 @@ def test_compose_run_defaults_to_20000_when_the_profile_names_no_port():
                                  hf_home_dir=Path("/hf"), cache_dir=Path("/c"),
                                  weight_cache_dir=Path("/w"), include_hf_token=False)
     assert argv[argv.index("--publish") + 1] == "20000:20000"
+
+
+# ------------------------------------------------------- rootless host preflight
+#
+# Under a rootless daemon the container's identity is the invoking user with a single gid
+# mapping — the host's supplementary groups are NOT carried in. So the usual
+# `root:tenstorrent 0660` device story, which a rootful run handles via group membership,
+# leaves every board unopenable. Unchecked, that lands as a device-open failure minutes
+# into a boot, which is exactly what this preflight exists to prevent.
+
+
+def _as_stranger(monkeypatch):
+    """Judge paths as an identity that owns neither the file nor its group, which is how
+    a 0660 root:tenstorrent node looks from inside a rootless container."""
+    import os
+
+    monkeypatch.setattr(os, "getuid", lambda: os.stat(".").st_uid + 1)
+    monkeypatch.setattr(os, "getgid", lambda: os.stat(".").st_gid + 1)
+
+
+def test_the_daemon_mode_is_reported_in_the_docker_row(tmp_path, monkeypatch):
+    """Not a pass/fail of its own, but it decides what --user must be."""
+    plain = _pf(tmp_path, monkeypatch)
+    assert next(r for r in plain if r.name == "docker").detail == "29.5.3"
+    rootless = _pf(tmp_path, monkeypatch, rootless=True)
+    assert next(r for r in rootless if r.name == "docker").detail == "29.5.3 (rootless)"
+
+
+def test_world_accessible_devices_pass_under_rootless(tmp_path, monkeypatch):
+    """tt-kmd's shipped udev rule is MODE="0666", so a standard host just works."""
+    _as_stranger(monkeypatch)
+    assert _fail_names(_pf(tmp_path, monkeypatch, rootless=True, dev_mode=0o666)) == []
+
+
+def test_group_only_devices_are_refused_under_rootless(tmp_path, monkeypatch):
+    _as_stranger(monkeypatch)
+    bad = container.preflight_failures(
+        _pf(tmp_path, monkeypatch, rootless=True, dev_mode=0o660))
+    assert [r.name for r in bad] == ["tt devices"]
+    fix = bad[0].fix
+    # the reflex fix is group membership, and it does NOT work here — say so
+    assert "supplementary groups are NOT mapped" in fix
+    assert "setfacl -m u:$USER:rw /dev/tenstorrent/*" in fix
+    assert 'MODE="0666"' in fix and "udevadm" in fix
+
+
+def test_group_only_devices_still_pass_under_a_rootful_daemon(tmp_path, monkeypatch):
+    """No regression: group membership is a perfectly good answer without a userns, and
+    this check must not start failing hosts that have always worked."""
+    _as_stranger(monkeypatch)
+    assert _fail_names(_pf(tmp_path, monkeypatch, rootless=False, dev_mode=0o660)) == []
+
+
+def test_a_single_unreachable_board_fails_and_is_named(tmp_path, monkeypatch):
+    """umd opens every node, so one unreachable board is a failed boot, not a small mesh."""
+    _as_stranger(monkeypatch)
+    monkeypatch.setattr(container, "_docker_version", lambda: "29.5.3")
+    mounts = tmp_path / "mounts"
+    mounts.write_text(GOOD_MOUNTS)
+    dev = tmp_path / "tenstorrent"
+    dev.mkdir()
+    for name, mode in (("0", 0o666), ("1", 0o660)):
+        node = dev / name
+        node.touch()
+        node.chmod(mode)
+    bad = container.preflight_failures(container.preflight(
+        need_devices=True, proc_mounts=mounts, dev_root=dev, rootless=True))
+    assert [r.name for r in bad] == ["tt devices"]
+    assert bad[0].detail == "1 not accessible to your uid"
+
+
+def test_hugepages_unwritable_under_rootless_is_caught_with_the_mount_fix(
+        tmp_path, monkeypatch):
+    """tt-metal's mount unit uses mode=0777; a tightened one breaks rootless only."""
+    _as_stranger(monkeypatch)
+    hp = tmp_path / "hugepages-1G"
+    hp.mkdir()
+    hp.chmod(0o755)
+    monkeypatch.setattr(container, "HUGEPAGES_MOUNT", str(hp))
+    mounts = tmp_path / "m"
+    mounts.write_text(f"hugetlbfs {hp} hugetlbfs rw,pagesize=1024M 0 0\n")
+    monkeypatch.setattr(container, "_docker_version", lambda: "29.5.3")
+    dev = tmp_path / "tenstorrent"
+    dev.mkdir(exist_ok=True)
+    bad = container.preflight_failures(container.preflight(
+        need_devices=True, proc_mounts=mounts, dev_root=dev, rootless=True))
+    assert [r.name for r in bad] == ["hugepages"]
+    assert "remount,mode=0777" in bad[0].fix
+    assert "dev-hugepages" in bad[0].fix
+
+
+def test_userns_reachability_ignores_supplementary_groups(tmp_path, monkeypatch):
+    """The rule the whole check rests on: owner bits when we own it, group bits only for
+    our PRIMARY gid, otherwise other bits. os.access would consult group membership."""
+    import os
+
+    f = tmp_path / "node"
+    f.touch()
+    f.chmod(0o660)
+    assert container._reachable_in_userns(f, mode=os.R_OK | os.W_OK) is True  # owner
+    _as_stranger(monkeypatch)
+    assert container._reachable_in_userns(f, mode=os.R_OK | os.W_OK) is False
+    monkeypatch.setattr(os, "getgid", lambda: f.stat().st_gid)  # primary gid match
+    assert container._reachable_in_userns(f, mode=os.R_OK | os.W_OK) is True
+
+
+def test_a_missing_device_node_is_not_reachable(tmp_path):
+    import os
+
+    assert container._reachable_in_userns(tmp_path / "nope", mode=os.R_OK) is False

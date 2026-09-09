@@ -611,7 +611,11 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     launcher = launcher_for(spec.kind)
     argv = launcher.serve_argv(manifest, profile) + list(extra_args or [])
     env = launcher.serve_env(manifest, profile)
-    run_argv = container.compose_run(manifest, profile, argv, env, detach=not print_only)
+    # Probed here, not in compose_run, so composition stays pure. Safe on a host with
+    # no docker at all (returns False), which --print has to keep working on.
+    run_argv = container.compose_run(manifest, profile, argv, env,
+                                     detach=not print_only,
+                                     rootless=container.docker_is_rootless())
 
     if print_only:
         console.raw(" ".join(run_argv))

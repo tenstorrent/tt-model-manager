@@ -734,6 +734,8 @@ To run it directly, all of these are required:
 
 The hugepages mount must be exactly /dev/hugepages-1G: umd matches that path in
 /proc/mounts. Weights are NOT in this image; they are read from the mounted HF cache.
+Under ROOTLESS docker use --user 0:0 instead: that daemon maps your uid to container
+root, so "$(id -u)" there names an identity that owns none of the mounts.
 USAGE
   exit 1
 fi
