@@ -195,3 +195,28 @@ def test_cli_package_thin_stage_only(tmp_path):
     m = Manifest.from_json((out / "tt_kernel_manifest.json").read_text())
     assert m.is_thin and m.arch == "blackhole"
     assert (out / "model.py").is_file() and (out / "requirements.txt").is_file()
+
+
+def _plain(text: str) -> str:
+    """Collapse rich's box-drawing + wrapping so a phrase can be matched across lines."""
+    return " ".join(text.replace("│", " ").replace("─", " ").split())
+
+
+def test_cli_package_thin_is_marked_beta_and_unsupported(tmp_path):
+    # v6 thin is a draft format: the CLI must say so both in `--help` (so it is visible before
+    # anyone runs it) and on every run (so a staged bundle is never mistaken for supported output).
+    top = _plain(_runner.invoke(cli.app, ["--help"]).output)
+    assert "BETA" in top.split("package-thin", 1)[1][:120]
+
+    cmd_help = _plain(_runner.invoke(cli.app, ["package-thin", "--help"]).output)
+    assert "BETA" in cmd_help and "NOT SUPPORTED" in cmd_help.upper()
+
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    res = _runner.invoke(cli.app, [
+        "package-thin", "--model-py", str(model_py), "--arch", "blackhole",
+        "--arch-name", "QwenForCausalLM", "--main-class", "model:C",
+        "--out", str(tmp_path / "staged"),
+    ])
+    assert res.exit_code == 0, res.output
+    assert "package-thin is BETA and not supported" in _plain(res.output)

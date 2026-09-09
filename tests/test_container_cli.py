@@ -10,6 +10,7 @@ important — that the v5 flow through the SAME commands is unchanged.
 import errno
 import json
 import pathlib
+import shlex
 import shutil
 from pathlib import Path
 
@@ -158,6 +159,58 @@ def test_serve_print_emits_the_docker_run_without_running_it(tmp_path, monkeypat
     out = capsys.readouterr().out
     assert "docker run" in out and "--device /dev/tenstorrent" in out
     assert not ran
+
+
+# ------------------------------------------------- --print must be pasteable into a shell
+#
+# `--print` composes the command instead of running it, so its whole value is that you can
+# paste it. Joined with a bare " ".join it was not pasteable: the JSON tokens -- the
+# `--additional-config` this launcher emits, and anything JSON-shaped the author put in
+# serve.args, e.g. --override-generation-config -- reached the shell as several words with
+# their quotes eaten, and vLLM then died citing a value the operator never typed. Issue #76.
+
+JSON_SERVE = {
+    "port": 8000,
+    "block_size": 64,
+    "additional_config": {"tt": {"sample_on_device_mode": "decode_only"}},
+    "args": [["--override-generation-config", '{"temperature": 0.6, "top_p": 0.95}']],
+}
+
+
+def _printed(tmp_path, monkeypatch, capsys, **over) -> str:
+    monkeypatch.setattr(container, "run_checked", lambda argv: pytest.fail("--print ran it"))
+    container_cli.serve_container(_manifest(tmp_path, **over), print_only=True)
+    return capsys.readouterr().out.strip()
+
+
+def test_the_printed_command_survives_a_shell_round_trip(tmp_path, monkeypatch, capsys):
+    """The invariant: what a shell parses out of the printed line is the argv we would
+    have handed docker, token for token."""
+    out = _printed(tmp_path, monkeypatch, capsys, serve=dict(JSON_SERVE))
+    tokens = shlex.split(out)
+    assert tokens[tokens.index("--additional-config") + 1] == \
+        '{"tt": {"sample_on_device_mode": "decode_only"}}'
+    assert tokens[tokens.index("--override-generation-config") + 1] == \
+        '{"temperature": 0.6, "top_p": 0.95}'
+
+
+def test_a_json_argument_is_printed_single_quoted(tmp_path, monkeypatch, capsys):
+    """The reported symptom, in the shape the reader of the line sees."""
+    out = _printed(tmp_path, monkeypatch, capsys, serve=dict(JSON_SERVE))
+    json_arg = '{"tt": {"sample_on_device_mode": "decode_only"}}'
+    assert f"--additional-config '{json_arg}'" in out
+
+
+def test_ordinary_flags_print_exactly_as_before(tmp_path, monkeypatch, capsys):
+    """shlex.quote is a no-op on tokens needing no quoting, so quoting the JSON must not
+    put quotes around the paths, labels, mounts and ports that were already fine -- the
+    docs quote this line verbatim."""
+    out = _printed(tmp_path, monkeypatch, capsys, serve=dict(JSON_SERVE))
+    for fragment in ("docker run", "--device /dev/tenstorrent", "--publish 8000:8000",
+                     "--env HF_HOME=/hf", "--block-size 64",
+                     "--mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G"):
+        assert fragment in out
+    assert "'" not in out.split("--additional-config")[0], "quoted a token that was fine"
 
 
 def test_serve_refuses_when_the_container_is_already_running(tmp_path, monkeypatch):

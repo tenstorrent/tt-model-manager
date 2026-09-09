@@ -423,8 +423,12 @@ are `HF_HOME`/`HF_TOKEN`, both overridable, so `--print` and tests are determini
 - `--mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G` — **verbatim** src and dst,
   because umd regex-matches that exact line in `/proc/mounts`; a subdirectory or 2M
   hugepages fails the match and surfaces as a device-open error.
-- `--user <host uid>:<host gid>` — everything the container writes lands in bind mounts owned
-  by the person who ran it, not root.
+- `--user` — everything the container writes lands in bind mounts owned by the person who
+  ran it, not root. The value depends on the daemon: `<host uid>:<host gid>` for a rootful
+  one, `0:0` under rootless, where the invoking user is already mapped to container root
+  (`container_user()`; the mode comes from `docker_is_rootless()`, asked of the daemon).
+  Rootless also makes the preflight's device and hugepage checks stricter, because a
+  container's identity there does not carry the host user's supplementary groups.
 - `--ipc host`, `--volume <hf>:/hf`, `--volume <cache>:/cache` (the JIT kernel/trace cache,
   so the ~10 min first compile is paid once), `--volume <weights>:/weight-cache` with
   `TT_DIT_CACHE_DIR` pointing at it, `--publish <port>:<port>`, and the profile's env.
