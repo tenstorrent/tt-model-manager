@@ -115,10 +115,15 @@ VLLM_PHASES: Tuple[Phase, ...] = (
     Phase("kv", "configuring KV cache", "KV cache configured",
           start=_rx(r"KV cache size", r"Allocating TT kv caches", r"num_gpu_blocks"),
           detail=_detail_kv),
+    # start: the first four are tt_transformers/TTI phrasing; the rest catch a model that
+    # logs its own wording, which otherwise leaves this phase dark for the whole warmup.
+    #
     Phase("warmup", "warming up the model", "model warmed up",
           start=_rx(r"Warming up prefill", r"Starting decode warmup",
-                    r"Done Compiling Model", r"Capturing .*Trace"),
-          done=_rx(r"init engine .* took [\d.]+ seconds"),
+                    r"Done Compiling Model", r"Capturing .*[Tt]race",
+                    r"[Ww]arming up", r"[Ss]tarting .*warmup",
+                    r"Compile and warming up"),
+          done=_rx(r"init engine .* took [\d.]+ s(?:econds)?\b"),
           detail=_detail_warmup),
     Phase("server", "starting API server", "API server ready",
           start=_rx(r"Starting vLLM API server", r"Warming up chat template",

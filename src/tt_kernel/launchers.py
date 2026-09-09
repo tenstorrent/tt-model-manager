@@ -539,10 +539,15 @@ class VllmForkLauncher:
         tt_cfg = profile.additional_config.get("tt")
         if tt_cfg:
             argv += ["--tt-config", json.dumps(tt_cfg)]
-        # This runner takes extra server flags as ONE joined string, not as loose argv.
+        # This runner takes extra server flags as ONE joined string, not as loose argv,
+        # and shlex.splits it back apart on the far side. Quote each token on the way in
+        # or the split does not round-trip: a value carrying spaces or quotes -- most
+        # often JSON, e.g. --override-generation-config '{"temperature": 0}'
+        # shlex.quote is a no-op for tokens that need no quoting
         extra = profile.flat_args() + _capability_argv(profile)
         if extra:
-            argv += ["--additional-server-args", " ".join(extra)]
+            argv += ["--additional-server-args",
+                     " ".join(shlex.quote(t) for t in extra)]
         return argv
 
     def serve_env(self, m: Manifest, profile: ServeProfile) -> Dict[str, str]:

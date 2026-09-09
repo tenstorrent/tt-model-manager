@@ -165,3 +165,48 @@ class TestShapes:
     def test_phase_tables_have_unique_keys(self, phases):
         keys = [p.key for p in phases]
         assert len(keys) == len(set(keys))
+
+
+# ------------------------------------------------- the vLLM warmup phase must be reachable
+#
+# Two independent faults, both leaving the row dark for a whole warmup:
+#   done  -- matched only "took N seconds". vLLM 0.24.0's v1/engine/core.py logs
+#            "took %.2f s" in all three of its branches, so the phase could never close
+#            on any current vLLM; only the older fork build in fixtures says "seconds".
+#   start -- covered tt_transformers/TTI phrasing only, so a model logging its own
+#            wording never opened the phase at all.
+
+def _warmup_phase():
+    from tt_kernel.boot_progress import VLLM_PHASES
+    return next(p for p in VLLM_PHASES if p.key == "warmup")
+
+
+@pytest.mark.parametrize("line", [
+    "init engine (profile, create kv cache, warmup model) took 86.22 seconds",
+    "init engine (profile, create kv cache, warmup model) took 86.22 s",
+    "init engine (profile, create kv cache, warmup model) took 86.22 s (compilation: 4.10 s)",
+])
+def test_the_warmup_phase_closes_on_either_vllm_unit_suffix(line):
+    assert any(r.search(line) for r in _warmup_phase().done)
+
+
+def test_a_bare_number_is_not_mistaken_for_a_duration():
+    assert not any(r.search("init engine ... took 86.22 sx") for r in _warmup_phase().done)
+
+
+@pytest.mark.parametrize("line", [
+    "Warming up prefill for 32 seqs",          # tt_transformers
+    "Starting decode warmup",                  # tt_transformers
+    "Warming up model",                        # a model's own wording
+    "Compile and warming up model for size 8",  # vLLM's own worker
+    "Capturing trace for decode",              # lowercase variant
+])
+def test_the_warmup_phase_opens_on_any_stacks_wording(line):
+    assert any(r.search(line) for r in _warmup_phase().start)
+
+
+def test_a_skipped_warmup_is_not_announced_as_one():
+    """vllm_tt_plugin logs "Skipping model warmup"; showing "warming up the model" for it
+    is worse than showing nothing, so no bare `warmup` token may appear in start."""
+    assert not any(r.search("WARNING Skipping model warmup")
+                   for r in _warmup_phase().start)
