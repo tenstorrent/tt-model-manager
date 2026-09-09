@@ -357,13 +357,42 @@ fires when nothing is installed yet) does fetch them, so the two entry points di
 |---|---|---|
 | `tt-model pull org/name` | yes | **no** |
 | `tt-model pull org/name --with-weights` | yes | yes |
-| `tt-model serve org/name` (nothing installed) | yes | yes |
+| `tt-model serve org/name` | yes | yes |
+| `tt-model serve org/name --no-weights` | yes | **no** |
 
-If weights can't be fetched the image still loads and the model fetches them at first boot.
+**`serve` always puts the weights on the host before it starts the container.** They get
+downloaded either way — the HF cache is bind-mounted, so a model fetching its own weights
+writes to the same place — but doing it inside the container hides a multi-hundred-GB
+transfer behind the readiness probe, with no progress and no error the user ever sees. So
+`serve` checks the host cache and fetches what is missing, as a step you can watch:
 
-Because those three rows differ, `serve` checks the host HF cache before launching (offline —
-`snapshot_download(..., local_files_only=True)`, so "complete" honours the author's
-`allow_patterns`) and says so when the weights are absent:
+```
+✓ weights org/Weights-7B@a1b2c3d4 on host   /home/you/.cache/huggingface/hub/...
+```
+
+Two things it refuses to do quietly:
+
+- **It won't start a download that cannot fit.** `serve` compares the pinned revision's size
+  against free space on the cache filesystem and stops before anything else runs:
+  `not enough disk space for the weights org/Weights-7B: needs 297.0 GB more, 24.0 GB free`.
+  This matters because a fetch that fills the disk does *not* fail loudly — it leaves a
+  half-populated cache, and that cache then reads as complete to everything downstream.
+- **It won't call a half-downloaded cache complete.**
+  `snapshot_download(..., local_files_only=True)` returns the snapshot directory whenever the
+  revision *resolves*; offline it cannot compare against the repo's file list, so an
+  interrupted fetch reported as fully cached. Serve then opened the mesh and died inside the
+  engine on the first missing shard, under vLLM's generic `Engine core initialization
+  failed`. Completeness is now judged locally — shards against
+  `model.safetensors.index.json`, plus any `blobs/*.incomplete` siblings — and an incomplete
+  snapshot is resumed, naming the damage: `incomplete (19 of 131 weight shards present),
+  resuming`.
+
+Both checks are skipped for a spec pinned with `allow_patterns`/`ignore_patterns`: the author
+deliberately took a subset there, so "missing" files are missing by design.
+
+`--no-weights` (and `--local-only`, which forbids the network by definition) keeps the old
+behaviour — the model fetches its own weights at first load — with the advisory note instead
+of a silent boot:
 
 ```
 ⚠ weights org/Weights-7B@a1b2c3d4 are not in your local HF cache; the model will download
@@ -372,9 +401,10 @@ Because those three rows differ, `serve` checks the host HF cache before launchi
 → or directly:  hf download org/Weights-7B --revision a1b2c3d4
 ```
 
-It is advisory only: booting without them is supported (the cache is bind-mounted, so the
-bytes land on the host and are reused), and the check can never fail a serve that would
-otherwise have worked. Suppressed under `--print`.
+A *failed* fetch is still non-fatal: the image is loaded and the model can try for itself, so
+a gate you can click through does not cost you the serve. The exception is a full disk on
+`pull --with-weights`, which now fails loudly rather than leaving a partial cache behind.
+Weights handling is suppressed entirely under `--print`.
 
 `serve` also reloads the image from the staged `image/` layout if docker no longer has it —
 but note this only helps a package you **built** locally. A *pulled* package keeps just

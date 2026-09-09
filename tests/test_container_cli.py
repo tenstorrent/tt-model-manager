@@ -7,6 +7,7 @@ Two things are under test: that the container commands do the right thing, and �
 important — that the v5 flow through the SAME commands is unchanged.
 """
 
+import errno
 import json
 import pathlib
 import shutil
@@ -1372,10 +1373,12 @@ def _serving_ok(monkeypatch):
 
 
 def test_serve_warns_when_the_weights_are_not_cached(tmp_path, monkeypatch, capsys):
+    """The notice is now what `--no-weights` gets: serve otherwise fetches them itself
+    (see test_serve_fetches_missing_weights_before_starting_the_container)."""
     _serving_ok(monkeypatch)
     monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
     container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
-                                  target="org/m")
+                                  target="org/m", no_weights=True)
     out = capsys.readouterr().out
     assert "not in your local HF cache" in out
     assert "tt-model pull org/m --with-weights" in out
@@ -1397,7 +1400,7 @@ def test_the_notice_names_the_pinned_revision(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
     container_cli.serve_container(
         _manifest(tmp_path, weights={"repo": "org/w", "revision": "abcdef1234"}),
-        target="org/m")
+        target="org/m", no_weights=True)
     out = capsys.readouterr().out
     assert "org/w@abcdef12" in out
     assert "--revision abcdef1234" in out
@@ -1515,3 +1518,260 @@ def test_a_weights_404_is_not_dressed_up_as_a_gate(capsys):
     out = capsys.readouterr().out
     assert "accept the terms" not in out
 
+
+
+# ------------------------------------------------------- weights completeness + preflight
+#
+# A download killed halfway (a full disk, a dropped connection) used to read as fully
+# CACHED: `snapshot_download(local_files_only=True)` returns the snapshot directory
+# whenever the revision resolves, and offline it cannot compare against the repo's file
+# list. Serve then pulled the image, opened the mesh, and died minutes later inside the
+# engine on the first missing shard, under vLLM's generic "Engine core initialization
+# failed" — with the real cause (a full disk) named nowhere.
+
+
+def _snapshot(tmp_path, *, shards=0, total=0, index=None, incomplete=0):
+    """A fake HF hub cache entry, laid out the way huggingface_hub does."""
+    repo = tmp_path / "models--org--w"
+    snap = repo / "snapshots" / "abcdef"
+    snap.mkdir(parents=True)
+    (repo / "blobs").mkdir()
+    for i in range(1, shards + 1):
+        (snap / f"model-{i:05d}-of-{total:05d}.safetensors").write_text("x")
+    for i in range(incomplete):
+        (repo / "blobs" / f"{i:064x}.incomplete").write_text("x")
+    if index is not None:
+        (snap / "model.safetensors.index.json").write_text(json.dumps(index))
+    return snap
+
+
+def _wref(**over):
+    from tt_kernel.manifest import WeightsRef
+    return WeightsRef(repo="org/w", **over)
+
+
+def test_a_half_downloaded_snapshot_is_not_complete(tmp_path):
+    """The exact shape that reached the engine: 19 of 131 shards and no index."""
+    snap = _snapshot(tmp_path, shards=19, total=131)
+    assert container_cli.incomplete_reason(_wref(), snap) == "19 of 131 weight shards present"
+
+
+def test_a_snapshot_missing_only_the_index_is_not_complete(tmp_path):
+    snap = _snapshot(tmp_path, shards=131, total=131)
+    assert container_cli.incomplete_reason(_wref(), snap) == \
+        "model.safetensors.index.json is missing"
+
+
+def test_the_index_is_believed_over_the_file_count(tmp_path):
+    """With an index present, completeness is what it references — not how many files
+    happen to be on disk."""
+    idx = {"weight_map": {f"l{i}": f"model-{i:05d}-of-00003.safetensors" for i in (1, 2, 3)}}
+    snap = _snapshot(tmp_path, shards=2, total=3, index=idx)
+    assert container_cli.incomplete_reason(_wref(), snap) == "1 of 3 weight shards missing"
+
+
+def test_a_complete_snapshot_is_complete(tmp_path):
+    idx = {"weight_map": {f"l{i}": f"model-{i:05d}-of-00003.safetensors" for i in (1, 2, 3)}}
+    snap = _snapshot(tmp_path, shards=3, total=3, index=idx)
+    assert container_cli.incomplete_reason(_wref(), snap) is None
+
+
+def test_a_half_downloaded_blob_is_enough_to_be_incomplete(tmp_path):
+    """huggingface_hub writes to blobs/<sha>.incomplete and only links the snapshot name
+    once the bytes are all there, so a sibling .incomplete settles it on its own."""
+    idx = {"weight_map": {"l1": "model-00001-of-00001.safetensors"}}
+    snap = _snapshot(tmp_path, shards=1, total=1, index=idx, incomplete=2)
+    assert container_cli.incomplete_reason(_wref(), snap) == "2 file(s) still half-downloaded"
+
+
+def test_a_single_file_layout_is_not_judged(tmp_path):
+    """No shards to count and no index to read: nothing to conclude, so don't invent a
+    failure for a repo that ships one model.safetensors."""
+    snap = _snapshot(tmp_path)
+    (snap / "model.safetensors").write_text("x")
+    assert container_cli.incomplete_reason(_wref(), snap) is None
+
+
+def test_a_pattern_pinned_spec_is_never_called_incomplete(tmp_path):
+    """With allow/ignore_patterns the author deliberately took a subset, so 'missing'
+    files are missing by design and every check would be a false alarm."""
+    snap = _snapshot(tmp_path, shards=1, total=131)
+    assert container_cli.incomplete_reason(_wref(allow_patterns=["*.json"]), snap) is None
+    assert container_cli.incomplete_reason(_wref(ignore_patterns=["*.bin"]), snap) is None
+
+
+def test_weights_cached_rejects_an_incomplete_snapshot(tmp_path, monkeypatch):
+    """The regression itself, through the predicate serve actually calls."""
+    import huggingface_hub
+    snap = _snapshot(tmp_path, shards=19, total=131)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda **kw: str(snap))
+    assert container_cli.weights_cached(_wref()) is None
+    # ... and still accepts a complete one, so this cannot silently disable the fast path.
+    (snap / "model.safetensors.index.json").write_text(json.dumps(
+        {"weight_map": {f"l{i}": f"model-{i:05d}-of-00131.safetensors"
+                        for i in range(1, 20)}}))
+    for i in range(20, 132):
+        (snap / f"model-{i:05d}-of-00131.safetensors").write_text("x")
+    assert container_cli.weights_cached(_wref()) == snap
+
+
+# ----------------------------------------------------------------- serve fetches weights
+
+
+def test_serve_fetches_missing_weights_before_starting_the_container(tmp_path, monkeypatch):
+    """The download happens either way — the HF cache is bind-mounted — so doing it here,
+    before the container starts, is the difference between a progress row and an
+    unexplained multi-minute boot behind the readiness probe."""
+    order = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv: order.append("docker run"))
+    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    monkeypatch.setattr(container_cli, "_download_weights",
+                        lambda ref: order.append("download") or Path("/hf/x"))
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m")
+    assert order == ["download", "docker run"]
+
+
+def test_serve_does_not_refetch_cached_weights(tmp_path, monkeypatch):
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: Path("/hf/x"))
+    monkeypatch.setattr(container_cli, "_download_weights",
+                        lambda ref: pytest.fail("must not download"))
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m")
+
+
+def test_serve_refuses_when_the_disk_cannot_hold_the_weights(tmp_path, monkeypatch):
+    """Two numbers before anything starts, instead of ENOSPC halfway through a 360 GB
+    fetch — which does not fail loudly, it leaves a partial cache that then reads as
+    complete."""
+    started = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv: started.append(argv))
+    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
+    monkeypatch.setattr(container_cli, "_revision_size", lambda ref: 360_000_000_000)
+    monkeypatch.setattr(container_cli, "_bytes_on_disk", lambda ref: 63_000_000_000)
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: _Usage(24_000_000_000))
+    monkeypatch.setattr(container_cli, "_download_weights",
+                        lambda ref: pytest.fail("must not start a download that cannot fit"))
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                      target="org/m")
+    assert "not enough disk space" in str(e.value)
+    assert "297.0 GB more" in str(e.value) and "24.0 GB free" in str(e.value)
+    assert not started, "the container must not start"
+
+
+class _Usage:
+    def __init__(self, free):
+        self.total = self.used = 0
+        self.free = free
+
+
+def test_an_unknown_revision_size_does_not_block_serving(tmp_path, monkeypatch):
+    """Offline, gated, or an old huggingface_hub: the preflight is advisory and must
+    degrade to 'try it', never to a serve nobody can run."""
+    monkeypatch.setattr(container_cli, "_revision_size", lambda ref: None)
+    container_cli._space_preflight(_wref())  # must not raise
+
+
+def test_no_weights_keeps_the_in_container_download(tmp_path, monkeypatch, capsys):
+    """The escape hatch: --no-weights leaves the fetch to the model, with the advisory
+    note rather than a silent boot."""
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
+    monkeypatch.setattr(container_cli, "_download_weights",
+                        lambda ref: pytest.fail("must not download"))
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m", no_weights=True)
+    out = capsys.readouterr().out
+    assert "not in your local HF cache" in out
+    assert "hf download org/w" in out
+
+
+def test_local_only_never_reaches_the_network_for_weights(tmp_path, monkeypatch, capsys):
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
+    monkeypatch.setattr(container_cli, "_download_weights",
+                        lambda ref: pytest.fail("must not download under --local-only"))
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m", local_only=True)
+    assert "not in your local HF cache" in capsys.readouterr().out
+
+
+def test_a_failed_weights_fetch_still_serves(tmp_path, monkeypatch, capsys):
+    """Non-fatal, as on the pull path: the image is loaded and the model can fetch its own
+    weights inside the container. A gate is one click away; refusing to serve would not
+    help. But say what happened."""
+    ran = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+
+    def boom(ref):
+        raise RuntimeError("hub exploded")
+    monkeypatch.setattr(container_cli, "_download_weights", boom)
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m")
+    assert ran, "a failed weights fetch must not stop the serve"
+
+
+# -------------------------------------------------------------------- pull, out of space
+
+
+def test_out_of_space_is_recognised_through_the_cause_chain(tmp_path):
+    """huggingface_hub wraps the underlying OSError before it reaches us."""
+    enospc = OSError(errno.ENOSPC, "No space left on device")
+    assert container_cli._is_out_of_space(enospc)
+    wrapped = RuntimeError("download failed")
+    wrapped.__cause__ = enospc
+    assert container_cli._is_out_of_space(wrapped)
+    assert not container_cli._is_out_of_space(RuntimeError("gated"))
+    assert not container_cli._is_out_of_space(OSError(errno.EACCES, "denied"))
+
+
+def test_pull_fails_loudly_when_the_disk_fills_up(tmp_path, monkeypatch):
+    """Staying non-fatal here is what produced a partial cache that a later serve mistook
+    for a complete one — so this one failure must not be a warning."""
+    monkeypatch.setattr(container, "preflight", lambda **k: [_req("docker", True, "ok")])
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+
+    def boom(ref):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    monkeypatch.setattr(container_cli, "_download_weights", boom)
+    m = _manifest(tmp_path, weights={"repo": "org/w"})
+    with pytest.raises(container_cli.ContainerCliError, match="ran out of disk space"):
+        container_cli.pull_container("org/x", None, m)
+
+
+def test_pull_still_warns_and_survives_a_gated_repo(tmp_path, monkeypatch, capsys):
+    """The non-fatal contract stays for everything that is not a full disk."""
+    monkeypatch.setattr(container, "preflight", lambda **k: [_req("docker", True, "ok")])
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+
+    def boom(ref):
+        raise RuntimeError("gated repo")
+    monkeypatch.setattr(container_cli, "_download_weights", boom)
+    m = _manifest(tmp_path, weights={"repo": "org/w"})
+    container_cli.pull_container("org/x", None, m)  # must not raise
+    assert "not downloaded" in capsys.readouterr().out
+
+
+def test_bytes_on_disk_does_not_double_count_the_snapshot_symlinks(tmp_path, monkeypatch):
+    """A snapshot directory is entirely symlinks into blobs/. Following them counted every
+    shard twice, which inflated 'already present' and turned the preflight off exactly when
+    a half-finished download makes it matter."""
+    repo = tmp_path / "models--org--w"
+    (repo / "blobs").mkdir(parents=True)
+    snap = repo / "snapshots" / "abcdef"
+    snap.mkdir(parents=True)
+    blob = repo / "blobs" / ("a" * 64)
+    blob.write_bytes(b"x" * 1000)
+    (snap / "model.safetensors").symlink_to(blob)
+    monkeypatch.setattr(container, "hub_cache", lambda: tmp_path)
+    assert container_cli._bytes_on_disk(_wref()) == 1000

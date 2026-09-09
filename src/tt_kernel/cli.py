@@ -1146,6 +1146,11 @@ def serve(
     ),
     follow: bool = typer.Option(False, "--follow", hidden=True,
                                 help="Deprecated: watching the boot is the default now."),
+    no_weights: bool = typer.Option(
+        False, "--no-weights", help="For a container package: don't fetch missing weights "
+        "before boot. They are downloaded inside the container instead (same bind-mounted "
+        "cache, but slower and with no progress shown here)."
+    ),
     port: Optional[int] = typer.Option(
         None, "--port", help="Serve on exactly this port (default: 20000, walking up "
         "20001, 20002, ... past busy ports; the manifest's port is not used). For a "
@@ -1213,7 +1218,7 @@ def serve(
             container_cli.serve_container(
                 cmani, profile_name=profile, print_only=print_only, follow=follow,
                 extra_args=extra_args, source=src, port=port, target=repo_id,
-                local_only=local_only, detach=detach,
+                local_only=local_only, no_weights=no_weights, detach=detach,
             )
         except container_cli.ContainerCliError as e:
             if e.diagnosis is not None:
