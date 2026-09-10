@@ -405,26 +405,36 @@ def incomplete_reason(ref, path: Path) -> Optional[str]:
         partial = 0
     if partial:
         return f"{partial} file(s) still half-downloaded"
-    index = path / "model.safetensors.index.json"
-    if index.exists():
-        try:
-            shards = set((json.loads(index.read_text()).get("weight_map") or {}).values())
-        except (OSError, ValueError):
-            return None  # unreadable index: not our call to make
-        missing = [s for s in shards if not (path / s).exists()]
-        if missing:
-            return f"{len(missing)} of {len(shards)} weight shards missing"
-        return None
-    # No index. A sharded repo names its parts `model-00001-of-00131.safetensors`, so the
-    # expected total is self-describing — trust that over a file list we cannot fetch.
-    present = sorted(path.glob("model-*-of-*.safetensors"))
-    if not present:
-        return None  # single-file or non-safetensors layout: nothing to count
-    m = re.search(r"-of-(\d+)\.safetensors$", present[0].name)
-    total = int(m.group(1)) if m else 0
-    if total and len(present) < total:
-        return f"{len(present)} of {total} weight shards present"
-    return "model.safetensors.index.json is missing"
+    # Two common sharded layouts — safetensors (the default) and PyTorch `.bin`. Check each by
+    # its index first (the authoritative shard list); a half-downloaded `.bin` repo would
+    # otherwise reach the no-safetensors-index path and read as complete.
+    for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        index = path / index_name
+        if index.exists():
+            try:
+                shards = set((json.loads(index.read_text()).get("weight_map") or {}).values())
+            except (OSError, ValueError):
+                return None  # unreadable index: not our call to make
+            missing = [s for s in shards if not (path / s).exists()]
+            if missing:
+                return f"{len(missing)} of {len(shards)} weight shards missing"
+            return None
+    # No index for either format. A sharded repo names its parts
+    # `model-00001-of-00131.safetensors` / `pytorch_model-00001-of-00002.bin`, so the expected
+    # total is self-describing — trust that over a file list we cannot fetch.
+    for glob_pat, count_rx, index_name in (
+        ("model-*-of-*.safetensors", r"-of-(\d+)\.safetensors$", "model.safetensors.index.json"),
+        ("pytorch_model-*-of-*.bin", r"-of-(\d+)\.bin$", "pytorch_model.bin.index.json"),
+    ):
+        present = sorted(path.glob(glob_pat))
+        if not present:
+            continue
+        m = re.search(count_rx, present[0].name)
+        total = int(m.group(1)) if m else 0
+        if total and len(present) < total:
+            return f"{len(present)} of {total} weight shards present"
+        return f"{index_name} is missing"
+    return None  # single-file or unknown layout: nothing to count
 
 
 def _revision_size(ref) -> Optional[int]:
@@ -448,19 +458,68 @@ def _revision_size(ref) -> Optional[int]:
 
 
 def _bytes_on_disk(ref) -> int:
-    """Bytes of this repo already in the hub cache, partial downloads included.
+    """Bytes already on disk that count toward THIS revision's download.
 
-    Symlinks are skipped, not followed. A snapshot directory is entirely symlinks into
-    ``blobs/``, so counting both sides double-counts every shard — which inflates "already
-    present", shrinks "still needed", and quietly turns the preflight off exactly when a
-    half-finished download makes it matter most.
+    Scoped to the pinned revision, deliberately: an earlier version summed every blob under
+    ``models--<repo>``, so an unrelated cached revision of the same repo (an old checkpoint of
+    equal size, say) was counted as "already present", collapsed ``need`` to ~0, and waved a
+    download that cannot fit straight past the preflight. Two contributions, both revision-scoped:
+
+    - the pinned snapshot's blobs, resolved through their symlinks and de-duplicated by blob so
+      shared (content-addressed) shards count once and the symlink side is never double-counted;
+    - any in-flight ``blobs/*.incomplete`` — bytes already fetched for a resumable download,
+      not yet linked into a snapshot.
     """
-    d = container.hub_cache() / f"models--{ref.repo_id.replace('/', '--')}"
+    repo_dir = container.hub_cache() / f"models--{ref.repo_id.replace('/', '--')}"
+    total = 0
+    seen: set = set()
+    snap = _pinned_snapshot_dir(repo_dir, ref.revision)
+    if snap is not None:
+        for f in snap.rglob("*"):
+            try:
+                target = f.resolve() if f.is_symlink() else f
+                if target.is_file() and target not in seen:
+                    seen.add(target)
+                    total += target.stat().st_size
+            except OSError:
+                pass
     try:
-        return sum(f.stat().st_size for f in d.rglob("*")
-                   if not f.is_symlink() and f.is_file())
+        for inc in (repo_dir / "blobs").glob("*.incomplete"):
+            if inc.is_file():
+                total += inc.stat().st_size
     except OSError:
-        return 0
+        pass
+    return total
+
+
+def _pinned_snapshot_dir(repo_dir: Path, revision: Optional[str]) -> Optional[Path]:
+    """The HF cache snapshot directory for the pinned revision, or None if not cached.
+
+    HF stores a branch/tag under ``refs/<rev>`` pointing at a commit sha, with the files
+    under ``snapshots/<sha>/``. A sha revision is used directly; ``None`` means the default
+    branch (``main``). Resolving it here — rather than globbing every ``snapshots/*`` — is what
+    keeps the size accounting scoped to ONE revision, so an unrelated cached checkpoint of the
+    same repo cannot be counted as already-present.
+    """
+    snaps = repo_dir / "snapshots"
+    if not snaps.is_dir():
+        return None
+    rev = revision or "main"
+    ref_file = repo_dir / "refs" / rev
+    try:
+        sha = ref_file.read_text().strip() if ref_file.is_file() else rev
+    except OSError:
+        sha = rev
+    exact = snaps / sha
+    if exact.is_dir():
+        return exact
+    # a short sha, or a name refs could not resolve: match a snapshot dir by prefix, but only
+    # when it is unambiguous — two matches means we cannot tell which revision was pinned.
+    try:
+        matches = [d for d in snaps.iterdir() if d.is_dir() and d.name.startswith(sha)]
+    except OSError:
+        return None
+    return matches[0] if len(matches) == 1 else None
 
 
 def _gb(n: int) -> str:
@@ -574,9 +633,11 @@ def ensure_weights(manifest: Manifest, target: Optional[str], view=None, *,
     except Exception as e:  # noqa: BLE001
         # Non-fatal, as on the pull path: the image is loaded and the model can still fetch
         # its own weights inside the container. A gate is one click away, and refusing to
-        # serve would not help. But say what happened, in place of a silent boot.
+        # serve would not help. But say what happened, in place of a silent boot — and say it
+        # through `view.warn`, which survives the `view.clear()` a clean boot ends with; a
+        # `view.done` row would be erased, so a failed prefetch could vanish behind a ready card.
         if view is not None:
-            view.done(f"{label} not downloaded")
+            view.warn(f"{label} not downloaded — the model will fetch it inside the container")
         _weights_download_failed(ref, e)
         return
     if done:

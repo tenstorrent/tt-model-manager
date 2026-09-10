@@ -1213,7 +1213,11 @@ def serve(
         if remote is not None and remote.is_container:
             resolved = hub.latest_revision(repo_id, revision, timeout=None)
             try:
-                container_cli.pull_container(repo_id, resolved or revision, remote)
+                # Forward --no-weights: on a first-time `serve org/name` this auto-pull is
+                # what would fetch the weights, so without it the flag was a no-op — the
+                # download happened here before serve_container ever saw the flag.
+                container_cli.pull_container(repo_id, resolved or revision, remote,
+                                             no_weights=no_weights)
             except (container_cli.ContainerCliError, container.ContainerError) as e:
                 raise _err(str(e))
             cmani = container_cli.load_pulled(repo_id)

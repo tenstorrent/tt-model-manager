@@ -1815,16 +1815,87 @@ def test_pull_still_warns_and_survives_a_gated_repo(tmp_path, monkeypatch, capsy
     assert "not downloaded" in capsys.readouterr().out
 
 
+def _hf_repo(root: Path, repo_id: str) -> Path:
+    d = root / f"models--{repo_id.replace('/', '--')}"
+    (d / "blobs").mkdir(parents=True, exist_ok=True)
+    (d / "refs").mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _hf_snapshot(repo_dir: Path, sha: str, files: dict) -> None:
+    """Build a realistic HF snapshot: each file is a symlink into blobs/, keyed by content."""
+    snap = repo_dir / "snapshots" / sha
+    snap.mkdir(parents=True, exist_ok=True)
+    for name, data in files.items():
+        blob = repo_dir / "blobs" / f"{name}-{sha}"
+        blob.write_bytes(data)
+        (snap / name).symlink_to(blob)
+
+
 def test_bytes_on_disk_does_not_double_count_the_snapshot_symlinks(tmp_path, monkeypatch):
-    """A snapshot directory is entirely symlinks into blobs/. Following them counted every
-    shard twice, which inflated 'already present' and turned the preflight off exactly when
-    a half-finished download makes it matter."""
-    repo = tmp_path / "models--org--w"
-    (repo / "blobs").mkdir(parents=True)
-    snap = repo / "snapshots" / "abcdef"
-    snap.mkdir(parents=True)
-    blob = repo / "blobs" / ("a" * 64)
-    blob.write_bytes(b"x" * 1000)
-    (snap / "model.safetensors").symlink_to(blob)
+    """A snapshot is symlinks into blobs/; resolving them must count each shard once, not
+    twice (which would inflate 'already present' and turn the preflight off)."""
     monkeypatch.setattr(container, "hub_cache", lambda: tmp_path)
+    repo = _hf_repo(tmp_path, "org/w")
+    (repo / "refs" / "main").write_text("sha1")
+    _hf_snapshot(repo, "sha1", {"model.safetensors": b"x" * 1000})
     assert container_cli._bytes_on_disk(_wref()) == 1000
+
+
+def test_bytes_on_disk_counts_only_the_pinned_revision(tmp_path, monkeypatch):
+    """Regression for the space-preflight bypass: an unrelated cached revision of the same
+    repo must NOT be counted as already-present, or `need` collapses and a download that
+    cannot fit is waved through."""
+    monkeypatch.setattr(container, "hub_cache", lambda: tmp_path)
+    repo = _hf_repo(tmp_path, "org/w")
+    (repo / "refs" / "main").write_text("pinnedsha")
+    _hf_snapshot(repo, "pinnedsha", {"model.safetensors": b"x" * 1000})   # the pinned revision
+    _hf_snapshot(repo, "oldsha", {"model.safetensors": b"y" * 5000})       # a stale, bigger one
+    # revision=None resolves to refs/main -> pinnedsha; the 5000-byte old revision is ignored.
+    assert container_cli._bytes_on_disk(_wref()) == 1000
+
+
+def test_bytes_on_disk_includes_in_flight_partials(tmp_path, monkeypatch):
+    """A resumable download in progress (blobs/*.incomplete) is bytes already on disk and
+    counts toward `need`, even before any snapshot exists."""
+    monkeypatch.setattr(container, "hub_cache", lambda: tmp_path)
+    repo = _hf_repo(tmp_path, "org/w")
+    (repo / "blobs" / "deadbeef.incomplete").write_bytes(b"z" * 700)
+    assert container_cli._bytes_on_disk(_wref()) == 700
+
+
+@pytest.mark.parametrize("extra,expected", [(["--no-weights"], True), ([], False)])
+def test_serve_forwards_no_weights_to_the_first_time_auto_pull(tmp_path, monkeypatch, extra, expected):
+    """Regression: a first-time `serve org/name` PULLS the package first, and that auto-pull —
+    not serve_container — is what fetches the weights. `--no-weights` must reach it, or the flag
+    is a silent no-op on an un-pulled package (weights download anyway, before it ever applies)."""
+    from tt_kernel import cli
+    remote = _manifest(tmp_path)                                   # a container manifest
+    monkeypatch.setattr(container_cli, "resolve_target", lambda t: None)   # not yet pulled
+    monkeypatch.setattr(cli.hub, "fetch_manifest", lambda rid, rev: remote)
+    monkeypatch.setattr(cli.hub, "latest_revision", lambda *a, **k: "rev1")
+    monkeypatch.setattr(container_cli, "load_pulled", lambda rid: remote)
+    monkeypatch.setattr(container_cli, "serve_container", lambda m, **k: None)
+    seen = {}
+
+    def fake_pull(repo_id, revision, manifest, *, no_weights=False):
+        seen["no_weights"] = no_weights
+    monkeypatch.setattr(container_cli, "pull_container", fake_pull)
+
+    res = runner.invoke(cli.app, ["serve", "org/x", "--no-update-check", *extra])
+    assert res.exit_code == 0, res.output
+    assert seen["no_weights"] is expected
+
+
+def test_incomplete_reason_catches_a_half_downloaded_pytorch_bin_repo(tmp_path):
+    """The completeness probe is not safetensors-only: a sharded PyTorch `.bin` repo missing
+    a shard must read as incomplete, not slip through as complete."""
+    snap = tmp_path / "snapshots" / "s"
+    (snap.parent.parent / "blobs").mkdir(parents=True)
+    snap.mkdir(parents=True)
+    (snap / "pytorch_model.bin.index.json").write_text(json.dumps({"weight_map": {
+        "a": "pytorch_model-00001-of-00002.bin", "b": "pytorch_model-00002-of-00002.bin"}}))
+    (snap / "pytorch_model-00001-of-00002.bin").write_bytes(b"x")   # only 1 of 2 shards present
+    assert container_cli.incomplete_reason(_wref(), snap) == "1 of 2 weight shards missing"
+    (snap / "pytorch_model-00002-of-00002.bin").write_bytes(b"y")   # now complete
+    assert container_cli.incomplete_reason(_wref(), snap) is None
