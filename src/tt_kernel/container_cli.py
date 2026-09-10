@@ -16,8 +16,6 @@ looks like the rest of the tool. The modules underneath (``build``, ``container`
 from __future__ import annotations
 
 import errno
-import json
-import re
 import shlex
 import shutil
 import tempfile
@@ -439,6 +437,18 @@ def _bytes_on_disk(ref) -> int:
     return total
 
 
+def _safe_revision(rev: str) -> bool:
+    """Is this revision safe to use as a path component under the HF cache?
+
+    Absolute paths and ``..`` segments only. Anything else a git ref may contain is fine --
+    slashes included, since branch and PR refs are stored as nested directories.
+    """
+    if not rev:
+        return False
+    q = Path(rev)
+    return not q.is_absolute() and ".." not in q.parts
+
+
 def _pinned_snapshot_dir(repo_dir: Path, revision: Optional[str]) -> Optional[Path]:
     """The HF cache snapshot directory for the pinned revision, or None if not cached.
 
@@ -452,11 +462,25 @@ def _pinned_snapshot_dir(repo_dir: Path, revision: Optional[str]) -> Optional[Pa
     if not snaps.is_dir():
         return None
     rev = revision or "main"
+    # `revision` arrives from the manifest, and a hand-crafted *pulled* manifest reaches
+    # `Manifest` directly without authoring validation -- the same threat `_safe_name`
+    # guards in container.py. Unchecked it is worse than it looks: `..` segments read a
+    # file from outside the cache and then treat its contents as a sha, and pathlib
+    # REPLACES the left side when the right is absolute, so `snapshots / "/etc"` is
+    # `/etc` -- which `_bytes_on_disk` would then walk in full. A ref may legitimately
+    # contain slashes (`refs/pr/1`, `feature/x`), so reject traversal rather than
+    # separators, and fail closed: counting nothing over-estimates what is still needed,
+    # which errs toward refusing a download rather than waving one through.
+    if not _safe_revision(rev):
+        return None
     ref_file = repo_dir / "refs" / rev
     try:
         sha = ref_file.read_text().strip() if ref_file.is_file() else rev
     except OSError:
         sha = rev
+    # The sha comes out of a file, so it is only as trustworthy as the path that found it.
+    if not _safe_revision(sha):
+        return None
     exact = snaps / sha
     if exact.is_dir():
         return exact

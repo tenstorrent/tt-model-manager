@@ -1943,7 +1943,7 @@ def test_has_partial_download_survives_an_absent_cache(tmp_path, monkeypatch):
 
 
 def test_a_resumed_download_says_so(tmp_path, monkeypatch, capsys):
-    """"Resuming" reads as a stall otherwise, and the user is owed the reason their last
+    """'Resuming' reads as a stall otherwise, and the user is owed the reason their last
     attempt left bytes behind."""
     labels = []
     monkeypatch.setattr(container_cli, "has_partial_download", lambda ref: True)
@@ -1991,3 +1991,42 @@ def test_a_complete_cache_offline_is_not_a_failure(tmp_path, monkeypatch, capsys
                         lambda ref, **kw: Path("/hf/x"))
     container_cli.ensure_weights(_manifest(tmp_path, weights={"repo": "org/w"}), "org/m")
     assert "may still fail" not in capsys.readouterr().out
+
+
+def test_a_malicious_revision_cannot_escape_the_hf_cache(tmp_path, monkeypatch):
+    """`revision` comes from the manifest, and a hand-crafted *pulled* manifest reaches
+    `Manifest` without authoring validation — the threat `container._safe_name` already
+    guards. Unchecked, `..` reads a file from outside the cache and treats its contents as a
+    sha, and an absolute revision makes pathlib discard the cache prefix entirely, so
+    `_bytes_on_disk` would walk that tree in full."""
+    repo = tmp_path / "models--org--w"
+    (repo / "snapshots" / "goodsha").mkdir(parents=True)
+    (repo / "refs").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_text("goodsha")
+
+    for bad in ("../../outside/secret", "/etc", "../..", "a/../../../x"):
+        assert container_cli._pinned_snapshot_dir(repo, bad) is None, bad
+    # the legitimate shapes still resolve, including a nested ref name
+    assert container_cli._pinned_snapshot_dir(repo, "goodsha") == repo / "snapshots" / "goodsha"
+    (repo / "refs" / "refs").mkdir()
+    (repo / "refs" / "refs" / "pr").write_text("goodsha")
+    assert container_cli._pinned_snapshot_dir(repo, "refs/pr") == \
+        repo / "snapshots" / "goodsha"
+
+
+def test_a_traversing_revision_counts_no_bytes(tmp_path, monkeypatch):
+    """Fail closed: counting nothing over-estimates what is still needed, which errs toward
+    refusing a download rather than waving one through."""
+    monkeypatch.setattr(container, "hub_cache", lambda: tmp_path)
+    repo = tmp_path / "models--org--w"
+    (repo / "blobs").mkdir(parents=True)
+    # `snapshots/` must exist, or the lookup returns early for an unrelated reason and the
+    # guard is never reached -- which is exactly how the first version of this test passed
+    # against unguarded code.
+    (repo / "snapshots" / "goodsha").mkdir(parents=True)
+    (repo / "snapshots" / "goodsha" / "model.safetensors").write_bytes(b"x" * 1000)
+    assert container_cli._bytes_on_disk(_wref(revision="goodsha")) == 1000
+    assert container_cli._bytes_on_disk(_wref(revision="/etc")) == 0
+    assert container_cli._bytes_on_disk(_wref(revision="../../../etc")) == 0
