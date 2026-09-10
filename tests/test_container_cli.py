@@ -7,6 +7,7 @@ Two things are under test: that the container commands do the right thing, and �
 important — that the v5 flow through the SAME commands is unchanged.
 """
 
+import errno
 import json
 import pathlib
 import shlex
@@ -632,7 +633,7 @@ def test_pull_preflights_without_requiring_a_card(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "preflight",
                         lambda **k: seen.update(k) or [_req("docker", True, "29.5.3")])
     monkeypatch.setattr(container, "image_present", lambda ref: True)
-    monkeypatch.setattr(container_cli, "_download_weights", lambda r: Path("/w"))
+    monkeypatch.setattr(container_cli, "_download_weights", lambda r, **kw: Path("/w"))
     container_cli.pull_container("org/x", None, _manifest(tmp_path), no_weights=True)
     assert seen == {"need_devices": False}
 
@@ -1247,7 +1248,7 @@ def test_a_pre_digest_package_still_pulls_and_says_what_it_gives_up(tmp_path, mo
     assert m.container.image.digest is None
 
     monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "b" * 64)
-    monkeypatch.setattr(container_cli, "_download_weights", lambda ref: Path("/w"))
+    monkeypatch.setattr(container_cli, "_download_weights", lambda ref, **kw: Path("/w"))
     container_cli.pull_container("org/x", None, m, no_weights=True)
 
     out = " ".join(capsys.readouterr().out.split())
@@ -1260,7 +1261,7 @@ def test_a_digest_bearing_package_says_nothing_about_it(tmp_path, monkeypatch, c
     m = _manifest(tmp_path)
     m.container.image.digest = "sha256:" + "c" * 64
     monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "c" * 64)
-    monkeypatch.setattr(container_cli, "_download_weights", lambda ref: Path("/w"))
+    monkeypatch.setattr(container_cli, "_download_weights", lambda ref, **kw: Path("/w"))
     container_cli.pull_container("org/x", None, m, no_weights=True)
     assert "no image digest" not in capsys.readouterr().out
 
@@ -1450,9 +1451,11 @@ def test_the_hint_names_the_actual_target_not_a_placeholder(tmp_path, monkeypatc
 
 # ------------------------------------------------- weights notice on the serve path
 #
-# Only serve-that-auto-pulls fetches weights. An already-installed package and the
-# missing-image repair both skip them, and the model then downloads them itself inside the
-# container -- supported, but silent and slow, so serve says so.
+# serve ALWAYS puts the weights on the host before starting the container -- installed
+# package, auto-pulled, or image repair alike. They get downloaded either way (the HF cache
+# is bind-mounted), but inside the container the transfer has no progress and no error the
+# user ever sees. `ensure_weights` is the single path for that, shared with
+# `pull --with-weights`; `--no-weights` and `--local-only` opt out and get the note instead.
 
 
 def _serving_ok(monkeypatch):
@@ -1467,10 +1470,11 @@ def _serving_ok(monkeypatch):
 
 
 def test_serve_warns_when_the_weights_are_not_cached(tmp_path, monkeypatch, capsys):
+    """The notice is now what `--no-weights` gets: serve otherwise fetches them itself
+    (see test_serve_fetches_missing_weights_before_starting_the_container)."""
     _serving_ok(monkeypatch)
-    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
     container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
-                                  target="org/m")
+                                  target="org/m", no_weights=True)
     out = capsys.readouterr().out
     assert "not in your local HF cache" in out
     assert "tt-model pull org/m --with-weights" in out
@@ -1479,7 +1483,7 @@ def test_serve_warns_when_the_weights_are_not_cached(tmp_path, monkeypatch, caps
 
 def test_serve_is_quiet_when_the_weights_are_cached(tmp_path, monkeypatch, capsys):
     _serving_ok(monkeypatch)
-    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: Path("/hf/x"))
+    monkeypatch.setattr(container_cli, "_cached_locally", lambda ref: Path("/hf/x"))
     container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
                                   target="org/m")
     assert "not in your local HF cache" not in capsys.readouterr().out
@@ -1489,10 +1493,9 @@ def test_the_notice_names_the_pinned_revision(tmp_path, monkeypatch, capsys):
     """A revision is the difference between the validated weights and today's tip, so the
     hint must reproduce the pin rather than fetching whatever is current."""
     _serving_ok(monkeypatch)
-    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
     container_cli.serve_container(
         _manifest(tmp_path, weights={"repo": "org/w", "revision": "abcdef1234"}),
-        target="org/m")
+        target="org/m", no_weights=True)
     out = capsys.readouterr().out
     assert "org/w@abcdef12" in out
     assert "--revision abcdef1234" in out
@@ -1501,23 +1504,22 @@ def test_the_notice_names_the_pinned_revision(tmp_path, monkeypatch, capsys):
 def test_a_broken_weights_probe_never_fails_the_serve(tmp_path, monkeypatch):
     """This drives ONE advisory line, so no failure in it may stop a serve that would
     otherwise have worked."""
-    def boom(ref):
+    def boom(ref, **kw):
         raise RuntimeError("hub exploded")
     _serving_ok(monkeypatch)
-    monkeypatch.setattr(container_cli, "weights_cached", boom)
+    monkeypatch.setattr(container_cli, "_cached_locally", boom)
     container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
                                   target="org/m")  # must not raise
 
 
 def test_the_notice_is_suppressed_under_print(tmp_path, monkeypatch, capsys):
     """--print composes an argv for scripting; it must stay free of advisory chatter."""
-    monkeypatch.setattr(container_cli, "weights_cached", lambda ref: None)
     container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
                                   target="org/m", print_only=True)
     assert "not in your local HF cache" not in capsys.readouterr().out
 
 
-def test_weights_cached_is_offline_and_swallows_failures(monkeypatch, tmp_path):
+def test_the_cache_probe_is_offline_and_swallows_failures(monkeypatch, tmp_path):
     """It must never reach the network on the serve path."""
     import huggingface_hub
     seen = {}
@@ -1528,7 +1530,7 @@ def test_weights_cached_is_offline_and_swallows_failures(monkeypatch, tmp_path):
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", fake)
     m = _manifest(tmp_path, weights={"repo": "org/w", "revision": "deadbeef"})
-    assert container_cli.weights_cached(m.weights) is None
+    assert container_cli._cached_locally(m.weights) is None
     assert seen["local_files_only"] is True
     assert seen["repo_id"] == "org/w" and seen["revision"] == "deadbeef"
 
@@ -1610,3 +1612,463 @@ def test_a_weights_404_is_not_dressed_up_as_a_gate(capsys):
     out = capsys.readouterr().out
     assert "accept the terms" not in out
 
+
+
+# ------------------------------------------------------- weights completeness + preflight
+#
+# A download killed halfway (a full disk, a dropped connection) used to read as fully
+# CACHED: `snapshot_download(local_files_only=True)` returns the snapshot directory
+# whenever the revision resolves, and offline it cannot compare against the repo's file
+# list. Serve then pulled the image, opened the mesh, and died minutes later inside the
+# engine on the first missing shard, under vLLM's generic "Engine core initialization
+# failed" — with the real cause (a full disk) named nowhere.
+
+
+
+def _wref(**over):
+    from tt_kernel.manifest import WeightsRef
+    return WeightsRef(repo="org/w", **over)
+
+
+
+
+
+
+
+# ----------------------------------------------------------------- serve fetches weights
+
+
+def test_serve_fetches_missing_weights_before_starting_the_container(tmp_path, monkeypatch):
+    """The download happens either way — the HF cache is bind-mounted — so doing it here,
+    before the container starts, is the difference between a progress row and an
+    unexplained multi-minute boot behind the readiness probe."""
+    order = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv: order.append("docker run"))
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    monkeypatch.setattr(container_cli, "_download_weights",
+                        lambda ref, **kw: order.append("download") or Path("/hf/x"))
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m")
+    assert order == ["download", "docker run"]
+
+
+
+def test_serve_refuses_when_the_disk_cannot_hold_the_weights(tmp_path, monkeypatch):
+    """Two numbers before anything starts, instead of ENOSPC halfway through a 360 GB
+    fetch — which does not fail loudly, it leaves a partial cache that then reads as
+    complete."""
+    started = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv: started.append(argv))
+    monkeypatch.setattr(container_cli, "_revision_size", lambda ref: 360_000_000_000)
+    monkeypatch.setattr(container_cli, "_bytes_on_disk", lambda ref: 63_000_000_000)
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: _Usage(24_000_000_000))
+    monkeypatch.setattr(container_cli, "_download_weights",
+                        lambda ref, **kw: pytest.fail("must not start a download that cannot fit"))
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                      target="org/m")
+    assert "not enough disk space" in str(e.value)
+    assert "297.0 GB more" in str(e.value) and "24.0 GB free" in str(e.value)
+    assert not started, "the container must not start"
+
+
+class _Usage:
+    def __init__(self, free):
+        self.total = self.used = 0
+        self.free = free
+
+
+def test_an_unknown_revision_size_does_not_block_serving(tmp_path, monkeypatch):
+    """Offline, gated, or an old huggingface_hub: the preflight is advisory and must
+    degrade to 'try it', never to a serve nobody can run."""
+    monkeypatch.setattr(container_cli, "_revision_size", lambda ref: None)
+    container_cli._space_preflight(_wref())  # must not raise
+
+
+def test_no_weights_keeps_the_in_container_download(tmp_path, monkeypatch, capsys):
+    """The escape hatch: --no-weights leaves the fetch to the model, with the advisory
+    note rather than a silent boot."""
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "_download_weights",
+                        lambda ref, **kw: pytest.fail("must not download"))
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m", no_weights=True)
+    out = capsys.readouterr().out
+    assert "not in your local HF cache" in out
+    assert "hf download org/w" in out
+
+
+def test_local_only_never_reaches_the_network_for_weights(tmp_path, monkeypatch, capsys):
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "_download_weights",
+                        lambda ref, **kw: pytest.fail("must not download under --local-only"))
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m", local_only=True)
+    assert "not in your local HF cache" in capsys.readouterr().out
+
+
+def test_a_failed_weights_fetch_still_serves(tmp_path, monkeypatch, capsys):
+    """Non-fatal, as on the pull path: the image is loaded and the model can fetch its own
+    weights inside the container. A gate is one click away; refusing to serve would not
+    help. But say what happened."""
+    ran = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+
+    def boom(ref, **kw):
+        raise RuntimeError("hub exploded")
+    monkeypatch.setattr(container_cli, "_download_weights", boom)
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m")
+    assert ran, "a failed weights fetch must not stop the serve"
+
+
+# -------------------------------------------------------------------- pull, out of space
+
+
+def test_out_of_space_is_recognised_through_the_cause_chain(tmp_path):
+    """huggingface_hub wraps the underlying OSError before it reaches us."""
+    enospc = OSError(errno.ENOSPC, "No space left on device")
+    assert container_cli._is_out_of_space(enospc)
+    wrapped = RuntimeError("download failed")
+    wrapped.__cause__ = enospc
+    assert container_cli._is_out_of_space(wrapped)
+    assert not container_cli._is_out_of_space(RuntimeError("gated"))
+    assert not container_cli._is_out_of_space(OSError(errno.EACCES, "denied"))
+
+
+def test_pull_fails_loudly_when_the_disk_fills_up(tmp_path, monkeypatch):
+    """Staying non-fatal here is what produced a partial cache that a later serve mistook
+    for a complete one — so this one failure must not be a warning."""
+    monkeypatch.setattr(container, "preflight", lambda **k: [_req("docker", True, "ok")])
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+
+    def boom(ref, **kw):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    monkeypatch.setattr(container_cli, "_download_weights", boom)
+    m = _manifest(tmp_path, weights={"repo": "org/w"})
+    with pytest.raises(container_cli.ContainerCliError, match="ran out of disk space"):
+        container_cli.pull_container("org/x", None, m)
+
+
+def test_pull_still_warns_and_survives_a_gated_repo(tmp_path, monkeypatch, capsys):
+    """The non-fatal contract stays for everything that is not a full disk."""
+    monkeypatch.setattr(container, "preflight", lambda **k: [_req("docker", True, "ok")])
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+
+    def boom(ref, **kw):
+        raise RuntimeError("gated repo")
+    monkeypatch.setattr(container_cli, "_download_weights", boom)
+    m = _manifest(tmp_path, weights={"repo": "org/w"})
+    container_cli.pull_container("org/x", None, m)  # must not raise
+    assert "not downloaded" in capsys.readouterr().out
+
+
+def _hf_repo(root: Path, repo_id: str) -> Path:
+    d = root / f"models--{repo_id.replace('/', '--')}"
+    (d / "blobs").mkdir(parents=True, exist_ok=True)
+    (d / "refs").mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _hf_snapshot(repo_dir: Path, sha: str, files: dict) -> None:
+    """Build a realistic HF snapshot: each file is a symlink into blobs/, keyed by content."""
+    snap = repo_dir / "snapshots" / sha
+    snap.mkdir(parents=True, exist_ok=True)
+    for name, data in files.items():
+        blob = repo_dir / "blobs" / f"{name}-{sha}"
+        blob.write_bytes(data)
+        (snap / name).symlink_to(blob)
+
+
+def test_bytes_on_disk_does_not_double_count_the_snapshot_symlinks(tmp_path, monkeypatch):
+    """A snapshot is symlinks into blobs/; resolving them must count each shard once, not
+    twice (which would inflate 'already present' and turn the preflight off)."""
+    monkeypatch.setattr(container, "hub_cache", lambda: tmp_path)
+    repo = _hf_repo(tmp_path, "org/w")
+    (repo / "refs" / "main").write_text("sha1")
+    _hf_snapshot(repo, "sha1", {"model.safetensors": b"x" * 1000})
+    assert container_cli._bytes_on_disk(_wref()) == 1000
+
+
+def test_bytes_on_disk_counts_only_the_pinned_revision(tmp_path, monkeypatch):
+    """Regression for the space-preflight bypass: an unrelated cached revision of the same
+    repo must NOT be counted as already-present, or `need` collapses and a download that
+    cannot fit is waved through."""
+    monkeypatch.setattr(container, "hub_cache", lambda: tmp_path)
+    repo = _hf_repo(tmp_path, "org/w")
+    (repo / "refs" / "main").write_text("pinnedsha")
+    _hf_snapshot(repo, "pinnedsha", {"model.safetensors": b"x" * 1000})   # the pinned revision
+    _hf_snapshot(repo, "oldsha", {"model.safetensors": b"y" * 5000})       # a stale, bigger one
+    # revision=None resolves to refs/main -> pinnedsha; the 5000-byte old revision is ignored.
+    assert container_cli._bytes_on_disk(_wref()) == 1000
+
+
+def test_bytes_on_disk_includes_in_flight_partials(tmp_path, monkeypatch):
+    """A resumable download in progress (blobs/*.incomplete) is bytes already on disk and
+    counts toward `need`, even before any snapshot exists."""
+    monkeypatch.setattr(container, "hub_cache", lambda: tmp_path)
+    repo = _hf_repo(tmp_path, "org/w")
+    (repo / "blobs" / "deadbeef.incomplete").write_bytes(b"z" * 700)
+    assert container_cli._bytes_on_disk(_wref()) == 700
+
+
+@pytest.mark.parametrize("extra,expected", [(["--no-weights"], True), ([], False)])
+def test_serve_forwards_no_weights_to_the_first_time_auto_pull(tmp_path, monkeypatch, extra, expected):
+    """Regression: a first-time `serve org/name` PULLS the package first, and that auto-pull —
+    not serve_container — is what fetches the weights. `--no-weights` must reach it, or the flag
+    is a silent no-op on an un-pulled package (weights download anyway, before it ever applies)."""
+    from tt_kernel import cli
+    remote = _manifest(tmp_path)                                   # a container manifest
+    monkeypatch.setattr(container_cli, "resolve_target", lambda t: None)   # not yet pulled
+    monkeypatch.setattr(cli.hub, "fetch_manifest", lambda rid, rev: remote)
+    monkeypatch.setattr(cli.hub, "latest_revision", lambda *a, **k: "rev1")
+    monkeypatch.setattr(container_cli, "load_pulled", lambda rid: remote)
+    monkeypatch.setattr(container_cli, "serve_container", lambda m, **k: None)
+    seen = {}
+
+    def fake_pull(repo_id, revision, manifest, *, no_weights=False):
+        seen["no_weights"] = no_weights
+    monkeypatch.setattr(container_cli, "pull_container", fake_pull)
+
+    res = runner.invoke(cli.app, ["serve", "org/x", "--no-update-check", *extra])
+    assert res.exit_code == 0, res.output
+    assert seen["no_weights"] is expected
+
+
+
+# ------------------------------------------------------- one weights path, one policy
+#
+# pull --with-weights and serve both go through ensure_weights, so a full disk, a gated repo
+# and a half-finished download cannot mean different things depending on which command the
+# user typed. These pin the two places they used to diverge.
+
+
+def test_serve_fails_when_the_disk_fills_up_mid_download(tmp_path, monkeypatch):
+    """ENOSPC was fatal on the pull path but not on the serve path, so serve warned, booted,
+    and died in the engine — the exact failure this is all about."""
+    started = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv: started.append(argv))
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+
+    def boom(ref, **kw):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    monkeypatch.setattr(container_cli, "_download_weights", boom)
+    with pytest.raises(container_cli.ContainerCliError, match="ran out of disk space"):
+        container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                      target="org/m")
+    assert not started, "the container must not start on a full disk"
+
+
+def test_pull_delegates_to_the_same_weights_path(tmp_path, monkeypatch):
+    """Not a copy of it: pull used to carry its own preflight/download/except block, so the
+    out-of-disk rule had to be written twice and drifted."""
+    seen = []
+    monkeypatch.setattr(container, "preflight", lambda **k: [_req("docker", True, "ok")])
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
+    monkeypatch.setattr(container_cli, "ensure_weights",
+                        lambda m, t, *a, **k: seen.append(t))
+    container_cli.pull_container("org/x", None, _manifest(tmp_path, weights={"repo": "org/w"}))
+    assert seen == ["org/x"]
+
+
+def test_a_bare_pull_still_moves_no_weights(tmp_path, monkeypatch):
+    """`--with-weights` is opt-in, and a bare pull must not advise about weights it was
+    never asked to fetch."""
+    monkeypatch.setattr(container, "preflight", lambda **k: [_req("docker", True, "ok")])
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
+    monkeypatch.setattr(container_cli, "ensure_weights",
+                        lambda *a, **k: pytest.fail("must not touch weights"))
+    container_cli.pull_container("org/x", None,
+                                 _manifest(tmp_path, weights={"repo": "org/w"}),
+                                 no_weights=True)
+
+
+
+# --------------------------------------------------------------- review follow-ups (#85)
+
+
+
+def test_the_weights_download_is_bridged_into_the_progress_row(tmp_path, monkeypatch):
+    """Without the bridge, HF's own tqdm/xet writers put bars straight on the terminal, on
+    top of whatever else owns the line."""
+    seen = {}
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    monkeypatch.setattr(container_cli, "_download_weights",
+                        lambda ref, **kw: seen.update(kw) or Path("/hf/x"))
+    container_cli.ensure_weights(_manifest(tmp_path, weights={"repo": "org/w"}), "org/m")
+    assert seen.get("tqdm_class") is not None, "download was not routed through the bridge"
+
+
+def test_pull_always_resumes_rather_than_judging_the_cache_itself(tmp_path, monkeypatch):
+    """`snapshot_download` holds the revision's real file list, so it is the only thing that
+    can say what is missing. It is a metadata no-op when the cache is whole, so calling it
+    unconditionally costs ~a second and removes every local guess about layout."""
+    called = []
+    monkeypatch.setattr(container_cli, "_cached_locally",
+                        lambda ref: pytest.fail("the download path must not consult it"))
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    monkeypatch.setattr(container_cli, "_download_weights",
+                        lambda ref, **kw: called.append(ref.repo_id) or Path("/hf/x"))
+    container_cli.ensure_weights(_manifest(tmp_path, weights={"repo": "org/w"}), "org/m")
+    assert called == ["org/w"]
+
+
+def test_no_weights_confirms_weights_that_are_already_on_host(tmp_path, monkeypatch, capsys):
+    """With fetching off the table a local verdict is still needed, and a user who is told
+    nothing cannot tell "present" from "about to be downloaded inside the container"."""
+    monkeypatch.setattr(container_cli, "_cached_locally", lambda ref: Path("/hf/x"))
+    monkeypatch.setattr(container_cli, "has_partial_download", lambda ref: False)
+    monkeypatch.setattr(container_cli, "_download_weights",
+                        lambda ref, **kw: pytest.fail("must not download"))
+    container_cli.ensure_weights(
+        _manifest(tmp_path, weights={"repo": "org/w", "revision": "abcdef1234"}), "org/m",
+        no_weights=True)
+    assert "weights org/w@abcdef12 already on host" in capsys.readouterr().out
+
+
+def test_a_partial_cache_still_warns_under_no_weights(tmp_path, monkeypatch, capsys):
+    """A resolvable-but-partial snapshot would otherwise read as present and cost the user
+    the one warning they can act on."""
+    monkeypatch.setattr(container_cli, "_cached_locally", lambda ref: Path("/hf/x"))
+    monkeypatch.setattr(container_cli, "has_partial_download", lambda ref: True)
+    container_cli.ensure_weights(_manifest(tmp_path, weights={"repo": "org/w"}), "org/m",
+                                 no_weights=True)
+    assert "not in your local HF cache" in capsys.readouterr().out
+
+
+def test_the_prefetch_runs_before_the_boot_checklist_opens(tmp_path, monkeypatch):
+    """A few hundred GB is not a boot landmark, and inside the list HF's writers and the
+    checklist spinner would both own the terminal row."""
+    order = []
+    real_checklist = container_cli.console.checklist
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    monkeypatch.setattr(container_cli, "_download_weights",
+                        lambda ref, **kw: order.append("download") or Path("/hf/x"))
+    monkeypatch.setattr(container_cli.console, "checklist",
+                        lambda *a, **k: order.append("checklist") or real_checklist(*a, **k))
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m")
+    assert order == ["download", "checklist"]
+
+
+# ------------------------------------------------- resume, don't guess (review follow-up)
+#
+# The completeness heuristic this replaces reconstructed the revision's file list from index
+# files and shard-name arithmetic. Every layout it did not anticipate was a wrong answer --
+# `.bin` shards, GGUF, single-file, an unreadable index -- and a wrong "complete" is what let
+# a serve boot on 19 of 131 shards and die in the engine. `snapshot_download` has the real
+# list, so on any path allowed to call it we resume unconditionally and let it decide.
+
+
+def test_has_partial_download_is_layout_independent(tmp_path, monkeypatch):
+    """The one thing about completeness knowable locally without guessing: HF writes to
+    blobs/<sha>.incomplete and only links the snapshot name once the bytes are all there."""
+    repo = tmp_path / "models--org--w"
+    (repo / "blobs").mkdir(parents=True)
+    monkeypatch.setattr(container, "hub_cache", lambda: tmp_path)
+    assert container_cli.has_partial_download(_wref()) is False
+    (repo / "blobs" / ("a" * 64 + ".incomplete")).write_text("x")
+    assert container_cli.has_partial_download(_wref()) is True
+
+
+def test_has_partial_download_survives_an_absent_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(container, "hub_cache", lambda: tmp_path / "nope")
+    assert container_cli.has_partial_download(_wref()) is False
+
+
+def test_a_resumed_download_says_so(tmp_path, monkeypatch, capsys):
+    """'Resuming' reads as a stall otherwise, and the user is owed the reason their last
+    attempt left bytes behind."""
+    labels = []
+    monkeypatch.setattr(container_cli, "has_partial_download", lambda ref: True)
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    monkeypatch.setattr(container_cli, "_download_weights", lambda ref, **kw: Path("/hf/x"))
+    monkeypatch.setattr(container_cli.console, "step",
+                        lambda label, *a, **k: labels.append(label) or _NullStep())
+    container_cli.ensure_weights(_manifest(tmp_path, weights={"repo": "org/w"}), "org/m")
+    assert labels and "resuming a partial download" in labels[0]
+
+
+class _NullStep:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def detail(self, text):
+        pass
+
+
+def test_an_unreachable_hub_with_a_partial_cache_warns_it_may_still_fail(tmp_path,
+                                                                         monkeypatch, capsys):
+    """Falling back to the cache is only safe if the cache is whole, and offline we cannot ask
+    which files that would mean. Don't imply the fallback is equivalent."""
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    monkeypatch.setattr(container_cli, "has_partial_download", lambda ref: True)
+
+    def offline(ref, **kw):
+        raise OSError("Connection aborted")
+    monkeypatch.setattr(container_cli, "_download_weights", offline)
+    container_cli.ensure_weights(_manifest(tmp_path, weights={"repo": "org/w"}), "org/m")
+    out = capsys.readouterr().out
+    assert "may still fail on a missing shard" in out
+
+
+def test_a_complete_cache_offline_is_not_a_failure(tmp_path, monkeypatch, capsys):
+    """huggingface_hub falls back to the cache when the Hub is unreachable, so a fully cached
+    model still serves air-gapped -- verified against a real cache. Nothing extra to warn
+    about, and the serve must not be blocked."""
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    monkeypatch.setattr(container_cli, "has_partial_download", lambda ref: False)
+    monkeypatch.setattr(container_cli, "_download_weights",
+                        lambda ref, **kw: Path("/hf/x"))
+    container_cli.ensure_weights(_manifest(tmp_path, weights={"repo": "org/w"}), "org/m")
+    assert "may still fail" not in capsys.readouterr().out
+
+
+def test_a_malicious_revision_cannot_escape_the_hf_cache(tmp_path, monkeypatch):
+    """`revision` comes from the manifest, and a hand-crafted *pulled* manifest reaches
+    `Manifest` without authoring validation — the threat `container._safe_name` already
+    guards. Unchecked, `..` reads a file from outside the cache and treats its contents as a
+    sha, and an absolute revision makes pathlib discard the cache prefix entirely, so
+    `_bytes_on_disk` would walk that tree in full."""
+    repo = tmp_path / "models--org--w"
+    (repo / "snapshots" / "goodsha").mkdir(parents=True)
+    (repo / "refs").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_text("goodsha")
+
+    for bad in ("../../outside/secret", "/etc", "../..", "a/../../../x"):
+        assert container_cli._pinned_snapshot_dir(repo, bad) is None, bad
+    # the legitimate shapes still resolve, including a nested ref name
+    assert container_cli._pinned_snapshot_dir(repo, "goodsha") == repo / "snapshots" / "goodsha"
+    (repo / "refs" / "refs").mkdir()
+    (repo / "refs" / "refs" / "pr").write_text("goodsha")
+    assert container_cli._pinned_snapshot_dir(repo, "refs/pr") == \
+        repo / "snapshots" / "goodsha"
+
+
+def test_a_traversing_revision_counts_no_bytes(tmp_path, monkeypatch):
+    """Fail closed: counting nothing over-estimates what is still needed, which errs toward
+    refusing a download rather than waving one through."""
+    monkeypatch.setattr(container, "hub_cache", lambda: tmp_path)
+    repo = tmp_path / "models--org--w"
+    (repo / "blobs").mkdir(parents=True)
+    # `snapshots/` must exist, or the lookup returns early for an unrelated reason and the
+    # guard is never reached -- which is exactly how the first version of this test passed
+    # against unguarded code.
+    (repo / "snapshots" / "goodsha").mkdir(parents=True)
+    (repo / "snapshots" / "goodsha" / "model.safetensors").write_bytes(b"x" * 1000)
+    assert container_cli._bytes_on_disk(_wref(revision="goodsha")) == 1000
+    assert container_cli._bytes_on_disk(_wref(revision="/etc")) == 0
+    assert container_cli._bytes_on_disk(_wref(revision="../../../etc")) == 0

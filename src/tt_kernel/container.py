@@ -381,6 +381,21 @@ def model_weight_cache_dir(m: Manifest) -> Path:
     return Path.home() / ".cache" / "tt-model" / _safe_name(m.name) / "weights"
 
 
+def model_tensor_cache_dir(m: Manifest) -> Path:
+    """Host-side tt_transformers tensor cache, per model. Survives container removal.
+
+    ``tt_transformers`` writes weights converted to device layout here (its ``TT_CACHE_PATH``),
+    the direct analogue of ``model_weight_cache_dir`` for the tt_dit stack. Without a bind mount
+    it lands in the container's writable layer and is discarded by the ``docker rm`` in
+    ``remove_container`` on every ``stop`` — so the cache is cold on *every* boot, not just the
+    first, and every ``serve`` regenerates it from scratch.
+
+    Keyed per model to match ``model_cache_dir`` — same ``_safe_name`` guard, same parent — so
+    ``remove_container``'s single rmtree of that parent drops this too, with no extra bookkeeping.
+    """
+    return Path.home() / ".cache" / "tt-model" / _safe_name(m.name) / "tensors"
+
+
 def compose_run(
     m: Manifest,
     profile: ServeProfile,
@@ -391,6 +406,7 @@ def compose_run(
     hf_home_dir: Optional[Path] = None,
     cache_dir: Optional[Path] = None,
     weight_cache_dir: Optional[Path] = None,
+    tensor_cache_dir: Optional[Path] = None,
     hub_cache_dir: Optional[Path] = None,
     include_hf_token: Optional[bool] = None,
     rootless: bool = False,
@@ -407,6 +423,7 @@ def compose_run(
     hf = Path(hf_home_dir) if hf_home_dir is not None else hf_home()
     cache = Path(cache_dir) if cache_dir is not None else model_cache_dir(m)
     weights = Path(weight_cache_dir) if weight_cache_dir is not None else model_weight_cache_dir(m)
+    tensors = Path(tensor_cache_dir) if tensor_cache_dir is not None else model_tensor_cache_dir(m)
     # Derived from an explicitly-passed hf_home_dir rather than the environment: a caller
     # that pins the HF root has pinned the whole story, and reading the real HF_HUB_CACHE
     # here would make composition depend on the developer's shell.
@@ -443,6 +460,11 @@ def compose_run(
         # is silently ignored — which is exactly how this went unnoticed.
         "--volume", f"{weights}:/weight-cache",
         "--env", "TT_DIT_CACHE_DIR=/weight-cache",
+        # tt_transformers' converted-weight cache. Same reasoning as TT_DIT_CACHE_DIR above:
+        # variable beside its mount, or the cache lands in the container's writable layer and
+        # is lost to `docker rm` on every stop — cold on EVERY boot, not just the first.
+        "--volume", f"{tensors}:/tensor-cache",
+        "--env", "TT_CACHE_PATH=/tensor-cache",
         "--publish", f"{port}:{port}",
     ]
     # HF_HOME=/hf makes the container resolve its hub cache to /hf/hub, which is already
@@ -470,6 +492,7 @@ def compose_run(
 def ensure_mount_sources(m: Manifest, *, hf_home_dir: Optional[Path] = None,
                          cache_dir: Optional[Path] = None,
                          weight_cache_dir: Optional[Path] = None,
+                         tensor_cache_dir: Optional[Path] = None,
                          hub_cache_dir: Optional[Path] = None) -> None:
     """Create the bind-mount source dirs, as the host user, before ``docker run``.
 
@@ -483,13 +506,14 @@ def ensure_mount_sources(m: Manifest, *, hf_home_dir: Optional[Path] = None,
     hf = Path(hf_home_dir) if hf_home_dir is not None else hf_home()
     cache = Path(cache_dir) if cache_dir is not None else model_cache_dir(m)
     weights = Path(weight_cache_dir) if weight_cache_dir is not None else model_weight_cache_dir(m)
+    tensors = Path(tensor_cache_dir) if tensor_cache_dir is not None else model_tensor_cache_dir(m)
     if hub_cache_dir is not None:
         hub = Path(hub_cache_dir)
     elif hf_home_dir is not None:
         hub = hf / "hub"
     else:
         hub = hub_cache()
-    for d in (hf, cache, weights, hub):
+    for d in (hf, cache, weights, tensors, hub):
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -555,7 +579,13 @@ def run_checked(argv: List[str]) -> str:
 
 
 def running(name_filter: Optional[str] = None) -> List[Dict[str, str]]:
-    """tt-model containers present on this host (running or exited)."""
+    """tt-model containers present on this host (running or exited).
+
+    ``name_filter`` is an EXACT container name, never a substring. Every caller passes a
+    full ``container_name()``; matching by substring made ``stop`` (which walks every
+    profile's name when no ``--profile`` is given) see ``tt-model-x-p300`` inside
+    ``tt-model-x-p300x2`` and report a clean stop of a container that never existed.
+    """
     fmt = "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
     out = _run(
         ["docker", "ps", "--all", "--filter", f"label={LABEL}", "--format", fmt],
@@ -564,7 +594,7 @@ def running(name_filter: Optional[str] = None) -> List[Dict[str, str]]:
     rows = []
     for line in out.splitlines():
         parts = line.split("\t")
-        if len(parts) >= 3 and (not name_filter or name_filter in parts[0]):
+        if len(parts) >= 3 and (not name_filter or name_filter == parts[0]):
             rows.append({
                 "name": parts[0], "image": parts[1], "status": parts[2],
                 "ports": parts[3] if len(parts) > 3 else "",

@@ -15,6 +15,7 @@ looks like the rest of the tool. The modules underneath (``build``, ``container`
 
 from __future__ import annotations
 
+import errno
 import shlex
 import shutil
 import tempfile
@@ -258,13 +259,12 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
         "profiles": spec.profile_names(),
     })
 
-    if not no_weights and manifest.weights:
-        try:
-            with console.step("weights → host HF cache") as st:
-                path = _download_weights(manifest.weights)
-                st.detail(str(path))
-        except Exception as e:  # noqa: BLE001
-            _weights_download_failed(manifest.weights, e)
+    if not no_weights:
+        # The same path serve uses, so the space pre-flight, the completeness check and the
+        # out-of-disk policy cannot drift between the two commands. Gated on `no_weights`
+        # rather than passing it down: here it means "the user did not ask for weights", so
+        # there is nothing to advise them about.
+        ensure_weights(manifest, repo_id)
 
     console.milestone(f"pulled {repo_id}")
     console.note(f"next:  tt-model serve {repo_id}", marker="→")
@@ -308,7 +308,20 @@ def _weights_download_failed(ref, exc: BaseException) -> None:
     )
 
 
-def _download_weights(ref) -> Path:
+def _is_out_of_space(exc: BaseException) -> bool:
+    """Is this failure a full disk? Checked through the ``__cause__`` chain, because
+    huggingface_hub wraps the underlying ``OSError`` before it reaches us."""
+    seen = 0
+    e: Optional[BaseException] = exc
+    while e is not None and seen < 10:
+        if isinstance(e, OSError) and e.errno == errno.ENOSPC:
+            return True
+        e = e.__cause__ or e.__context__
+        seen += 1
+    return False
+
+
+def _download_weights(ref, *, tqdm_class=None) -> Path:
     """Fetch the weights into the HOST HF cache, honouring whatever the author pinned.
 
     A revision is the difference between "the weights that were validated" and "whatever
@@ -317,25 +330,23 @@ def _download_weights(ref) -> Path:
     """
     from huggingface_hub import snapshot_download
 
+    extra = {"tqdm_class": tqdm_class} if tqdm_class is not None else {}
     return Path(snapshot_download(
         repo_id=ref.repo_id,
         revision=ref.revision,
         allow_patterns=ref.allow_patterns,
         ignore_patterns=ref.ignore_patterns,
+        **extra,
     ))
 
 
-def weights_cached(ref) -> Optional[Path]:
-    """The cached snapshot path if the pinned weights are already complete, else None.
+def _cached_locally(ref) -> Optional[Path]:
+    """The cached snapshot for this pin, or None when nothing resolves offline.
 
-    Mirrors :func:`_download_weights` argument for argument, with ``local_files_only`` — so
-    "complete" means complete *for this spec* (the author's ``allow_patterns`` included), not
-    merely "some revision of this repo is in the cache". Never touches the network, so it is
-    safe on the serve path.
-
-    Returns None on ANY failure. This only drives an advisory note: a false "not cached"
-    costs the user one unnecessary line, while a raise here would fail a serve that would
-    otherwise have worked.
+    Never touches the network. Used only where downloading is forbidden (``--no-weights``,
+    ``--local-only``) and as the fallback when the Hub cannot be reached — NOT to decide
+    whether a download is needed. That decision belongs to ``snapshot_download`` itself,
+    which knows the revision's real file list; anything derived locally is a guess at it.
     """
     from huggingface_hub import snapshot_download
 
@@ -347,22 +358,185 @@ def weights_cached(ref) -> Optional[Path]:
             ignore_patterns=ref.ignore_patterns,
             local_files_only=True,
         ))
-    except Exception:  # noqa: BLE001 — absent, incomplete, or unresolvable offline
+    except Exception:  # noqa: BLE001 — absent, or unresolvable offline
         return None
 
 
-def _weights_notice(manifest: Manifest, target: Optional[str], view=None) -> None:
+def has_partial_download(ref) -> bool:
+    """Is there a half-fetched blob for this repo in the cache?
+
+    The one thing about completeness that can be known locally without guessing:
+    huggingface_hub writes to ``blobs/<sha>.incomplete`` and only links the snapshot name
+    once the bytes are all there. It is layout-independent — safetensors, ``.bin``, GGUF,
+    single-file alike — and cannot false-positive.
+
+    Deliberately NOT a completeness check. Judging that locally means reconstructing the
+    revision's file list from index files and shard-name arithmetic, and every way of doing
+    that is wrong for some layout. ``snapshot_download`` has the real list, so on the paths
+    where we are allowed to call it we resume unconditionally and let it decide.
+    """
+    d = container.hub_cache() / f"models--{ref.repo_id.replace('/', '--')}" / "blobs"
+    try:
+        return any(d.glob("*.incomplete"))
+    except OSError:
+        return False
+
+
+def _revision_size(ref) -> Optional[int]:
+    """Total bytes of the pinned revision on the Hub, or None when it cannot be asked.
+
+    Only used to refuse a download that cannot fit, so None (offline, gated, an old
+    huggingface_hub) must degrade to "go ahead and try" rather than to a blocked serve.
+    """
+    if ref.allow_patterns or ref.ignore_patterns:
+        return None  # the pin is a subset; a whole-repo total would over-count
+    try:
+        from huggingface_hub import HfApi
+
+        info = HfApi().repo_info(
+            repo_id=ref.repo_id, revision=ref.revision,
+            repo_type=getattr(ref, "repo_type", None) or "model", files_metadata=True,
+        )
+        return sum(f.size or 0 for f in (info.siblings or ()))
+    except Exception:  # noqa: BLE001 — advisory; the download itself reports the truth
+        return None
+
+
+def _bytes_on_disk(ref) -> int:
+    """Bytes already on disk that count toward THIS revision's download.
+
+    Scoped to the pinned revision, deliberately: an earlier version summed every blob under
+    ``models--<repo>``, so an unrelated cached revision of the same repo (an old checkpoint of
+    equal size, say) was counted as "already present", collapsed ``need`` to ~0, and waved a
+    download that cannot fit straight past the preflight. Two contributions, both revision-scoped:
+
+    - the pinned snapshot's blobs, resolved through their symlinks and de-duplicated by blob so
+      shared (content-addressed) shards count once and the symlink side is never double-counted;
+    - any in-flight ``blobs/*.incomplete`` — bytes already fetched for a resumable download,
+      not yet linked into a snapshot.
+    """
+    repo_dir = container.hub_cache() / f"models--{ref.repo_id.replace('/', '--')}"
+    total = 0
+    seen: set = set()
+    snap = _pinned_snapshot_dir(repo_dir, ref.revision)
+    if snap is not None:
+        for f in snap.rglob("*"):
+            try:
+                target = f.resolve() if f.is_symlink() else f
+                if target.is_file() and target not in seen:
+                    seen.add(target)
+                    total += target.stat().st_size
+            except OSError:
+                pass
+    try:
+        for inc in (repo_dir / "blobs").glob("*.incomplete"):
+            if inc.is_file():
+                total += inc.stat().st_size
+    except OSError:
+        pass
+    return total
+
+
+def _safe_revision(rev: str) -> bool:
+    """Is this revision safe to use as a path component under the HF cache?
+
+    Absolute paths and ``..`` segments only. Anything else a git ref may contain is fine --
+    slashes included, since branch and PR refs are stored as nested directories.
+    """
+    if not rev:
+        return False
+    q = Path(rev)
+    return not q.is_absolute() and ".." not in q.parts
+
+
+def _pinned_snapshot_dir(repo_dir: Path, revision: Optional[str]) -> Optional[Path]:
+    """The HF cache snapshot directory for the pinned revision, or None if not cached.
+
+    HF stores a branch/tag under ``refs/<rev>`` pointing at a commit sha, with the files
+    under ``snapshots/<sha>/``. A sha revision is used directly; ``None`` means the default
+    branch (``main``). Resolving it here — rather than globbing every ``snapshots/*`` — is what
+    keeps the size accounting scoped to ONE revision, so an unrelated cached checkpoint of the
+    same repo cannot be counted as already-present.
+    """
+    snaps = repo_dir / "snapshots"
+    if not snaps.is_dir():
+        return None
+    rev = revision or "main"
+    # `revision` arrives from the manifest, and a hand-crafted *pulled* manifest reaches
+    # `Manifest` directly without authoring validation -- the same threat `_safe_name`
+    # guards in container.py. Unchecked it is worse than it looks: `..` segments read a
+    # file from outside the cache and then treat its contents as a sha, and pathlib
+    # REPLACES the left side when the right is absolute, so `snapshots / "/etc"` is
+    # `/etc` -- which `_bytes_on_disk` would then walk in full. A ref may legitimately
+    # contain slashes (`refs/pr/1`, `feature/x`), so reject traversal rather than
+    # separators, and fail closed: counting nothing over-estimates what is still needed,
+    # which errs toward refusing a download rather than waving one through.
+    if not _safe_revision(rev):
+        return None
+    ref_file = repo_dir / "refs" / rev
+    try:
+        sha = ref_file.read_text().strip() if ref_file.is_file() else rev
+    except OSError:
+        sha = rev
+    # The sha comes out of a file, so it is only as trustworthy as the path that found it.
+    if not _safe_revision(sha):
+        return None
+    exact = snaps / sha
+    if exact.is_dir():
+        return exact
+    # a short sha, or a name refs could not resolve: match a snapshot dir by prefix, but only
+    # when it is unambiguous — two matches means we cannot tell which revision was pinned.
+    try:
+        matches = [d for d in snaps.iterdir() if d.is_dir() and d.name.startswith(sha)]
+    except OSError:
+        return None
+    return matches[0] if len(matches) == 1 else None
+
+
+def _gb(n: int) -> str:
+    return f"{n / 1e9:.1f} GB"
+
+
+def _space_preflight(ref) -> None:
+    """Refuse a weights download that the disk cannot hold, before anything else starts.
+
+    This is the check that pays for itself. A fetch that runs out of room does not fail
+    loudly — it leaves a half-populated cache that then reads as complete, so the *next*
+    serve boots and dies inside the engine with the disk never mentioned. Naming the two
+    numbers up front is the whole difference.
+    """
+    total = _revision_size(ref)
+    if not total:
+        return
+    need = total - _bytes_on_disk(ref)
+    cache = container.hub_cache()
+    try:
+        free = shutil.disk_usage(cache if cache.exists() else cache.parent).free
+    except OSError:
+        return
+    if need <= free:
+        return
+    raise ContainerCliError(
+        f"not enough disk space for the weights {ref.repo_id}: needs {_gb(need)} more, "
+        f"{_gb(free)} free on the HF cache filesystem ({cache}).\n"
+        f"  → free up space, or point HF_HOME/HF_HUB_CACHE at a bigger disk\n"
+        f"  → the pinned revision is {_gb(total)} in total"
+    )
+
+
+def _weights_notice(manifest: Manifest, target: Optional[str]) -> None:
     """Say so when serve is about to boot without the weights on the host.
 
-    Only ``serve``-that-auto-pulls fetches weights; an already-installed package and the
-    missing-image repair both skip them by design, and the model then downloads them itself
-    inside the container. That is a supported path -- the HF cache is bind-mounted, so the
-    bytes land on the host and are reused -- but it is silent, slow, and hidden behind the
-    readiness probe, which is a bad thing to discover as an unexplained multi-minute boot.
+    The in-container fetch is a supported path — the HF cache is bind-mounted, so the bytes
+    land on the host and are reused — but it is silent, slow, and hidden behind the readiness
+    probe, which is a bad thing to discover as an unexplained multi-minute boot. Used when
+    serve is not allowed to fetch them itself: ``--no-weights``, or ``--local-only`` (which
+    forbids the network by definition).
+
+    The caller has already established that the weights are missing — it consulted the cache
+    to decide whether to fetch at all — so this does not re-check.
     """
     ref = manifest.weights
-    if ref is None or weights_cached(ref) is not None:
-        return
     at = f"@{ref.revision[:8]}" if ref.revision else ""
     head = (f"weights {ref.repo_id}{at} are not in your local HF cache; the model will "
             f"download them inside the container at first load (slower, and no progress is "
@@ -372,13 +546,95 @@ def _weights_notice(manifest: Manifest, target: Optional[str], view=None) -> Non
     if target:
         hints.append(f"to fetch them first instead:  tt-model pull {target} --with-weights")
     hints.append(f"or directly:  hf download {ref.repo_id}{rev}")
-    if view is not None:
-        # One warn row (it survives the checklist's final erase), hints indented under it.
-        view.warn("\n".join([head] + [f"  → {h}" for h in hints]))
-        return
     console.note(head, marker="⚠", style="warning")
     for h in hints:
         console.note(h, marker="→")
+
+
+def ensure_weights(manifest: Manifest, target: Optional[str], *,
+                   local_only: bool = False, no_weights: bool = False) -> None:
+    """Put the pinned weights on the host before the container starts, or explain why not.
+
+    Resumes unconditionally rather than deciding for itself whether the cache is complete.
+    That is the whole point: ``snapshot_download`` holds the revision's real file list, so it
+    knows exactly which files are missing and fetches only those, while anything we derive
+    locally — index files, shard-name arithmetic — is a guess at that list and is wrong for
+    some layout. Complete already? It is a metadata no-op (about a second), and with the Hub
+    unreachable it falls straight back to the cache. Half-finished? It resumes. Which is the
+    state that started all this: a serve used to boot on 19 of 131 shards and die in the
+    engine, where now it simply finishes the download first.
+
+    ``serve`` and ``pull --with-weights`` both come through here, so a full disk, a gated repo
+    and a half-finished download cannot mean different things depending on which command the
+    user typed. Both render as a ``console.step()`` with HF's byte counter bridged into it —
+    serve prefetches BEFORE opening its boot checklist, so nothing fights for the row.
+
+    Downloading is skipped, with the advisory note, when the user forbade it (``no_weights``)
+    or forbade the network (``local_only``).
+    """
+    ref = manifest.weights
+    if ref is None:
+        return
+    at = f"@{ref.revision[:8]}" if ref.revision else ""
+    if no_weights or local_only:
+        # The one place a local verdict is still needed, because fetching is off the table.
+        # `.incomplete` blobs are checked too: a resolvable-but-partial snapshot would
+        # otherwise read as present and cost the user the warning.
+        if _cached_locally(ref) is None or has_partial_download(ref):
+            _weights_notice(manifest, target)
+        else:
+            console.note(f"weights {ref.repo_id}{at} already on host", marker="•")
+        return
+
+    label = f"weights {ref.repo_id}{at}"
+    if has_partial_download(ref):
+        # "Resuming" reads as a stall otherwise, and the user is owed the reason their last
+        # attempt left bytes behind here.
+        label += " — resuming a partial download"
+    _space_preflight(ref)
+
+    try:
+        # progress_bridge silences HF's own tqdm/xet writers and returns the tqdm_class that
+        # routes their byte counts into the activity row -- the same treatment
+        # `hub.download_bundle` gets. Without it this download writes bars straight to the
+        # terminal, on top of whatever else owns the line.
+        with console.step(label) as st, hub.progress_bridge(label) as tqdm_class:
+            st.detail(str(_download_weights(ref, tqdm_class=tqdm_class)))
+    except Exception as e:  # noqa: BLE001
+        _weights_failed(ref, e, target)
+
+
+def _weights_failed(ref, exc: BaseException, target: Optional[str]) -> None:
+    """What a failed weights fetch means. Raises only for a full disk.
+
+    Everything else stays non-fatal, as it always has on the pull path: the image is loaded
+    and the model can still fetch its own weights inside the container, so a gate that is one
+    click away should not also cost the user the serve.
+
+    A full disk is the exception, and the reason this is one function rather than a rule
+    written once per caller. Warning and carrying on is what left a half-populated cache that
+    then read as complete to everything downstream — the failure this whole change is about.
+    It has to stop the run, on serve exactly as on pull.
+    """
+    if not _is_out_of_space(exc):
+        _weights_download_failed(ref, exc)
+        # Falling back to the cache is only safe if the cache is whole, and here we cannot
+        # ask the Hub which files that would mean. Half-fetched blobs are the one local
+        # signal that needs no guessing, so when they are present say plainly that the boot
+        # may still fail rather than implying the fallback is equivalent.
+        if has_partial_download(ref):
+            console.note(
+                "the cached copy is part-way through a download and the Hub could not be "
+                "reached to finish it, so the engine may still fail on a missing shard",
+                marker="⚠", style="warning",
+            )
+        return
+    retry = f"tt-model pull {target} --with-weights" if target else "the same command"
+    raise ContainerCliError(
+        f"ran out of disk space downloading the weights {ref.repo_id}. The partial download "
+        f"is still in the HF cache and will resume.\n"
+        f"  → free up space on {container.hub_cache()}, then:  {retry}"
+    ) from exc
 
 
 # --------------------------------------------------------------------------- refresh
@@ -494,6 +750,7 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     port: Optional[int] = None,
                     target: Optional[str] = None,
                     local_only: bool = False,
+                    no_weights: bool = False,
                     detach: bool = False) -> None:
     """Run one serve profile, and (unless ``detach``) watch it boot.
 
@@ -505,7 +762,9 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     from ``image/`` if docker no longer has it. ``port`` overrides the profile's port.
     ``target`` is the argument the user actually typed, so hints can be copy-pasted —
     ``manifest.name`` is NOT a valid target and telling someone to use it sends them in a
-    circle. ``follow`` is accepted for compatibility; waiting is the default now.
+    circle. ``no_weights`` keeps the pre-flight from fetching missing weights, leaving that
+    to the model inside the container. ``follow`` is accepted for compatibility; waiting is
+    the default now.
     """
     del follow  # the old opt-in; kept so callers written against it still work
     spec = manifest.container
@@ -638,20 +897,31 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     # container.ensure_mount_sources.
     container.ensure_mount_sources(manifest)
 
+    # BEFORE the checklist, deliberately. Downloading a few hundred GB is not a boot
+    # landmark, and it is the one step here that has real progress to report: as a
+    # `step()` above the list it gets `hub.progress_bridge`'s byte counter and owns the
+    # terminal row outright, where inside the list HF's tqdm/xet writers and the
+    # checklist spinner would both be writing it. It also means a failed prefetch is
+    # printed above the list, so the list's final erase cannot take the message with it.
+    try:
+        ensure_weights(manifest, target, local_only=local_only, no_weights=no_weights)
+    except ContainerCliError:
+        # A refusal this raises deliberately (no disk for the weights) is the point of
+        # the check — it must not be swallowed as advisory chatter.
+        raise
+    except Exception:  # noqa: BLE001 — never a reason not to serve
+        pass
+
     port = profile.port or DEFAULT_PORT
     endpoint = f"http://127.0.0.1:{port}"
     probe = launcher.ready_probe(manifest)
     tracker = BootTracker(launcher.boot_phases(manifest), probe)
     result = None
-    # Everything step()-shaped (host checks, image repair) ran above: a live checklist
-    # and a live step() would fight for the row, so the list opens only now.
+    # Everything step()-shaped (host checks, image repair, the weights prefetch) ran above:
+    # a live checklist and a live step() would fight for the row, so the list opens only now.
     with console.checklist() as view:
         view.instant("host ready", _host_summary(host_reqs))
         view.instant(f"image {container.image_ref(manifest)}")
-        try:
-            _weights_notice(manifest, target, view)
-        except Exception:  # noqa: BLE001 — one advisory line, never a reason not to serve
-            pass
         if container.container_exists(name):
             # Not running, but holding the name — `docker run` creates the container before
             # it binds ports, so a failed start (a busy port, usually) leaves one in
@@ -906,11 +1176,12 @@ def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = Fal
 
     # 4. the host caches — the expensive things to rebuild, so removal is opt-out.
     #
-    # Both live under one per-model parent (`cache/` for JIT kernels, `weights/` for
-    # weights converted to device layout), and the parent is what goes. Gate on the PARENT,
-    # not on `cache/`: a boot that converted weights but never wrote a JIT cache has no
-    # `cache/` at all, and gating on it there orphaned the weight tree — 105 GB for
-    # FLUX.2 — with nothing printed, because the note lived inside the same branch.
+    # All live under one per-model parent (`cache/` for JIT kernels, `weights/` for tt_dit's
+    # device-layout weights, `tensors/` for tt_transformers' device-layout weights), and the
+    # parent is what goes. Gate on the PARENT, not on `cache/`: a boot that converted weights
+    # but never wrote a JIT cache has no `cache/` at all, and gating on it there orphaned the
+    # weight tree — 105 GB for FLUX.2 — with nothing printed, because the note lived inside the
+    # same branch.
     cache = container.model_cache_dir(manifest)
     weights = container.model_weight_cache_dir(manifest)
     root = cache.parent

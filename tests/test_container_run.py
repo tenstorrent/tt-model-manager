@@ -50,6 +50,7 @@ def _run_argv(m, **kw):
         hf_home_dir=Path("/home/u/.cache/huggingface"),
         cache_dir=Path("/home/u/.cache/tt-model/my-model/cache"),
         weight_cache_dir=Path("/home/u/.cache/tt-model/my-model/weights"),
+        tensor_cache_dir=Path("/home/u/.cache/tt-model/my-model/tensors"),
         include_hf_token=False,
         **kw,
     )
@@ -188,6 +189,16 @@ def test_the_converted_weight_cache_is_persisted_on_the_host():
     assert "TT_DIT_CACHE_DIR=/weight-cache" in argv
 
 
+def test_the_tensor_cache_is_persisted_on_the_host():
+    """#84: tt_transformers writes device-layout weights to its TT_CACHE_PATH. Unmounted,
+    that path lands in the container's writable layer, which `docker rm` on every `stop`
+    discards — so the cache is cold on EVERY boot, not just the first, and every `serve`
+    regenerates it. Persist it on the host like the other two caches."""
+    argv = _run_argv(_wire())
+    assert "/home/u/.cache/tt-model/my-model/tensors:/tensor-cache" in argv
+    assert "TT_CACHE_PATH=/tensor-cache" in argv
+
+
 def test_every_cache_mount_has_a_variable_pointing_at_it():
     """The failure mode this guards is a mount nothing reads. A cache dir with no
     variable aimed at it is not a slow cache, it is no cache, and it looks fine in
@@ -209,8 +220,10 @@ def test_the_weight_cache_source_is_created_before_run(tmp_path):
         hf_home_dir=tmp_path / "hf",
         cache_dir=tmp_path / "cache",
         weight_cache_dir=tmp_path / "weights",
+        tensor_cache_dir=tmp_path / "tensors",
     )
     assert (tmp_path / "weights").is_dir()
+    assert (tmp_path / "tensors").is_dir()  # #84: created as host user, not root by docker
 
 
 def test_the_port_is_published_from_the_profile():
@@ -829,3 +842,20 @@ def test_a_capability_parser_still_round_trips():
     argv = launcher_for("vllm-fork").serve_argv(m, m.container.resolve_profile())
     joined = argv[argv.index("--additional-server-args") + 1]
     assert shlex.split(joined) == ["--enable-auto-tool-choice", "--tool-call-parser", "hermes"]
+
+
+def test_running_matches_the_container_name_exactly(monkeypatch):
+    """`stop` without --profile asks running() for every profile's container name in turn.
+    With substring matching, the p300 profile's name is found INSIDE the p300x2 container's
+    name, so stop reported a clean shutdown of a container that never existed."""
+    rows = "tt-model-my-model-p300x2\ttt-model/my-model:abc\tUp 2 minutes\t0.0.0.0:8010->8010/tcp\n"
+
+    class R:
+        stdout = rows
+
+    monkeypatch.setattr(container, "_run", lambda argv, **kw: R())
+    assert container.running("tt-model-my-model-p300") == []
+    assert [r["name"] for r in container.running("tt-model-my-model-p300x2")] == [
+        "tt-model-my-model-p300x2"
+    ]
+    assert [r["name"] for r in container.running()] == ["tt-model-my-model-p300x2"]
