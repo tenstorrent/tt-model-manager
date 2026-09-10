@@ -555,7 +555,13 @@ def run_checked(argv: List[str]) -> str:
 
 
 def running(name_filter: Optional[str] = None) -> List[Dict[str, str]]:
-    """tt-model containers present on this host (running or exited)."""
+    """tt-model containers present on this host (running or exited).
+
+    ``name_filter`` is an EXACT container name, never a substring. Every caller passes a
+    full ``container_name()``; matching by substring made ``stop`` (which walks every
+    profile's name when no ``--profile`` is given) see ``tt-model-x-p300`` inside
+    ``tt-model-x-p300x2`` and report a clean stop of a container that never existed.
+    """
     fmt = "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
     out = _run(
         ["docker", "ps", "--all", "--filter", f"label={LABEL}", "--format", fmt],
@@ -564,7 +570,7 @@ def running(name_filter: Optional[str] = None) -> List[Dict[str, str]]:
     rows = []
     for line in out.splitlines():
         parts = line.split("\t")
-        if len(parts) >= 3 and (not name_filter or name_filter in parts[0]):
+        if len(parts) >= 3 and (not name_filter or name_filter == parts[0]):
             rows.append({
                 "name": parts[0], "image": parts[1], "status": parts[2],
                 "ports": parts[3] if len(parts) > 3 else "",
