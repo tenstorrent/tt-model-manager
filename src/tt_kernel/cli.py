@@ -27,6 +27,7 @@ from . import (
 )
 from .manifest import (
     DEFAULT_PORT,
+    THIN_KINDS,
     CompatibilityReport,
     Manifest,
     Mesh,
@@ -719,6 +720,8 @@ def package_thin(
     model_path = Path(model_py).expanduser()
     if not model_path.is_file():
         raise _err(f"--model-py {model_py!r} is not a file.")
+    if kind not in THIN_KINDS:
+        raise _err(f"--kind {kind!r} is not supported; use one of {THIN_KINDS}.")
     vmeta: Optional[dict] = None
     if kind == "vllm":
         if asgi_app:
@@ -734,6 +737,11 @@ def package_thin(
     else:
         if not asgi_app:
             raise _err(f"--kind {kind!r} needs --app (a \"module:attribute\" ASGI target).")
+        if ":" not in asgi_app:
+            raise _err(
+                f"--app {asgi_app!r} must be a \"module.path:attribute\" ASGI target (missing ':') "
+                "— e.g. \"gradio_app.asgi:app\"."
+            )
         if metadata or arch_name or main_class:
             raise _err(f"--kind {kind!r} serves no vLLM; --metadata/--arch-name/--main-class don't apply.")
         # No tokens/KV-cache/continuous batching for this kind — nothing for vLLM to do, so the

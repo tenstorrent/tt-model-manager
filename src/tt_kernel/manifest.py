@@ -137,6 +137,12 @@ class Vllm(BaseModel):
     wheel: Optional[str] = None
 
 
+# Every value ``Deps.kind`` accepts. Kept as a single source of truth so the CLI (fail-fast, a
+# clean error before any staging work happens) and ``stage_thin_package``/``render_run_sh``
+# (defense-in-depth for callers that build a ``Deps`` directly) validate against the same list.
+THIN_KINDS = ("vllm", "tt-dit-server")
+
+
 class Deps(BaseModel):
     """v6 "thin" bundle: the per-model venv is built from pip dependency pins + bundled wheels,
     not from embedded platform wheels (see issue #29).
@@ -176,7 +182,7 @@ class Deps(BaseModel):
     # vLLM core install (empty-target, for the plugin). None => bundle serves no vLLM (non-vLLM model).
     vllm: Optional["Vllm"] = None
     model_dir: str = "."                     # where model.py lives (bundle root), added to PYTHONPATH
-    kind: str = "vllm"                       # "vllm" (default) | "tt-dit-server" — see class docstring
+    kind: str = "vllm"                       # one of THIN_KINDS (see class docstring)
     # The ASGI entrypoint ("module:attribute") a "tt-dit-server" kind serves with uvicorn — the v6
     # analog of ContainerSpec.runtime["app"]. Unused (must be None) for kind="vllm".
     app: Optional[str] = None

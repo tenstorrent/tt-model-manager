@@ -22,6 +22,7 @@ import datetime
 import hashlib
 import json
 import re
+import shlex
 import shutil
 import socket
 from pathlib import Path
@@ -35,6 +36,7 @@ from .manifest import (
     Mesh,
     Producer,
     Resources,
+    THIN_KINDS,
     Vllm,
     WeightsRef,
     WheelArtifact,
@@ -492,9 +494,17 @@ def render_run_sh(manifest: Manifest) -> str:
     # cache/continuous batching to hand vLLM, so it serves `deps.app` directly with uvicorn instead
     # — matching what the same-named v5.1 CONTAINER kind's TtDitServerLauncher.serve_argv() does.
     if is_dit_kind:
+        # deps.app is author-controlled and ends up inside a bash array literal below — quote it
+        # as a shell word (not just wrapped in "..."; double quotes don't stop $()/backtick command
+        # substitution or embedded-quote breakout) rather than interpolating it raw.
+        if not manifest.deps.app:
+            raise ValueError(
+                f'render_run_sh: kind={manifest.deps.kind!r} requires deps.app (a '
+                '"module:attribute" ASGI target), got None/empty.'
+            )
         cmd_line = (
             f'CMD=("$PYBIN" -m uvicorn --host 0.0.0.0 --port "${{PORT:-8000}}" '
-            f'--lifespan on "{manifest.deps.app}" "$@")'
+            f'--lifespan on {shlex.quote(manifest.deps.app)} "$@")'
         )
     else:
         cmd_line = f'CMD=("$PYBIN" -m vllm.entrypoints.openai.api_server --model "{weights}" {serving} "$@")'
@@ -842,6 +852,8 @@ def stage_thin_package(
     unblocks the non-vLLM SERVING mechanism, not the underlying ttnn/tt-metal-models wheel
     publish this whole schema is still waiting on.
     """
+    if kind not in THIN_KINDS:
+        raise ValueError(f'kind={kind!r} is not supported; use one of {THIN_KINDS}.')
     if kind == "vllm":
         if vllm_metadata is None:
             raise ValueError('kind="vllm" requires vllm_metadata (main_class + arch).')
@@ -850,6 +862,11 @@ def stage_thin_package(
     else:
         if app is None:
             raise ValueError(f'kind={kind!r} requires app ("module:attribute" ASGI target).')
+        if ":" not in app:
+            raise ValueError(
+                f'app={app!r} must be a "module.path:attribute" ASGI target (missing ":") — '
+                'e.g. "gradio_app.asgi:app".'
+            )
         if vllm_metadata is not None:
             raise ValueError(f'kind={kind!r} serves no vLLM; do not pass vllm_metadata.')
         if with_vllm:
