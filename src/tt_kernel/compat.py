@@ -47,6 +47,18 @@ def data_dir(base: Path) -> Path:
     return current
 
 
+def cache_dir() -> Path:
+    """The per-user cache root, honoring the ``tt-kernel`` -> ``tt-model`` rename shim.
+
+    Use this instead of hardcoding ``~/.cache/tt-model``. On a pre-rename box (only
+    ``~/.cache/tt-kernel`` exists), hardcoding the new name and writing under it CREATES
+    ``~/.cache/tt-model`` — which flips ``data_dir`` to the new dir for every OTHER consumer
+    too (``localdb``, ``runtime``), orphaning the legacy ``installed.json`` and making the
+    already-installed bundles vanish from ``list``/``rm``. Routing through here keeps all
+    state agreeing on one dir. See issue #62."""
+    return data_dir(Path.home() / ".cache")
+
+
 def invoked_as_legacy() -> bool:
     """True when the process was started via the old ``tt-kernel`` command name."""
     import sys
