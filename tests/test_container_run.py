@@ -789,3 +789,20 @@ def test_a_missing_device_node_is_not_reachable(tmp_path):
     import os
 
     assert container._reachable_in_userns(tmp_path / "nope", mode=os.R_OK) is False
+
+
+def test_running_matches_the_container_name_exactly(monkeypatch):
+    """`stop` without --profile asks running() for every profile's container name in turn.
+    With substring matching, the p300 profile's name is found INSIDE the p300x2 container's
+    name, so stop reported a clean shutdown of a container that never existed."""
+    rows = "tt-model-my-model-p300x2\ttt-model/my-model:abc\tUp 2 minutes\t0.0.0.0:8010->8010/tcp\n"
+
+    class R:
+        stdout = rows
+
+    monkeypatch.setattr(container, "_run", lambda argv, **kw: R())
+    assert container.running("tt-model-my-model-p300") == []
+    assert [r["name"] for r in container.running("tt-model-my-model-p300x2")] == [
+        "tt-model-my-model-p300x2"
+    ]
+    assert [r["name"] for r in container.running()] == ["tt-model-my-model-p300x2"]
