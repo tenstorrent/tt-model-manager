@@ -507,7 +507,10 @@ def compare(manifest: Manifest, local: "LocalEnv") -> CompatibilityReport:  # no
     none of the host's tt-metal facts are relevant. Only two things must match:
 
     - ``arch`` mismatch is **fatal** — the binaries/kernels target a specific ISA.
-    - ``device_count`` mismatch is forceable — the model was authored for a given mesh.
+    - ``device_count`` is forceable only when the bundle needs **more** devices than the host
+      has: the mesh the model was authored for cannot be formed. A bundle that needs **fewer**
+      (a 1-device model on a 4-card box) is a normal, supported case — it runs on a subset of
+      the chips — so it warrants no warning and no ``--force``.
 
     v5 wheels' interpreter/platform tags are checked separately at install
     (``host_incompatible_wheels``); v6 resolves its deps via pip at install.
@@ -519,7 +522,10 @@ def compare(manifest: Manifest, local: "LocalEnv") -> CompatibilityReport:  # no
             Incompatibility(field="arch", expected=manifest.arch, detected=local.arch, fatal=True)
         )
 
-    if local.device_count and manifest.device_count != local.device_count:
+    # Only a bundle that needs MORE devices than the host has is a problem — its mesh cannot
+    # be formed. Needing fewer (bundle < local) is normal: the model uses a subset of the
+    # chips, so it must install and serve with no warning and no --force.
+    if local.device_count and manifest.device_count > local.device_count:
         issues.append(
             Incompatibility(
                 field="device_count",
