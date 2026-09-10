@@ -906,11 +906,12 @@ def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = Fal
 
     # 4. the host caches — the expensive things to rebuild, so removal is opt-out.
     #
-    # Both live under one per-model parent (`cache/` for JIT kernels, `weights/` for
-    # weights converted to device layout), and the parent is what goes. Gate on the PARENT,
-    # not on `cache/`: a boot that converted weights but never wrote a JIT cache has no
-    # `cache/` at all, and gating on it there orphaned the weight tree — 105 GB for
-    # FLUX.2 — with nothing printed, because the note lived inside the same branch.
+    # All live under one per-model parent (`cache/` for JIT kernels, `weights/` for tt_dit's
+    # device-layout weights, `tensors/` for tt_transformers' device-layout weights), and the
+    # parent is what goes. Gate on the PARENT, not on `cache/`: a boot that converted weights
+    # but never wrote a JIT cache has no `cache/` at all, and gating on it there orphaned the
+    # weight tree — 105 GB for FLUX.2 — with nothing printed, because the note lived inside the
+    # same branch.
     cache = container.model_cache_dir(manifest)
     weights = container.model_weight_cache_dir(manifest)
     root = cache.parent
