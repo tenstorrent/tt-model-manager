@@ -323,7 +323,7 @@ def _is_out_of_space(exc: BaseException) -> bool:
     return False
 
 
-def _download_weights(ref) -> Path:
+def _download_weights(ref, *, tqdm_class=None) -> Path:
     """Fetch the weights into the HOST HF cache, honouring whatever the author pinned.
 
     A revision is the difference between "the weights that were validated" and "whatever
@@ -332,28 +332,14 @@ def _download_weights(ref) -> Path:
     """
     from huggingface_hub import snapshot_download
 
+    extra = {"tqdm_class": tqdm_class} if tqdm_class is not None else {}
     return Path(snapshot_download(
         repo_id=ref.repo_id,
         revision=ref.revision,
         allow_patterns=ref.allow_patterns,
         ignore_patterns=ref.ignore_patterns,
+        **extra,
     ))
-
-
-def weights_cached(ref) -> Optional[Path]:
-    """The cached snapshot path if the pinned weights are already complete, else None.
-
-    Mirrors :func:`_download_weights` argument for argument, with ``local_files_only`` — so
-    "complete" means complete *for this spec* (the author's ``allow_patterns`` included), not
-    merely "some revision of this repo is in the cache". Never touches the network, so it is
-    safe on the serve path.
-
-    Returns None on ANY failure. This only drives an advisory note: a false "not cached"
-    costs the user one unnecessary line, while a raise here would fail a serve that would
-    otherwise have worked.
-    """
-    path, reason = _cached_snapshot(ref)
-    return None if reason else path
 
 
 def _cached_snapshot(ref) -> "tuple[Optional[Path], Optional[str]]":
@@ -416,7 +402,10 @@ def incomplete_reason(ref, path: Path) -> Optional[str]:
             try:
                 shards = set((json.loads(index.read_text()).get("weight_map") or {}).values())
             except (OSError, ValueError):
-                return None  # unreadable index: not our call to make
+                # Fail CLOSED. `None` here means "complete" to every caller, so a truncated
+                # or corrupt index would wave the snapshot through into the same late engine
+                # failure this check exists to prevent. Unreadable is a reason.
+                return f"{index_name} is unreadable"
             missing = [s for s in shards if not (path / s).exists()]
             if missing:
                 return f"{len(missing)} of {len(shards)} weight shards missing"
@@ -555,7 +544,7 @@ def _space_preflight(ref) -> None:
     )
 
 
-def _weights_notice(manifest: Manifest, target: Optional[str], view=None) -> None:
+def _weights_notice(manifest: Manifest, target: Optional[str]) -> None:
     """Say so when serve is about to boot without the weights on the host.
 
     The in-container fetch is a supported path — the HF cache is bind-mounted, so the bytes
@@ -577,16 +566,12 @@ def _weights_notice(manifest: Manifest, target: Optional[str], view=None) -> Non
     if target:
         hints.append(f"to fetch them first instead:  tt-model pull {target} --with-weights")
     hints.append(f"or directly:  hf download {ref.repo_id}{rev}")
-    if view is not None:
-        # One warn row (it survives the checklist's final erase), hints indented under it.
-        view.warn("\n".join([head] + [f"  → {h}" for h in hints]))
-        return
     console.note(head, marker="⚠", style="warning")
     for h in hints:
         console.note(h, marker="→")
 
 
-def ensure_weights(manifest: Manifest, target: Optional[str], view=None, *,
+def ensure_weights(manifest: Manifest, target: Optional[str], *,
                    local_only: bool = False, no_weights: bool = False) -> None:
     """Put the pinned weights on the host before the container starts, or explain why not.
 
@@ -602,21 +587,25 @@ def ensure_weights(manifest: Manifest, target: Optional[str], view=None, *,
 
     The single weights path: ``pull --with-weights`` comes through here too, so a full disk, a
     gated repo and a half-finished download cannot mean different things depending on which
-    command the user happened to type. ``view`` is the live checklist when serve is booting and
-    None otherwise, which is the one thing the two callers genuinely do not share — a live
-    ``console.step()`` and a live checklist fight for the same row.
+    command the user happened to type. Both callers render the same way — a ``console.step()``
+    with HF's byte counter bridged into it — because serve now prefetches BEFORE opening its
+    boot checklist rather than inside it.
     """
     ref = manifest.weights
     if ref is None:
         return
+    at = f"@{ref.revision[:8]}" if ref.revision else ""
     path, reason = _cached_snapshot(ref)
     if path is not None and reason is None:
+        # Say so. A user who asked for weights (`pull --with-weights`) is owed the
+        # confirmation, and on the serve path it is the line that explains why a boot that
+        # needs 360 GB of weights started instantly.
+        console.note(f"weights {ref.repo_id}{at} already on host", marker="•")
         return
     if no_weights or local_only:
-        _weights_notice(manifest, target, view)
+        _weights_notice(manifest, target)
         return
 
-    at = f"@{ref.revision[:8]}" if ref.revision else ""
     label = f"weights {ref.repo_id}{at}"
     if reason:
         # Name the damage. "Resuming" reads as a stall otherwise, and the user is owed the
@@ -624,22 +613,13 @@ def ensure_weights(manifest: Manifest, target: Optional[str], view=None, *,
         label += f" — incomplete ({reason}), resuming"
     _space_preflight(ref)
 
-    if view is not None:
-        view.begin(label)
-        try:
-            got = _download_weights(ref)
-        except Exception as e:  # noqa: BLE001
-            # Say what happened, in place of a silent boot — through `view.warn`, which
-            # survives the `view.clear()` a clean boot ends with; a `view.done` row would be
-            # erased, so a failed prefetch could vanish behind a ready card.
-            view.warn(f"{label} not downloaded — the model will fetch it inside the container")
-            _weights_failed(ref, e, target)
-            return
-        view.done(f"{label} on host", detail=str(got))
-        return
     try:
-        with console.step(label) as st:
-            st.detail(str(_download_weights(ref)))
+        # progress_bridge silences HF's own tqdm/xet writers and returns the tqdm_class that
+        # routes their byte counts into the activity row -- the same treatment
+        # `hub.download_bundle` gets. Without it this download writes bars straight to the
+        # terminal, on top of whatever else owns the line.
+        with console.step(label) as st, hub.progress_bridge(label) as tqdm_class:
+            st.detail(str(_download_weights(ref, tqdm_class=tqdm_class)))
     except Exception as e:  # noqa: BLE001
         _weights_failed(ref, e, target)
 
@@ -927,25 +907,31 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     # container.ensure_mount_sources.
     container.ensure_mount_sources(manifest)
 
+    # BEFORE the checklist, deliberately. Downloading a few hundred GB is not a boot
+    # landmark, and it is the one step here that has real progress to report: as a
+    # `step()` above the list it gets `hub.progress_bridge`'s byte counter and owns the
+    # terminal row outright, where inside the list HF's tqdm/xet writers and the
+    # checklist spinner would both be writing it. It also means a failed prefetch is
+    # printed above the list, so the list's final erase cannot take the message with it.
+    try:
+        ensure_weights(manifest, target, local_only=local_only, no_weights=no_weights)
+    except ContainerCliError:
+        # A refusal this raises deliberately (no disk for the weights) is the point of
+        # the check — it must not be swallowed as advisory chatter.
+        raise
+    except Exception:  # noqa: BLE001 — never a reason not to serve
+        pass
+
     port = profile.port or DEFAULT_PORT
     endpoint = f"http://127.0.0.1:{port}"
     probe = launcher.ready_probe(manifest)
     tracker = BootTracker(launcher.boot_phases(manifest), probe)
     result = None
-    # Everything step()-shaped (host checks, image repair) ran above: a live checklist
-    # and a live step() would fight for the row, so the list opens only now.
+    # Everything step()-shaped (host checks, image repair, the weights prefetch) ran above:
+    # a live checklist and a live step() would fight for the row, so the list opens only now.
     with console.checklist() as view:
         view.instant("host ready", _host_summary(host_reqs))
         view.instant(f"image {container.image_ref(manifest)}")
-        try:
-            ensure_weights(manifest, target, view,
-                           local_only=local_only, no_weights=no_weights)
-        except ContainerCliError:
-            # A refusal this raises deliberately (no disk for the weights) is the point of
-            # the check — it must not be swallowed as advisory chatter.
-            raise
-        except Exception:  # noqa: BLE001 — never a reason not to serve
-            pass
         if container.container_exists(name):
             # Not running, but holding the name — `docker run` creates the container before
             # it binds ports, so a failed start (a busy port, usually) leaves one in

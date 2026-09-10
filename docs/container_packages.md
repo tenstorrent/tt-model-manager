@@ -350,8 +350,9 @@ run on a build host; a later `serve` starts the container. Around them:
 `pull` loads the image into the local docker daemon (or `docker pull`s it from a real
 registry) and records the package in the local db. **It does not fetch weights unless you
 pass `--with-weights`** — the flag defaults to off, so a bare `pull` moves the image only and
-the model downloads its weights at first load instead. `serve`'s *auto*-pull (the one that
-fires when nothing is installed yet) does fetch them, so the two entry points differ:
+the model downloads its weights at first load instead. `serve` is the opposite: it always
+makes sure the weights are on the host first, whether or not the package was already
+installed. So `pull` is the opt-in case and `serve` the automatic one:
 
 | | image | weights |
 |---|---|---|
