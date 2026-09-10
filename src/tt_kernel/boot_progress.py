@@ -120,12 +120,17 @@ VLLM_PHASES: Tuple[Phase, ...] = (
           start=_rx(r"KV cache size", r"Allocating TT kv caches", r"num_gpu_blocks"),
           detail=_detail_kv),
     # start: the real TT warmup lines — tt_transformers prefill/decode, the common
-    # decode-warmup helper — plus the compile/trace landmarks. Deliberately ANCHORED, not a
-    # bare "[Ww]arming up": that also matched the SERVER phase's "Warming up chat template
-    # processing...", and because `feed` scans forward from the current phase, warmup (earlier)
-    # won it — inventing a "model warmed up" row for a boot that ran no warmup at all (the
-    # vllm-fork case with enable_model_warmup: false). The dropped CUDA/CPU phrasings
-    # ("Compile and warming up", a bare "warming up") never execute on the TT backend.
+    # decode-warmup helper — plus the compile/trace landmarks.
+    #
+    # Deliberately ANCHORED. A bare "[Ww]arming up" here would also match the SERVER phase's
+    # "Warming up chat template processing...", and because `feed` scans forward from the
+    # current phase, warmup (being earlier) takes it — announcing "model warmed up" for a boot
+    # that ran no warmup at all (vllm-fork with enable_model_warmup: false, where the plugin
+    # logs "Skipping model warmup" and that chat-template line is the only warmup-shaped text
+    # in the log). A missing row is honest; a false one is the one thing this module must not
+    # do. Also excluded for the same reason of staying true to this stack: vLLM's own
+    # "Compile and warming up" (CUDA worker) and bare "Warming up model" (CPU worker), neither
+    # of which executes on the TT backend.
     Phase("warmup", "warming up the model", "model warmed up",
           start=_rx(r"Warming up prefill", r"Warming up decode", r"Starting decode warmup",
                     r"Done Compiling Model", r"Capturing .*[Tt]race"),

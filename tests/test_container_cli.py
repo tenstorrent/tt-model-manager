@@ -20,7 +20,7 @@ from tt_kernel import cli, container, container_cli, hub
 from tt_kernel.container_manifest import ContainerManifest
 from tt_kernel.manifest import Manifest
 
-from test_container_manifest import BASE
+from test_container_manifest import BASE, FORK
 
 runner = CliRunner()
 
@@ -210,6 +210,48 @@ def test_ordinary_flags_print_exactly_as_before(tmp_path, monkeypatch, capsys):
                      "--mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G"):
         assert fragment in out
     assert "'" not in out.split("--additional-config")[0], "quoted a token that was fine"
+
+
+# ------------------------------ the two quoting layers must compose on the vllm-fork path
+#
+# There are two independent quotings on this path and they are easy to mistake for one:
+#
+#   value layer (launchers.py)  -- the fork's readiness runner takes extra server flags as
+#                                  ONE joined string and shlex.splits it back apart, so each
+#                                  token is quoted before joining.
+#   printing layer (#81, above) -- `--print` shlex.joins the whole docker argv, which quotes
+#                                  that already-quoted string a second time.
+#
+# The printed line therefore NESTS, and reads alarmingly:
+#
+#   --additional-server-args '--override-generation-config '"'"'{"temperature": 0}'"'"' ...'
+#
+# It is nonetheless correct, and nothing pinned that until this test: paste it into a shell
+# and the runner's own shlex.split must still recover the JSON intact. Undo either layer and
+# this fails -- drop the value layer and the JSON loses its quotes on the far side; drop the
+# printing layer and the pasted line falls apart before the runner ever sees it.
+
+FORK_JSON_SERVE = {
+    "port": 8000,
+    "block_size": 64,
+    "args": [["--override-generation-config", '{"temperature": 0}'],
+             ["--chat-template", "/tpl/a b.jinja"],
+             "--trust-remote-code"],
+}
+
+
+def test_a_fork_json_flag_survives_both_quoting_layers(tmp_path, monkeypatch, capsys):
+    """Shell first (what a paste parses), then the runner's shlex.split of the joined
+    string — the JSON and the spaced path must arrive as one token each."""
+    out = _printed(tmp_path, monkeypatch, capsys, **FORK,
+                   serve=dict(FORK_JSON_SERVE))
+    shell_tokens = shlex.split(out)
+    joined = shell_tokens[shell_tokens.index("--additional-server-args") + 1]
+    assert shlex.split(joined) == [
+        "--override-generation-config", '{"temperature": 0}',
+        "--chat-template", "/tpl/a b.jinja",
+        "--trust-remote-code",
+    ]
 
 
 def test_serve_refuses_when_the_container_is_already_running(tmp_path, monkeypatch):

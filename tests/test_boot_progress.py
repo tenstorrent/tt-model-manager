@@ -167,14 +167,23 @@ class TestShapes:
         assert len(keys) == len(set(keys))
 
 
-# ------------------------------------------------- the vLLM warmup phase must be reachable
+# ------------------------------------------- the vLLM warmup row must tell the truth, with
+#                                             the duration the log actually gives away
 #
-# Two independent faults, both leaving the row dark for a whole warmup:
-#   done  -- matched only "took N seconds". vLLM 0.24.0's v1/engine/core.py logs
-#            "took %.2f s" in all three of its branches, so the phase could never close
-#            on any current vLLM; only the older fork build in fixtures says "seconds".
-#   start -- covered tt_transformers/TTI phrasing only, so a model logging its own
-#            wording never opened the phase at all.
+# The row was never dark -- log order closes a phase whatever its done pattern says (see
+# the module docstring), so the `server` phase's start always finished `warmup`. What was
+# wrong was narrower and worth guarding:
+#   detail -- `_detail_warmup` matched only "took N seconds", while vLLM 0.24.0+ logs
+#             "took %.2f s" in every branch of v1/engine/core.py (on our stack with a
+#             "(compilation: N s)" tail). So the row closed with a BLANK detail on every
+#             current boot; only the older fork build in fixtures says "seconds". Widening
+#             it -- and the `done` pattern beside it, so the phase closes on its own line
+#             instead of on the next phase's -- is what this half of the change buys.
+#   start  -- must stay ANCHORED to lines a TT warmup really emits. A bare "[Ww]arming up"
+#             also catches the `server` phase's "Warming up chat template processing...",
+#             and since `feed` scans forward, the earlier `warmup` phase wins it -- a
+#             "model warmed up" row for a boot that ran no warmup at all. An absent row is
+#             honest; a false one is not.
 
 def _warmup_phase():
     from tt_kernel.boot_progress import VLLM_PHASES
@@ -212,18 +221,19 @@ def test_the_warmup_phase_opens_on_the_tt_stacks_wording(line):
     "Warming up model",                              # vLLM CPU worker — never runs on TT
 ])
 def test_the_warmup_phase_does_not_open_on_a_foreign_line(line):
-    """The start patterns are anchored to real TT warmup lines. A bare "[Ww]arming up" also
-    caught the server phase's "Warming up chat template processing...", inventing a warmed-up
-    row for a boot that skipped warmup; the CUDA/CPU phrasings never execute on this backend."""
+    """The start patterns stay anchored to real TT warmup lines. Widen them to a bare
+    "[Ww]arming up" and the server phase's "Warming up chat template processing..." is caught
+    too -- announcing a warmed-up model for a boot that skipped warmup. The CUDA/CPU
+    phrasings are excluded for a different reason: neither worker executes on this backend."""
     assert not any(r.search(line) for r in _warmup_phase().start)
 
 
 def test_a_warmup_disabled_fork_boot_invents_no_warmup_row():
-    """The regression behind the anchoring: on a vllm-fork boot with enable_model_warmup:false,
-    the engine logs "Skipping model warmup" and the only "warming up" text left is the server's
-    "Warming up chat template processing...". A bare warmup pattern opened (and, one line later,
-    closed) a phantom `warmup` phase off that line. Feed exactly that shape and assert the
-    tracker goes straight from kv to server with no warmup event at all."""
+    """The invariant the anchoring protects, at tracker level rather than regex level. On a
+    vllm-fork boot with enable_model_warmup:false the engine logs "Skipping model warmup", and
+    the only "warming up" text left in the whole boot belongs to the server phase. Feed exactly
+    that shape: the tracker must go straight from kv to server and emit no warmup event, so the
+    checklist shows no row instead of a false one. Widening `start` is what would break this."""
     t = BootTracker(VLLM_PHASES, READY)
     events = []
     for line in [
@@ -252,6 +262,7 @@ def test_a_warmup_disabled_fork_boot_invents_no_warmup_row():
 def test_the_warmup_detail_reads_current_and_legacy_duration_spellings(line, expected):
     """The payoff of the done/detail widening: `took N s` (current vLLM, with or without the
     `(compilation: N s)` tail) and the legacy `took N seconds` all yield a duration. Before,
-    the detail regex still required "seconds", so every current boot showed a blank warmup row."""
+    the detail regex still required "seconds", so the row closed with no duration beside it on
+    every current boot -- the one user-visible thing this half of the change delivers."""
     from tt_kernel.boot_progress import _detail_warmup
     assert _detail_warmup(line) == expected
