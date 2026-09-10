@@ -123,8 +123,8 @@ tt-model package ... --out ./bundle                        # no push
 # (push the staged folder by re-running package with the positional id, or push from your flow)
 ```
 
-Visibility is tri-state and **a push never flips it implicitly** — see the README's *Repo
-visibility* table. Large wheels go to git-LFS automatically.
+Visibility is tri-state and **a push never flips it implicitly** — see
+[publishing.md](publishing.md#push-vs-public-vs-publish). Large wheels go to git-LFS automatically.
 
 ---
 

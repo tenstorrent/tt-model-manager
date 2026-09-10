@@ -9,6 +9,33 @@ modified `tt-metal-community` tree — plus a generated `install.sh`/`run.sh` an
 Weights stay a **pointer** (an HF repo id), downloaded at pull. A consumer needs only a TT card +
 firmware. `tt-model` alone does the whole job — no tt-cli, no pre-provisioned tt-metal/vLLM.
 
+## Layout and why this shape
+
+One Hugging Face **model** repo carries everything needed to run — *"package what's on your box"*:
+
+```
+wheels/            the author's built ttnn wheel (custom C++/LLK kernels compiled in),
+                   base vLLM + plugin wheels, and the vendored dependency closure   (git-LFS)
+metal/             the author's modified tt-metal-community tree (Python blocks + model code)
+vllm_models/<name>/vllm_metadata.json     the plugin's EXTRA_MODELS_DIR contract
+install.sh  run.sh  requirements.txt      generated launcher + installer
+tt_kernel_manifest.json                   the v5 manifest
+# weights: NOT embedded — a pointer (HF repo id) in the manifest, fetched on pull/serve
+```
+
+- **Self-contained.** The engine that runs is the author's actual build (their
+  kernels ride along inside the `ttnn` wheel), not a stock pin — so custom C++/LLK kernels just work.
+- **The folder is a hard wall.** After `pull`, everything needed to serve lives *under the install
+  directory* — the pinned interpreter (provisioned by `uv` into the folder), the venv, the engine,
+  the model code, and, on first serve, the weights and all caches. Serving depends on nothing
+  outside the folder except the TT device and system libc. Only `pull` touches the network.
+- **Portable across machines.** The `ttnn` wheel is made portable with `auditwheel` (vendored libs +
+  `$ORIGIN` RPATH); deps are vendored so install is offline + reproducible; `pull` verifies the
+  wheel's interpreter/arch/**glibc** floor and fails clearly on a mismatch instead of at runtime.
+  Build the engine wheel on **Ubuntu 22.04 (glibc 2.35)** and one bundle runs on both 22.04 and 24.04
+  (details under "Reproducibility & isolation" below).
+- **Weights stay a pointer** — they're large and shared, so the manifest references the HF repo id.
+
 ## User flow
 
 ### Producer — "package what's on your box"
