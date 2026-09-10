@@ -402,8 +402,9 @@ of a silent boot:
 ```
 
 A *failed* fetch is still non-fatal: the image is loaded and the model can try for itself, so
-a gate you can click through does not cost you the serve. The exception is a full disk on
-`pull --with-weights`, which now fails loudly rather than leaving a partial cache behind.
+a gate you can click through does not cost you the serve. The exception is a full disk, which
+stops the run rather than leaving a partial cache behind. `serve` and `pull --with-weights`
+share one code path here, so both behave identically.
 Weights handling is suppressed entirely under `--print`.
 
 `serve` also reloads the image from the staged `image/` layout if docker no longer has it —

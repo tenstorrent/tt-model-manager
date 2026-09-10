@@ -261,25 +261,12 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
         "profiles": spec.profile_names(),
     })
 
-    if not no_weights and manifest.weights:
-        # Before the bytes, not after: a fetch that fills the disk leaves a half-populated
-        # cache, and that cache then reads as complete to everything downstream.
-        _space_preflight(manifest.weights)
-        try:
-            with console.step("weights → host HF cache") as st:
-                path = _download_weights(manifest.weights)
-                st.detail(str(path))
-        except Exception as e:  # noqa: BLE001
-            if _is_out_of_space(e):
-                # The one failure that must not be a warning. Staying non-fatal here is what
-                # produced a partial cache that a later serve mistook for a complete one.
-                raise ContainerCliError(
-                    f"ran out of disk space downloading the weights {manifest.weights.repo_id}. "
-                    f"The partial download is still in the HF cache and will resume.\n"
-                    f"  → free up space on {container.hub_cache()}, then:  "
-                    f"tt-model pull {repo_id} --with-weights"
-                ) from e
-            _weights_download_failed(manifest.weights, e)
+    if not no_weights:
+        # The same path serve uses, so the space pre-flight, the completeness check and the
+        # out-of-disk policy cannot drift between the two commands. Gated on `no_weights`
+        # rather than passing it down: here it means "the user did not ask for weights", so
+        # there is nothing to advise them about.
+        ensure_weights(manifest, repo_id)
 
     console.milestone(f"pulled {repo_id}")
     console.note(f"next:  tt-model serve {repo_id}", marker="→")
@@ -365,6 +352,21 @@ def weights_cached(ref) -> Optional[Path]:
     costs the user one unnecessary line, while a raise here would fail a serve that would
     otherwise have worked.
     """
+    path, reason = _cached_snapshot(ref)
+    return None if reason else path
+
+
+def _cached_snapshot(ref) -> "tuple[Optional[Path], Optional[str]]":
+    """The cached snapshot and why it is unusable: ``(path, reason)``.
+
+    One place asks the cache, because there are two questions about it and they share an
+    answer — "can we serve?" (:func:`weights_cached`) and "what do we tell the user?"
+    (:func:`ensure_weights`, which needs the reason to say what it is resuming). Asking twice
+    meant two ``snapshot_download`` calls per serve to learn one thing.
+
+    ``path`` is None when nothing resolves offline; ``reason`` is None when what resolved
+    looks complete. Never touches the network, so it is safe on the serve path.
+    """
     from huggingface_hub import snapshot_download
 
     try:
@@ -375,9 +377,9 @@ def weights_cached(ref) -> Optional[Path]:
             ignore_patterns=ref.ignore_patterns,
             local_files_only=True,
         ))
-    except Exception:  # noqa: BLE001 — absent, incomplete, or unresolvable offline
-        return None
-    return None if incomplete_reason(ref, path) else path
+    except Exception:  # noqa: BLE001 — absent, or unresolvable offline
+        return None, None
+    return path, incomplete_reason(ref, path)
 
 
 def incomplete_reason(ref, path: Path) -> Optional[str]:
@@ -561,10 +563,11 @@ def _weights_notice(manifest: Manifest, target: Optional[str], view=None) -> Non
     probe, which is a bad thing to discover as an unexplained multi-minute boot. Used when
     serve is not allowed to fetch them itself: ``--no-weights``, or ``--local-only`` (which
     forbids the network by definition).
+
+    The caller has already established that the weights are missing — it consulted the cache
+    to decide whether to fetch at all — so this does not re-check.
     """
     ref = manifest.weights
-    if ref is None or weights_cached(ref) is not None:
-        return
     at = f"@{ref.revision[:8]}" if ref.revision else ""
     head = (f"weights {ref.repo_id}{at} are not in your local HF cache; the model will "
             f"download them inside the container at first load (slower, and no progress is "
@@ -596,26 +599,22 @@ def ensure_weights(manifest: Manifest, target: Optional[str], view=None, *,
 
     Downloading is skipped, with the old advisory note, when the user forbade it
     (``no_weights``) or forbade the network (``local_only``).
+
+    The single weights path: ``pull --with-weights`` comes through here too, so a full disk, a
+    gated repo and a half-finished download cannot mean different things depending on which
+    command the user happened to type. ``view`` is the live checklist when serve is booting and
+    None otherwise, which is the one thing the two callers genuinely do not share — a live
+    ``console.step()`` and a live checklist fight for the same row.
     """
     ref = manifest.weights
-    if ref is None or weights_cached(ref) is not None:
+    if ref is None:
+        return
+    path, reason = _cached_snapshot(ref)
+    if path is not None and reason is None:
         return
     if no_weights or local_only:
         _weights_notice(manifest, target, view)
         return
-
-    reason = None
-    try:
-        from huggingface_hub import snapshot_download
-
-        path = Path(snapshot_download(
-            repo_id=ref.repo_id, revision=ref.revision,
-            allow_patterns=ref.allow_patterns, ignore_patterns=ref.ignore_patterns,
-            local_files_only=True,
-        ))
-        reason = incomplete_reason(ref, path)
-    except Exception:  # noqa: BLE001 — absent entirely, which is the ordinary case
-        pass
 
     at = f"@{ref.revision[:8]}" if ref.revision else ""
     label = f"weights {ref.repo_id}{at}"
@@ -625,23 +624,47 @@ def ensure_weights(manifest: Manifest, target: Optional[str], view=None, *,
         label += f" — incomplete ({reason}), resuming"
     _space_preflight(ref)
 
-    begin, done = (view.begin, view.done) if view is not None else (None, None)
-    if begin:
-        begin(label)
-    try:
-        got = _download_weights(ref)
-    except Exception as e:  # noqa: BLE001
-        # Non-fatal, as on the pull path: the image is loaded and the model can still fetch
-        # its own weights inside the container. A gate is one click away, and refusing to
-        # serve would not help. But say what happened, in place of a silent boot — and say it
-        # through `view.warn`, which survives the `view.clear()` a clean boot ends with; a
-        # `view.done` row would be erased, so a failed prefetch could vanish behind a ready card.
-        if view is not None:
+    if view is not None:
+        view.begin(label)
+        try:
+            got = _download_weights(ref)
+        except Exception as e:  # noqa: BLE001
+            # Say what happened, in place of a silent boot — through `view.warn`, which
+            # survives the `view.clear()` a clean boot ends with; a `view.done` row would be
+            # erased, so a failed prefetch could vanish behind a ready card.
             view.warn(f"{label} not downloaded — the model will fetch it inside the container")
-        _weights_download_failed(ref, e)
+            _weights_failed(ref, e, target)
+            return
+        view.done(f"{label} on host", detail=str(got))
         return
-    if done:
-        done(f"{label} on host", detail=str(got))
+    try:
+        with console.step(label) as st:
+            st.detail(str(_download_weights(ref)))
+    except Exception as e:  # noqa: BLE001
+        _weights_failed(ref, e, target)
+
+
+def _weights_failed(ref, exc: BaseException, target: Optional[str]) -> None:
+    """What a failed weights fetch means. Raises only for a full disk.
+
+    Everything else stays non-fatal, as it always has on the pull path: the image is loaded
+    and the model can still fetch its own weights inside the container, so a gate that is one
+    click away should not also cost the user the serve.
+
+    A full disk is the exception, and the reason this is one function rather than a rule
+    written once per caller. Warning and carrying on is what left a half-populated cache that
+    then read as complete to everything downstream — the failure this whole change is about.
+    It has to stop the run, on serve exactly as on pull.
+    """
+    if not _is_out_of_space(exc):
+        _weights_download_failed(ref, exc)
+        return
+    retry = f"tt-model pull {target} --with-weights" if target else "the same command"
+    raise ContainerCliError(
+        f"ran out of disk space downloading the weights {ref.repo_id}. The partial download "
+        f"is still in the HF cache and will resume.\n"
+        f"  → free up space on {container.hub_cache()}, then:  {retry}"
+    ) from exc
 
 
 # --------------------------------------------------------------------------- refresh
