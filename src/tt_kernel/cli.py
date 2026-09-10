@@ -635,6 +635,14 @@ def package(
 def package_thin(
     repo_id: Optional[str] = typer.Argument(None, help="HF target namespace/name (omit + --out to stage only)."),
     model_py: str = typer.Option(..., "--model-py", help="Path to the model.py / run.py runner."),
+    kind: str = typer.Option(
+        "vllm", "--kind", help='Serving front end run.sh launches: "vllm" (default; needs '
+        '--metadata or --arch-name/--main-class) or "tt-dit-server" (no tokens/KV-cache/'
+        "continuous batching — needs --app instead, serves it directly with uvicorn; matches "
+        "the same-named v5.1 CONTAINER kind)."),
+    asgi_app: Optional[str] = typer.Option(
+        None, "--app", help='"module:attribute" ASGI target run.sh serves with uvicorn. '
+        'Required for --kind tt-dit-server; not used by --kind vllm.'),
     requirements: Optional[str] = typer.Option(
         None, "--requirements", help="requirements.txt of pip pins (ttnn/TTTv2/models wheel). "
         "Omitted => a #29 template with TODO pins for the not-yet-published wheels."),
@@ -711,14 +719,27 @@ def package_thin(
     model_path = Path(model_py).expanduser()
     if not model_path.is_file():
         raise _err(f"--model-py {model_py!r} is not a file.")
-    if metadata:
-        vmeta = json.loads(Path(metadata).expanduser().read_text())
-        if not vmeta.get("arch") or not vmeta.get("main_class"):
-            raise _err(f"{metadata} must set both 'arch' and 'main_class'.")
-    elif arch_name and main_class:
-        vmeta = {"arch": arch_name, "main_class": main_class}
+    vmeta: Optional[dict] = None
+    if kind == "vllm":
+        if asgi_app:
+            raise _err("--app is only used by non-vllm kinds; --kind vllm does not take one.")
+        if metadata:
+            vmeta = json.loads(Path(metadata).expanduser().read_text())
+            if not vmeta.get("arch") or not vmeta.get("main_class"):
+                raise _err(f"{metadata} must set both 'arch' and 'main_class'.")
+        elif arch_name and main_class:
+            vmeta = {"arch": arch_name, "main_class": main_class}
+        else:
+            raise _err("Provide the serving entrypoint: --metadata, or both --arch-name and --main-class.")
     else:
-        raise _err("Provide the serving entrypoint: --metadata, or both --arch-name and --main-class.")
+        if not asgi_app:
+            raise _err(f"--kind {kind!r} needs --app (a \"module:attribute\" ASGI target).")
+        if metadata or arch_name or main_class:
+            raise _err(f"--kind {kind!r} serves no vLLM; --metadata/--arch-name/--main-class don't apply.")
+        # No tokens/KV-cache/continuous batching for this kind — nothing for vLLM to do, so the
+        # vLLM install step is force-disabled regardless of --vllm/--no-vllm (mirrors the same-named
+        # v5.1 container kind, which never exposes vLLM options at all).
+        with_vllm = False
     resolved_arch = arch or metal.detect_device(arch_override=arch).arch
     if not resolved_arch:
         raise _err("Could not detect arch. Pass --arch (blackhole | wormhole_b0 | ...).")
@@ -743,7 +764,7 @@ def package_thin(
         staged = Path(tempfile.mkdtemp(prefix="tt-model-thin-")) / "bundle"
     manifest = packaging.stage_thin_package(
         staged, name=bundle_name, arch=resolved_arch, model_py=model_path,
-        vllm_metadata=vmeta, tt_kernel_version=__version__,
+        kind=kind, vllm_metadata=vmeta, app=asgi_app, tt_kernel_version=__version__,
         requirements=Path(requirements).expanduser() if requirements else None,
         plugin_wheel=Path(plugin_wheel).expanduser() if plugin_wheel else None,
         extra_wheels=[Path(w).expanduser() for w in (ops_wheel or [])],
@@ -771,7 +792,10 @@ def package_thin(
         typer.secho("  ! no --plugin-wheel given: the vllm serve path needs vllm-tt-plugin in the "
                     "bundle (the vLLM integration; we no longer ship a custom vLLM fork).",
                     fg=typer.colors.YELLOW)
-    typer.echo(f"  arch registration: {manifest.entrypoint.arch_name}  ->  {manifest.entrypoint.cls}")
+    if manifest.entrypoint is not None:
+        typer.echo(f"  arch registration: {manifest.entrypoint.arch_name}  ->  {manifest.entrypoint.cls}")
+    else:
+        console.note(f"serves: {manifest.deps.app}  (uvicorn, kind={manifest.deps.kind})")
     if manifest.weights:
         typer.echo(f"  weights (pointer): {manifest.weights.repo_id}")
     if requirements is None:
@@ -781,7 +805,7 @@ def package_thin(
         typer.secho("  (no push target — staged only)", fg=typer.colors.CYAN)
         return
 
-    tags = [TT_MODEL_TAG, manifest.arch, "vllm", "thin"]
+    tags = [TT_MODEL_TAG, manifest.arch, manifest.deps.kind, "thin"]
     if mesh_topology:
         tags.append(mesh_topology.lower())
     if publish:

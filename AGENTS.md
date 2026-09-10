@@ -34,11 +34,17 @@ violates one of these is wrong even if tests pass:
    `bundled` block, authored with `tt-model package`) ships the author's built artifacts —
    their `ttnn` wheel (custom kernels compiled in), an empty-target vLLM wheel, the plugin
    wheel — plus their modified `tt-metal-community` tree, installed into a fresh venv by
-   `install.sh`. A **v6 "thin"** bundle (schema `6`, the `deps` block, authored with
-   `tt-model package-thin`) builds the venv from pip pins (`ttnn` / `tt-metal-models`) plus
-   bundled wheels (the `vllm-tt-plugin` + any `generic_op` wheel) plus an empty-target vLLM
-   build step — no embedded `ttnn` wheel, no `metal/` tree. Either way the engine that serves
-   is the one the bundle builds, never a shared box install.
+   `install.sh`. Always serves via vLLM (v5 has no `kind` concept). A **v6 "thin"** bundle
+   (schema `6`, the `deps` block, authored with `tt-model package-thin`) builds the venv from
+   pip pins (`ttnn` / `tt-metal-models`) plus bundled wheels — no embedded `ttnn` wheel, no
+   `metal/` tree. `deps.kind` picks the serving front end `render_run_sh` puts in `run.sh`:
+   `"vllm"` (the default, and v6's only behavior before this field existed) adds an
+   empty-target vLLM build step (the `vllm-tt-plugin` + any `generic_op` wheel) and serves
+   `vllm.entrypoints.openai.api_server`; `"tt-dit-server"` (no vLLM step regardless of
+   `--vllm`/`--no-vllm`) serves `deps.app` directly with uvicorn instead — for a model with no
+   tokens/KV-cache/continuous batching, mirroring the same-named v5.1 CONTAINER kind
+   (`launchers.TtDitServerLauncher`). Either way the engine that serves is the one the bundle
+   builds, never a shared box install.
 5. **Manifest support is v5 + v5.1 + v6.** `manifest.py`'s `SUPPORTED_SCHEMAS` is
    `{"5", "5.1", "6"}`; a bundle with any other `schema_version` is refused ("re-publish the
    bundle with a current tt-model") rather than silently half-read. Bump `SCHEMA_VERSION` only

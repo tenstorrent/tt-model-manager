@@ -439,13 +439,17 @@ echo "installed into $VENV (python $PYVER, interpreter under $HERE/.python)"
 
 
 def render_run_sh(manifest: Manifest) -> str:
-    """A standalone launcher that wires the engine env and serves the OpenAI endpoint.
+    """A standalone launcher that wires the engine env and serves the model.
 
     Sets the non-obvious env this stack needs (LD_PRELOAD of _ttnncpp.so; TT_METAL_HOME at the
     installed ttnn; EXTRA_MODELS_DIR at this folder so the plugin finds vllm_metadata.json;
-    single-chip fabric-off defaults) plus any model-specific ``manifest.env``, then launches vLLM.
-    Works with only tt-model absent — ``tt-model serve`` is the managed path, this is the raw one.
+    single-chip fabric-off defaults) plus any model-specific ``manifest.env``, then launches the
+    serving front end: vLLM's OpenAI server for ``deps.kind == "vllm"`` (v5 fat has no ``kind``
+    concept and is always this case), or ``deps.app`` directly with uvicorn for any other v6 thin
+    ``kind`` (e.g. ``"tt-dit-server"`` — see ``Deps.kind``'s docstring). Works with only tt-model
+    absent — ``tt-model serve`` is the managed path, this is the raw one.
     """
+    is_dit_kind = manifest.deps is not None and manifest.deps.kind != "vllm"
     weights = manifest.weights.repo_id if manifest.weights else ""
     mesh_device = (manifest.mesh.topology if manifest.mesh and manifest.mesh.topology else "") or ""
     extra_env = "".join(
@@ -483,6 +487,17 @@ def render_run_sh(manifest: Manifest) -> str:
         pythonpath_entry = "$HERE" if md in ("", ".") else f"$HERE/{md}"
     else:
         pythonpath_entry = f"$HERE/{METAL_DIR}"
+    # The actual serve command. kind="vllm" (default; the only case for v5 fat, which has no kind
+    # concept) launches vLLM's OpenAI server as before. Any other v6 thin kind has no tokens/KV-
+    # cache/continuous batching to hand vLLM, so it serves `deps.app` directly with uvicorn instead
+    # — matching what the same-named v5.1 CONTAINER kind's TtDitServerLauncher.serve_argv() does.
+    if is_dit_kind:
+        cmd_line = (
+            f'CMD=("$PYBIN" -m uvicorn --host 0.0.0.0 --port "${{PORT:-8000}}" '
+            f'--lifespan on "{manifest.deps.app}" "$@")'
+        )
+    else:
+        cmd_line = f'CMD=("$PYBIN" -m vllm.entrypoints.openai.api_server --model "{weights}" {serving} "$@")'
     return f"""#!/usr/bin/env bash
 # Serve this model on TT hardware. Assumes ./{INSTALL_SCRIPT} has been run.
 set -euo pipefail
@@ -524,7 +539,7 @@ export TT_CACHE_HOME="${{TT_CACHE_HOME:-$HERE/.tt_cache}}"    # override upstrea
 export XDG_CACHE_HOME="${{XDG_CACHE_HOME:-$HERE/.cache}}"     # generic catch-all (triton, etc.)
 export TRITON_CACHE_DIR="${{TRITON_CACHE_DIR:-$HERE/.cache/triton}}"
 export TORCHINDUCTOR_CACHE_DIR="${{TORCHINDUCTOR_CACHE_DIR:-$HERE/.cache/inductor}}"
-{hf_export}{extra_env}CMD=("$PYBIN" -m vllm.entrypoints.openai.api_server --model "{weights}" {serving} "$@")
+{hf_export}{extra_env}{cmd_line}
 # TT_MODEL_PRINT=1 (set by `tt-model serve --print`) echoes the fully-resolved command+env
 if [ "${{TT_MODEL_PRINT:-0}}" = "1" ]; then
   printf 'LD_PRELOAD=%s TT_METAL_HOME=%s EXTRA_MODELS_DIR=%s MESH_DEVICE=%s HF_MODEL=%s\n  %s\n' \\
@@ -713,6 +728,61 @@ opencv-python-headless==4.11.0.86
 numpy>=1.24.4,<2
 """
 
+# Template for a kind="tt-dit-server" thin bundle with no author-supplied --requirements: the same
+# base HTTP stack the v5.1 container schema's TtDitServerLauncher.DEFAULT_PACKAGES ships, plus a
+# TODO placeholder for the model's own deps — mirroring _THIN_REQUIREMENTS_TEMPLATE's own shape.
+_THIN_DIT_REQUIREMENTS_TEMPLATE = """\
+# v6 thin bundle, kind="tt-dit-server" — per-model venv dependency pins (see issue #29).
+# SFPI + firmware are EXTERNAL box deps (installer-managed) and are NOT listed here.
+#
+# The models tree (incl. tt_transformers) is packaged as `tt-metal-models`, which pins ttnn
+# exactly (tt-metal-models==X => ttnn==X). In progress upstream: tenstorrent/tt-metal#54478
+# (pip/apt/dnf). Once published, this ONE pin pulls the matching ttnn transitively:
+# tt-metal-models==<X>     # TODO: pin once published (#29 M0 / tt-metal#54478)
+#
+ttnn>=0.77                 # engine (PyPI today; bundles the tt-metal runtime). Until tt-metal-models
+                           # lands you pin ttnn directly; after, tt-metal-models pulls the exact ttnn.
+#
+# No tokens/KV-cache/continuous batching for this kind, so no vLLM step — run.sh serves `app`
+# directly with uvicorn. Base HTTP stack (matches launchers.TtDitServerLauncher.DEFAULT_PACKAGES —
+# an explicit pin here for a package below wins over that default, same as the container kind):
+fastapi
+uvicorn
+pydantic>=2
+pillow
+#
+# <your-model-deps>==<Z>   # whatever this model needs beyond the HTTP stack (diffusers, timm, ...)
+"""
+
+
+def _merge_default_packages(requirements_text: str, defaults: tuple) -> str:
+    """Appends any package in ``defaults`` not already named in ``requirements_text`` (matched by
+    NAME, not full spec, so an author's own version pin still wins) — the same filtering
+    ``launchers.TtDitServerLauncher.install_lines()`` applies to its own ``DEFAULT_PACKAGES``,
+    reused here so an author-supplied ``--requirements`` file for a "tt-dit-server" kind still gets
+    the base HTTP stack without needing to remember it."""
+    existing_names = set()
+    for line in requirements_text.splitlines():
+        stripped = line.split("#", 1)[0].strip()
+        if not stripped:
+            continue
+        name = re.split(r"[<>=!~\[; ]", stripped, maxsplit=1)[0].strip().lower()
+        if name:
+            existing_names.add(name)
+    missing = [
+        p for p in defaults
+        if re.split(r"[<>=!~\[; ]", p, maxsplit=1)[0].strip().lower() not in existing_names
+    ]
+    if not missing:
+        return requirements_text
+    sep = "" if requirements_text.endswith("\n") else "\n"
+    footer = "\n".join(missing)
+    return (
+        f"{requirements_text}{sep}"
+        f"# --- base HTTP stack every tt-dit-server kind needs (see launchers.TtDitServerLauncher) ---\n"
+        f"{footer}\n"
+    )
+
 
 def stage_thin_package(
     staged: Path,
@@ -720,8 +790,10 @@ def stage_thin_package(
     name: str,
     arch: str,
     model_py: Path,
-    vllm_metadata: dict,
     tt_kernel_version: str,
+    kind: str = "vllm",
+    vllm_metadata: Optional[dict] = None,
+    app: Optional[str] = None,
     requirements: Optional[Path] = None,
     plugin_wheel: Optional[Path] = None,
     extra_wheels: Optional[List[Path]] = None,
@@ -756,9 +828,33 @@ def stage_thin_package(
     packages a non-vLLM model (no vLLM step). NO embedded ttnn wheel, NO metal tree —
     ttnn/tt-metal-models resolve from the index at install. Weights stay a pointer.
 
+    ``kind="vllm"`` (the default) is everything above. ``kind="tt-dit-server"`` packages a model
+    with no tokens/KV-cache/continuous batching instead: no ``vllm_metadata.json``, no
+    ``Manifest.entrypoint``, no vLLM install step regardless of ``with_vllm`` — ``app`` (an
+    ``"module:attribute"`` ASGI target, REQUIRED for this kind) is what ``run.sh`` serves with
+    uvicorn directly. Matches what the same-named v5.1 CONTAINER kind already does (see
+    ``launchers.TtDitServerLauncher``) — its ``DEFAULT_PACKAGES`` base HTTP stack
+    (fastapi/uvicorn/pydantic/pillow) is merged into ``requirements.txt`` here the same way: an
+    author-supplied version of one of them wins, a missing one is appended.
+
     NOTE (draft): reflects the #29 plan; fully functional once tt-metal-models publishes so the
-    ttnn/tt-metal-models pins are real.
+    ttnn/tt-metal-models pins are real. This applies to BOTH kinds equally — kind="tt-dit-server"
+    unblocks the non-vLLM SERVING mechanism, not the underlying ttnn/tt-metal-models wheel
+    publish this whole schema is still waiting on.
     """
+    if kind == "vllm":
+        if vllm_metadata is None:
+            raise ValueError('kind="vllm" requires vllm_metadata (main_class + arch).')
+        if app is not None:
+            raise ValueError('app is only used by non-vllm kinds; kind="vllm" does not take one.')
+    else:
+        if app is None:
+            raise ValueError(f'kind={kind!r} requires app ("module:attribute" ASGI target).')
+        if vllm_metadata is not None:
+            raise ValueError(f'kind={kind!r} serves no vLLM; do not pass vllm_metadata.')
+        if with_vllm:
+            raise ValueError(f'kind={kind!r} serves no vLLM; pass with_vllm=False.')
+
     staged.mkdir(parents=True, exist_ok=True)
 
     # The runner, copied to the bundle root under its own name so `--main-class <module>:<Class>`
@@ -766,11 +862,25 @@ def stage_thin_package(
     model_dest = staged / Path(model_py).name
     shutil.copy2(model_py, model_dest)
 
-    # requirements.txt: the author's index pins, or the #29 template with TODO lines to fill.
-    if requirements is not None:
-        shutil.copy2(requirements, staged / REQUIREMENTS)
+    # requirements.txt: the author's index pins, or a #29 template with TODO lines to fill —
+    # kind="tt-dit-server" gets its own template (base HTTP stack instead of vLLM notes), and an
+    # author-supplied file for that kind still gets the base HTTP stack merged in (name-deduped —
+    # an explicit pin wins), matching TtDitServerLauncher's own DEFAULT_PACKAGES filtering.
+    if kind == "vllm":
+        if requirements is not None:
+            shutil.copy2(requirements, staged / REQUIREMENTS)
+        else:
+            (staged / REQUIREMENTS).write_text(_THIN_REQUIREMENTS_TEMPLATE)
     else:
-        (staged / REQUIREMENTS).write_text(_THIN_REQUIREMENTS_TEMPLATE)
+        from .launchers import TtDitServerLauncher
+
+        if requirements is not None:
+            text = _merge_default_packages(
+                Path(requirements).read_text(), TtDitServerLauncher.DEFAULT_PACKAGES
+            )
+        else:
+            text = _THIN_DIT_REQUIREMENTS_TEMPLATE
+        (staged / REQUIREMENTS).write_text(text)
 
     # Bundled wheels -> wheels/, installed BY PATH: the vllm-tt-plugin (the vLLM integration — we
     # ship no custom vLLM fork), then any generic_op custom-op wheels. These are the things not on a
@@ -808,10 +918,17 @@ def stage_thin_package(
         vllm_spec = Vllm(version=vllm_version, overrides=VLLM_OVERRIDES, wheel=vllm_rel)
 
     # vllm_metadata.json in the per-model subfolder under vllm_models/ (EXTRA_MODELS_DIR contract).
-    safe_key = name.replace("/", "__")
-    model_bundle = staged / METADATA_DIR / safe_key
-    model_bundle.mkdir(parents=True, exist_ok=True)
-    (model_bundle / VLLM_METADATA_NAME).write_text(json.dumps(vllm_metadata, indent=2))
+    # Only the "vllm" kind registers this way — kind="tt-dit-server" has no vLLM plugin to register
+    # with; run.sh serves `app` directly instead (see render_run_sh).
+    entrypoint: Optional[Entrypoint] = None
+    if kind == "vllm":
+        safe_key = name.replace("/", "__")
+        model_bundle = staged / METADATA_DIR / safe_key
+        model_bundle.mkdir(parents=True, exist_ok=True)
+        (model_bundle / VLLM_METADATA_NAME).write_text(json.dumps(vllm_metadata, indent=2))
+        entrypoint = Entrypoint(
+            **{"class": vllm_metadata["main_class"], "arch_name": vllm_metadata["arch"]}
+        )
 
     deps = Deps(
         python=python_version,
@@ -822,9 +939,8 @@ def stage_thin_package(
                                     or (vllm_spec and vllm_spec.wheel)) else None),
         vllm=vllm_spec,
         model_dir=".",
-    )
-    entrypoint = Entrypoint(
-        **{"class": vllm_metadata["main_class"], "arch_name": vllm_metadata["arch"]}
+        kind=kind,
+        app=app,
     )
     manifest = Manifest(
         schema_version="6",
