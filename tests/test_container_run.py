@@ -324,6 +324,32 @@ def test_the_fork_forwards_the_mesh_as_a_grid_not_as_MESH_DEVICE():
     assert "(1, 4)" in launcher_for("vllm-fork").serve_argv(m, p)
 
 
+def test_the_fork_ready_probe_matches_what_the_runner_actually_prints():
+    """The readiness runner sends vLLM's own output to a file inside the container, so
+    "Application startup complete" never reaches `docker logs`. The only ready signal
+    that does is the runner's print after its /health poll succeeds — and the probe
+    must match THAT line, or `serve --follow` waits its full timeout on a live server."""
+    runner_line = "  Server ready after ~244s"
+    probe = launcher_for("vllm-fork").ready_probe(_wire(**FORK))
+    assert probe in runner_line
+
+
+def test_the_fork_runs_the_runner_unbuffered():
+    """The runner is PID 1 with stdout on a pipe and announces readiness with a bare
+    print. Without PYTHONUNBUFFERED that line sits in Python's block buffer for as
+    long as the runner lives, so `docker logs` never sees it. Must survive into the
+    composed `docker run` and must stay overridable from the profile."""
+    m = _wire(**FORK)
+    p = m.container.resolve_profile()
+    assert launcher_for("vllm-fork").serve_env(m, p)["PYTHONUNBUFFERED"] == "1"
+    assert "PYTHONUNBUFFERED=1" in _run_argv(m)
+
+    m2 = _wire(**FORK, serve={"port": 8000, "block_size": 64,
+                              "env": {"PYTHONUNBUFFERED": "0"}})
+    p2 = m2.container.resolve_profile()
+    assert launcher_for("vllm-fork").serve_env(m2, p2)["PYTHONUNBUFFERED"] == "0"
+
+
 def test_the_fork_joins_extra_server_args_into_one_string():
     """That runner takes --additional-server-args as ONE string, not loose argv."""
     m = _wire(**FORK, serve={"port": 8000, "block_size": 64,
