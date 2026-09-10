@@ -165,3 +165,104 @@ class TestShapes:
     def test_phase_tables_have_unique_keys(self, phases):
         keys = [p.key for p in phases]
         assert len(keys) == len(set(keys))
+
+
+# ------------------------------------------- the vLLM warmup row must tell the truth, with
+#                                             the duration the log actually gives away
+#
+# The row was never dark -- log order closes a phase whatever its done pattern says (see
+# the module docstring), so the `server` phase's start always finished `warmup`. What was
+# wrong was narrower and worth guarding:
+#   detail -- `_detail_warmup` matched only "took N seconds", while vLLM 0.24.0+ logs
+#             "took %.2f s" in every branch of v1/engine/core.py (on our stack with a
+#             "(compilation: N s)" tail). So the row closed with a BLANK detail on every
+#             current boot; only the older fork build in fixtures says "seconds". Widening
+#             it -- and the `done` pattern beside it, so the phase closes on its own line
+#             instead of on the next phase's -- is what this half of the change buys.
+#   start  -- must stay ANCHORED to lines a TT warmup really emits. A bare "[Ww]arming up"
+#             also catches the `server` phase's "Warming up chat template processing...",
+#             and since `feed` scans forward, the earlier `warmup` phase wins it -- a
+#             "model warmed up" row for a boot that ran no warmup at all. An absent row is
+#             honest; a false one is not.
+
+def _warmup_phase():
+    from tt_kernel.boot_progress import VLLM_PHASES
+    return next(p for p in VLLM_PHASES if p.key == "warmup")
+
+
+@pytest.mark.parametrize("line", [
+    "init engine (profile, create kv cache, warmup model) took 86.22 seconds",
+    "init engine (profile, create kv cache, warmup model) took 86.22 s",
+    "init engine (profile, create kv cache, warmup model) took 86.22 s (compilation: 4.10 s)",
+])
+def test_the_warmup_phase_closes_on_either_vllm_unit_suffix(line):
+    assert any(r.search(line) for r in _warmup_phase().done)
+
+
+def test_a_bare_number_is_not_mistaken_for_a_duration():
+    assert not any(r.search("init engine ... took 86.22 sx") for r in _warmup_phase().done)
+
+
+@pytest.mark.parametrize("line", [
+    "Warming up prefill for sequence length: 128 for batch size: 1",  # tt_transformers
+    "Warming up decode for sampling params: None",                    # tt_transformers
+    "Starting decode warmup",                                         # common warmup helper
+    "Done Compiling Model",                                           # trace compile
+    "Capturing trace for decode",                                     # lowercase variant
+])
+def test_the_warmup_phase_opens_on_the_tt_stacks_wording(line):
+    assert any(r.search(line) for r in _warmup_phase().start)
+
+
+@pytest.mark.parametrize("line", [
+    "WARNING Skipping model warmup",                 # vllm_tt_plugin, warmup disabled
+    "Warming up chat template processing...",        # SERVER phase — must NOT open warmup
+    "Compile and warming up model for size 8",       # vLLM CUDA worker — never runs on TT
+    "Warming up model",                              # vLLM CPU worker — never runs on TT
+])
+def test_the_warmup_phase_does_not_open_on_a_foreign_line(line):
+    """The start patterns stay anchored to real TT warmup lines. Widen them to a bare
+    "[Ww]arming up" and the server phase's "Warming up chat template processing..." is caught
+    too -- announcing a warmed-up model for a boot that skipped warmup. The CUDA/CPU
+    phrasings are excluded for a different reason: neither worker executes on this backend."""
+    assert not any(r.search(line) for r in _warmup_phase().start)
+
+
+def test_a_warmup_disabled_fork_boot_invents_no_warmup_row():
+    """The invariant the anchoring protects, at tracker level rather than regex level. On a
+    vllm-fork boot with enable_model_warmup:false the engine logs "Skipping model warmup", and
+    the only "warming up" text left in the whole boot belongs to the server phase. Feed exactly
+    that shape: the tracker must go straight from kv to server and emit no warmup event, so the
+    checklist shows no row instead of a false one. Widening `start` is what would break this."""
+    t = BootTracker(VLLM_PHASES, READY)
+    events = []
+    for line in [
+        "INFO core.py Initializing a V1 LLM engine (v0.26.0)",
+        "INFO Opening user mode device driver",
+        "multidevice with 4 devices and grid (1, 4) is created",
+        "INFO Loading weights",
+        "INFO KV cache size: 133,120 tokens",
+        "WARNING vllm_tt_plugin.worker Skipping model warmup",
+        "INFO core.py init engine (profile, create kv cache, warmup model) took 22.94 s",
+        "INFO serving.py Warming up chat template processing...",
+        "INFO Application startup complete",
+    ]:
+        events += t.feed(line)
+    starts = [e[1] for e in events if e[0] == "start"]
+    assert "warmup" not in starts, starts
+    assert starts == ["engine", "device", "weights", "kv", "server"], starts
+    assert t.ready
+
+
+@pytest.mark.parametrize("line,expected", [
+    ("core.py init engine (profile, create kv cache, warmup model) took 32.90 s", "33s of warmup"),
+    ("core.py init engine (...) took 22.94 s (compilation: 9.36 s)", "23s of warmup"),
+    ("core.py init engine (profile, create kv cache, warmup model) took 86.22 seconds", "86s of warmup"),
+])
+def test_the_warmup_detail_reads_current_and_legacy_duration_spellings(line, expected):
+    """The payoff of the done/detail widening: `took N s` (current vLLM, with or without the
+    `(compilation: N s)` tail) and the legacy `took N seconds` all yield a duration. Before,
+    the detail regex still required "seconds", so the row closed with no duration beside it on
+    every current boot -- the one user-visible thing this half of the change delivers."""
+    from tt_kernel.boot_progress import _detail_warmup
+    assert _detail_warmup(line) == expected

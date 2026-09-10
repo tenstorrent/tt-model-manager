@@ -91,7 +91,11 @@ def _detail_kv(line: str) -> Optional[str]:
 
 
 def _detail_warmup(line: str) -> Optional[str]:
-    m = re.search(r"init engine .* took ([\d.]+) seconds", line)
+    # Current vLLM logs "... took 32.90 s" (older builds said "seconds"), and on our stack the
+    # line carries a "(compilation: 9.36 s)" tail; anchoring on the FIRST "took N s" reads the
+    # engine-init wall time in every case. Requiring "seconds" here left the row's detail blank
+    # on every current boot while the done pattern one line down already matched both spellings.
+    m = re.search(r"init engine .* took ([\d.]+) s(?:econds)?\b", line)
     return f"{float(m.group(1)):.0f}s of warmup" if m else None
 
 
@@ -115,10 +119,22 @@ VLLM_PHASES: Tuple[Phase, ...] = (
     Phase("kv", "configuring KV cache", "KV cache configured",
           start=_rx(r"KV cache size", r"Allocating TT kv caches", r"num_gpu_blocks"),
           detail=_detail_kv),
+    # start: the real TT warmup lines — tt_transformers prefill/decode, the common
+    # decode-warmup helper — plus the compile/trace landmarks.
+    #
+    # Deliberately ANCHORED. A bare "[Ww]arming up" here would also match the SERVER phase's
+    # "Warming up chat template processing...", and because `feed` scans forward from the
+    # current phase, warmup (being earlier) takes it — announcing "model warmed up" for a boot
+    # that ran no warmup at all (vllm-fork with enable_model_warmup: false, where the plugin
+    # logs "Skipping model warmup" and that chat-template line is the only warmup-shaped text
+    # in the log). A missing row is honest; a false one is the one thing this module must not
+    # do. Also excluded for the same reason of staying true to this stack: vLLM's own
+    # "Compile and warming up" (CUDA worker) and bare "Warming up model" (CPU worker), neither
+    # of which executes on the TT backend.
     Phase("warmup", "warming up the model", "model warmed up",
-          start=_rx(r"Warming up prefill", r"Starting decode warmup",
-                    r"Done Compiling Model", r"Capturing .*Trace"),
-          done=_rx(r"init engine .* took [\d.]+ seconds"),
+          start=_rx(r"Warming up prefill", r"Warming up decode", r"Starting decode warmup",
+                    r"Done Compiling Model", r"Capturing .*[Tt]race"),
+          done=_rx(r"init engine .* took [\d.]+ s(?:econds)?\b"),
           detail=_detail_warmup),
     Phase("server", "starting API server", "API server ready",
           start=_rx(r"Starting vLLM API server", r"Warming up chat template",

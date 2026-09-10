@@ -10,6 +10,7 @@ boot failure ten minutes later on hardware.
 """
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -802,6 +803,45 @@ def test_a_missing_device_node_is_not_reachable(tmp_path):
     import os
 
     assert container._reachable_in_userns(tmp_path / "nope", mode=os.R_OK) is False
+
+
+# ------------------------------- --additional-server-args must survive a shlex round-trip
+#
+# The readiness runner shlex.splits the joined string on the far side, so joining raw
+# corrupted any value carrying spaces or quotes. Observed live: JSON reached vLLM with its
+# quotes eaten -- {"temperature": 0} became {temperature: 0} -- and the process died citing
+# the value, pointing an author at vLLM rather than at the joining.
+
+
+def _fork_extra(**serve):
+    m = _wire(**FORK, serve={"port": 8000, "block_size": 64, **serve})
+    argv = launcher_for("vllm-fork").serve_argv(m, m.container.resolve_profile())
+    return argv[argv.index("--additional-server-args") + 1]
+
+
+def test_a_json_value_survives_the_runners_shlex_split():
+    joined = _fork_extra(args=[["--override-generation-config", '{"temperature": 0}']])
+    assert shlex.split(joined) == ["--override-generation-config", '{"temperature": 0}']
+
+
+def test_a_value_with_spaces_stays_one_token():
+    joined = _fork_extra(args=[["--chat-template", "a b c"]])
+    assert shlex.split(joined) == ["--chat-template", "a b c"]
+
+
+def test_ordinary_flags_are_joined_exactly_as_before():
+    """shlex.quote is a no-op for tokens needing no quoting, so nothing that worked
+    before changes shape -- only tokens that were already being corrupted."""
+    assert _fork_extra(args=["--trust-remote-code", ["--seed", "0"]]) == \
+        "--trust-remote-code --seed 0"
+
+
+def test_a_capability_parser_still_round_trips():
+    m = _wire(**FORK, serve={"port": 8000, "block_size": 64,
+                             "capabilities": {"tool_parser": "hermes"}})
+    argv = launcher_for("vllm-fork").serve_argv(m, m.container.resolve_profile())
+    joined = argv[argv.index("--additional-server-args") + 1]
+    assert shlex.split(joined) == ["--enable-auto-tool-choice", "--tool-call-parser", "hermes"]
 
 
 def test_running_matches_the_container_name_exactly(monkeypatch):
