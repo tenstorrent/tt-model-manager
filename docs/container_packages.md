@@ -371,25 +371,32 @@ transfer behind the readiness probe, with no progress and no error the user ever
 ✓ weights org/Weights-7B@a1b2c3d4 on host   /home/you/.cache/huggingface/hub/...
 ```
 
-Two things it refuses to do quietly:
+It **resumes unconditionally** rather than deciding for itself whether the cache is complete.
+That is deliberate: `snapshot_download` holds the revision's real file list, so it knows
+exactly which files are missing and fetches only those. Anything derived locally — index
+files, shard-name arithmetic — is a guess at that list and is wrong for some layout. An
+earlier version of this check guessed, and a half-downloaded repo it did not recognise read
+as complete, which is precisely the failure it existed to prevent.
+
+The costs of always asking are small and measured: with a complete cache it is a metadata
+no-op (about a second), and with the Hub unreachable `huggingface_hub` falls straight back to
+the cache, so a fully cached model still serves air-gapped. A partial cache is resumed, and
+says so: `weights org/Weights-7B@a1b2c3d4 — resuming a partial download`.
+
+The one thing it *does* refuse to do quietly:
 
 - **It won't start a download that cannot fit.** `serve` compares the pinned revision's size
   against free space on the cache filesystem and stops before anything else runs:
   `not enough disk space for the weights org/Weights-7B: needs 297.0 GB more, 24.0 GB free`.
   This matters because a fetch that fills the disk does *not* fail loudly — it leaves a
-  half-populated cache, and that cache then reads as complete to everything downstream.
-- **It won't call a half-downloaded cache complete.**
-  `snapshot_download(..., local_files_only=True)` returns the snapshot directory whenever the
-  revision *resolves*; offline it cannot compare against the repo's file list, so an
-  interrupted fetch reported as fully cached. Serve then opened the mesh and died inside the
-  engine on the first missing shard, under vLLM's generic `Engine core initialization
-  failed`. Completeness is now judged locally — shards against
-  `model.safetensors.index.json`, plus any `blobs/*.incomplete` siblings — and an incomplete
-  snapshot is resumed, naming the damage: `incomplete (19 of 131 weight shards present),
-  resuming`.
+  half-populated cache, and the next run resumes into the same wall. Byte accounting is scoped
+  to the pinned revision, so an unrelated cached checkpoint of the same repo cannot be
+  counted as already-present. Skipped for a spec pinned with `allow_patterns`/`ignore_patterns`,
+  where a whole-repo total would over-count.
 
-Both checks are skipped for a spec pinned with `allow_patterns`/`ignore_patterns`: the author
-deliberately took a subset there, so "missing" files are missing by design.
+Not detected, in any version: a file that is present but truncated. `huggingface_hub` verifies
+what it downloads and never re-hashes what is already on disk, so neither does this. Catching
+it would mean re-reading every byte of the weights on every serve.
 
 `--no-weights` (and `--local-only`, which forbids the network by definition) keeps the old
 behaviour — the model fetches its own weights at first load — with the advisory note instead

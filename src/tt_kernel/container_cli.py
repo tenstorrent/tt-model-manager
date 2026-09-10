@@ -342,21 +342,18 @@ def _download_weights(ref, *, tqdm_class=None) -> Path:
     ))
 
 
-def _cached_snapshot(ref) -> "tuple[Optional[Path], Optional[str]]":
-    """The cached snapshot and why it is unusable: ``(path, reason)``.
+def _cached_locally(ref) -> Optional[Path]:
+    """The cached snapshot for this pin, or None when nothing resolves offline.
 
-    One place asks the cache, because there are two questions about it and they share an
-    answer — "can we serve?" (:func:`weights_cached`) and "what do we tell the user?"
-    (:func:`ensure_weights`, which needs the reason to say what it is resuming). Asking twice
-    meant two ``snapshot_download`` calls per serve to learn one thing.
-
-    ``path`` is None when nothing resolves offline; ``reason`` is None when what resolved
-    looks complete. Never touches the network, so it is safe on the serve path.
+    Never touches the network. Used only where downloading is forbidden (``--no-weights``,
+    ``--local-only``) and as the fallback when the Hub cannot be reached — NOT to decide
+    whether a download is needed. That decision belongs to ``snapshot_download`` itself,
+    which knows the revision's real file list; anything derived locally is a guess at it.
     """
     from huggingface_hub import snapshot_download
 
     try:
-        path = Path(snapshot_download(
+        return Path(snapshot_download(
             repo_id=ref.repo_id,
             revision=ref.revision,
             allow_patterns=ref.allow_patterns,
@@ -364,68 +361,27 @@ def _cached_snapshot(ref) -> "tuple[Optional[Path], Optional[str]]":
             local_files_only=True,
         ))
     except Exception:  # noqa: BLE001 — absent, or unresolvable offline
-        return None, None
-    return path, incomplete_reason(ref, path)
-
-
-def incomplete_reason(ref, path: Path) -> Optional[str]:
-    """Why this cached snapshot cannot serve, or None when it looks complete.
-
-    ``snapshot_download(local_files_only=True)`` returns the snapshot directory whenever the
-    revision *resolves*; offline it cannot compare against the repo's file list, so a fetch
-    killed halfway — a full disk, a dropped connection — reports as fully CACHED. What that
-    costs is not one missing line: serve then boots, pulls the image, opens the mesh, and dies
-    minutes later inside the engine on the first missing shard, under vLLM's generic "Engine
-    core initialization failed". Judging completeness locally is what turns that into a
-    sentence before anything starts.
-
-    Only meaningful for a whole-repo pin. With ``allow_patterns``/``ignore_patterns`` the
-    author deliberately took a subset, so "missing" files are missing by design and every
-    check below would be a false alarm — say complete and let the engine be the judge.
-    """
-    if ref.allow_patterns or ref.ignore_patterns:
         return None
-    # Siblings, not files: huggingface_hub downloads to `blobs/<sha>.incomplete` and only
-    # links the snapshot name once the bytes are all there.
+
+
+def has_partial_download(ref) -> bool:
+    """Is there a half-fetched blob for this repo in the cache?
+
+    The one thing about completeness that can be known locally without guessing:
+    huggingface_hub writes to ``blobs/<sha>.incomplete`` and only links the snapshot name
+    once the bytes are all there. It is layout-independent — safetensors, ``.bin``, GGUF,
+    single-file alike — and cannot false-positive.
+
+    Deliberately NOT a completeness check. Judging that locally means reconstructing the
+    revision's file list from index files and shard-name arithmetic, and every way of doing
+    that is wrong for some layout. ``snapshot_download`` has the real list, so on the paths
+    where we are allowed to call it we resume unconditionally and let it decide.
+    """
+    d = container.hub_cache() / f"models--{ref.repo_id.replace('/', '--')}" / "blobs"
     try:
-        partial = sum(1 for _ in (path.parent.parent / "blobs").glob("*.incomplete"))
+        return any(d.glob("*.incomplete"))
     except OSError:
-        partial = 0
-    if partial:
-        return f"{partial} file(s) still half-downloaded"
-    # Two common sharded layouts — safetensors (the default) and PyTorch `.bin`. Check each by
-    # its index first (the authoritative shard list); a half-downloaded `.bin` repo would
-    # otherwise reach the no-safetensors-index path and read as complete.
-    for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
-        index = path / index_name
-        if index.exists():
-            try:
-                shards = set((json.loads(index.read_text()).get("weight_map") or {}).values())
-            except (OSError, ValueError):
-                # Fail CLOSED. `None` here means "complete" to every caller, so a truncated
-                # or corrupt index would wave the snapshot through into the same late engine
-                # failure this check exists to prevent. Unreadable is a reason.
-                return f"{index_name} is unreadable"
-            missing = [s for s in shards if not (path / s).exists()]
-            if missing:
-                return f"{len(missing)} of {len(shards)} weight shards missing"
-            return None
-    # No index for either format. A sharded repo names its parts
-    # `model-00001-of-00131.safetensors` / `pytorch_model-00001-of-00002.bin`, so the expected
-    # total is self-describing — trust that over a file list we cannot fetch.
-    for glob_pat, count_rx, index_name in (
-        ("model-*-of-*.safetensors", r"-of-(\d+)\.safetensors$", "model.safetensors.index.json"),
-        ("pytorch_model-*-of-*.bin", r"-of-(\d+)\.bin$", "pytorch_model.bin.index.json"),
-    ):
-        present = sorted(path.glob(glob_pat))
-        if not present:
-            continue
-        m = re.search(count_rx, present[0].name)
-        total = int(m.group(1)) if m else 0
-        if total and len(present) < total:
-            return f"{len(present)} of {total} weight shards present"
-        return f"{index_name} is missing"
-    return None  # single-file or unknown layout: nothing to count
+        return False
 
 
 def _revision_size(ref) -> Optional[int]:
@@ -575,42 +531,42 @@ def ensure_weights(manifest: Manifest, target: Optional[str], *,
                    local_only: bool = False, no_weights: bool = False) -> None:
     """Put the pinned weights on the host before the container starts, or explain why not.
 
-    ``serve`` on a package it has to pull already fetches weights up front, as a visible
-    step; ``serve`` on an already-pulled one used to only warn and boot anyway. Same command,
-    same intent, two behaviours chosen by invisible local state — and the quiet branch was
-    the worse one, because the download happens either way (the cache is bind-mounted) but
-    inside the container it has no progress and no error the user ever sees. So do it here,
-    where a full disk is a sentence rather than a mystery crash in the engine.
+    Resumes unconditionally rather than deciding for itself whether the cache is complete.
+    That is the whole point: ``snapshot_download`` holds the revision's real file list, so it
+    knows exactly which files are missing and fetches only those, while anything we derive
+    locally — index files, shard-name arithmetic — is a guess at that list and is wrong for
+    some layout. Complete already? It is a metadata no-op (about a second), and with the Hub
+    unreachable it falls straight back to the cache. Half-finished? It resumes. Which is the
+    state that started all this: a serve used to boot on 19 of 131 shards and die in the
+    engine, where now it simply finishes the download first.
 
-    Downloading is skipped, with the old advisory note, when the user forbade it
-    (``no_weights``) or forbade the network (``local_only``).
+    ``serve`` and ``pull --with-weights`` both come through here, so a full disk, a gated repo
+    and a half-finished download cannot mean different things depending on which command the
+    user typed. Both render as a ``console.step()`` with HF's byte counter bridged into it —
+    serve prefetches BEFORE opening its boot checklist, so nothing fights for the row.
 
-    The single weights path: ``pull --with-weights`` comes through here too, so a full disk, a
-    gated repo and a half-finished download cannot mean different things depending on which
-    command the user happened to type. Both callers render the same way — a ``console.step()``
-    with HF's byte counter bridged into it — because serve now prefetches BEFORE opening its
-    boot checklist rather than inside it.
+    Downloading is skipped, with the advisory note, when the user forbade it (``no_weights``)
+    or forbade the network (``local_only``).
     """
     ref = manifest.weights
     if ref is None:
         return
     at = f"@{ref.revision[:8]}" if ref.revision else ""
-    path, reason = _cached_snapshot(ref)
-    if path is not None and reason is None:
-        # Say so. A user who asked for weights (`pull --with-weights`) is owed the
-        # confirmation, and on the serve path it is the line that explains why a boot that
-        # needs 360 GB of weights started instantly.
-        console.note(f"weights {ref.repo_id}{at} already on host", marker="•")
-        return
     if no_weights or local_only:
-        _weights_notice(manifest, target)
+        # The one place a local verdict is still needed, because fetching is off the table.
+        # `.incomplete` blobs are checked too: a resolvable-but-partial snapshot would
+        # otherwise read as present and cost the user the warning.
+        if _cached_locally(ref) is None or has_partial_download(ref):
+            _weights_notice(manifest, target)
+        else:
+            console.note(f"weights {ref.repo_id}{at} already on host", marker="•")
         return
 
     label = f"weights {ref.repo_id}{at}"
-    if reason:
-        # Name the damage. "Resuming" reads as a stall otherwise, and the user is owed the
-        # reason their last attempt died here.
-        label += f" — incomplete ({reason}), resuming"
+    if has_partial_download(ref):
+        # "Resuming" reads as a stall otherwise, and the user is owed the reason their last
+        # attempt left bytes behind here.
+        label += " — resuming a partial download"
     _space_preflight(ref)
 
     try:
@@ -638,6 +594,16 @@ def _weights_failed(ref, exc: BaseException, target: Optional[str]) -> None:
     """
     if not _is_out_of_space(exc):
         _weights_download_failed(ref, exc)
+        # Falling back to the cache is only safe if the cache is whole, and here we cannot
+        # ask the Hub which files that would mean. Half-fetched blobs are the one local
+        # signal that needs no guessing, so when they are present say plainly that the boot
+        # may still fail rather than implying the fallback is equivalent.
+        if has_partial_download(ref):
+            console.note(
+                "the cached copy is part-way through a download and the Hub could not be "
+                "reached to finish it, so the engine may still fail on a missing shard",
+                marker="⚠", style="warning",
+            )
         return
     retry = f"tt-model pull {target} --with-weights" if target else "the same command"
     raise ContainerCliError(
