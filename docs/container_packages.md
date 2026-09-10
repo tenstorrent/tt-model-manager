@@ -350,20 +350,57 @@ run on a build host; a later `serve` starts the container. Around them:
 `pull` loads the image into the local docker daemon (or `docker pull`s it from a real
 registry) and records the package in the local db. **It does not fetch weights unless you
 pass `--with-weights`** — the flag defaults to off, so a bare `pull` moves the image only and
-the model downloads its weights at first load instead. `serve`'s *auto*-pull (the one that
-fires when nothing is installed yet) does fetch them, so the two entry points differ:
+the model downloads its weights at first load instead. `serve` is the opposite: it always
+makes sure the weights are on the host first, whether or not the package was already
+installed. So `pull` is the opt-in case and `serve` the automatic one:
 
 | | image | weights |
 |---|---|---|
 | `tt-model pull org/name` | yes | **no** |
 | `tt-model pull org/name --with-weights` | yes | yes |
-| `tt-model serve org/name` (nothing installed) | yes | yes |
+| `tt-model serve org/name` | yes | yes |
+| `tt-model serve org/name --no-weights` | yes | **no** |
 
-If weights can't be fetched the image still loads and the model fetches them at first boot.
+**`serve` always puts the weights on the host before it starts the container.** They get
+downloaded either way — the HF cache is bind-mounted, so a model fetching its own weights
+writes to the same place — but doing it inside the container hides a multi-hundred-GB
+transfer behind the readiness probe, with no progress and no error the user ever sees. So
+`serve` checks the host cache and fetches what is missing, as a step you can watch:
 
-Because those three rows differ, `serve` checks the host HF cache before launching (offline —
-`snapshot_download(..., local_files_only=True)`, so "complete" honours the author's
-`allow_patterns`) and says so when the weights are absent:
+```
+✓ weights org/Weights-7B@a1b2c3d4 on host   /home/you/.cache/huggingface/hub/...
+```
+
+It **resumes unconditionally** rather than deciding for itself whether the cache is complete.
+That is deliberate: `snapshot_download` holds the revision's real file list, so it knows
+exactly which files are missing and fetches only those. Anything derived locally — index
+files, shard-name arithmetic — is a guess at that list and is wrong for some layout. An
+earlier version of this check guessed, and a half-downloaded repo it did not recognise read
+as complete, which is precisely the failure it existed to prevent.
+
+The costs of always asking are small and measured: with a complete cache it is a metadata
+no-op (about a second), and with the Hub unreachable `huggingface_hub` falls straight back to
+the cache, so a fully cached model still serves air-gapped. A partial cache is resumed, and
+says so: `weights org/Weights-7B@a1b2c3d4 — resuming a partial download`.
+
+The one thing it *does* refuse to do quietly:
+
+- **It won't start a download that cannot fit.** `serve` compares the pinned revision's size
+  against free space on the cache filesystem and stops before anything else runs:
+  `not enough disk space for the weights org/Weights-7B: needs 297.0 GB more, 24.0 GB free`.
+  This matters because a fetch that fills the disk does *not* fail loudly — it leaves a
+  half-populated cache, and the next run resumes into the same wall. Byte accounting is scoped
+  to the pinned revision, so an unrelated cached checkpoint of the same repo cannot be
+  counted as already-present. Skipped for a spec pinned with `allow_patterns`/`ignore_patterns`,
+  where a whole-repo total would over-count.
+
+Not detected, in any version: a file that is present but truncated. `huggingface_hub` verifies
+what it downloads and never re-hashes what is already on disk, so neither does this. Catching
+it would mean re-reading every byte of the weights on every serve.
+
+`--no-weights` (and `--local-only`, which forbids the network by definition) keeps the old
+behaviour — the model fetches its own weights at first load — with the advisory note instead
+of a silent boot:
 
 ```
 ⚠ weights org/Weights-7B@a1b2c3d4 are not in your local HF cache; the model will download
@@ -372,9 +409,11 @@ Because those three rows differ, `serve` checks the host HF cache before launchi
 → or directly:  hf download org/Weights-7B --revision a1b2c3d4
 ```
 
-It is advisory only: booting without them is supported (the cache is bind-mounted, so the
-bytes land on the host and are reused), and the check can never fail a serve that would
-otherwise have worked. Suppressed under `--print`.
+A *failed* fetch is still non-fatal: the image is loaded and the model can try for itself, so
+a gate you can click through does not cost you the serve. The exception is a full disk, which
+stops the run rather than leaving a partial cache behind. `serve` and `pull --with-weights`
+share one code path here, so both behave identically.
+Weights handling is suppressed entirely under `--print`.
 
 `serve` also reloads the image from the staged `image/` layout if docker no longer has it —
 but note this only helps a package you **built** locally. A *pulled* package keeps just
