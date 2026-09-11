@@ -109,6 +109,13 @@ class VllmPluginLauncher:
     RUNTIME_KEYS = ("vllm", "plugin", "extension", "extra_models_dir", "lock",
                     "overrides", "wheels")
 
+    # Left out of the frozen requirements.lock: what this kind installs from local sources
+    # or rebuilds on every build regardless of the lock. ttnn is the editable install of
+    # /opt/tt-metal (its scm version moves with the tree); vLLM is the empty-target sdist
+    # build (``+empty`` is on no index) and the lock path reinstalls it --no-deps anyway;
+    # the plugin comes from its checkout. Pinning any of them makes the lock unsatisfiable.
+    LOCK_EXCLUDES = ("ttnn", "vllm", "vllm-tt-plugin")
+
     # the log line whose appearance means the OpenAI server is accepting requests
     READY_LINE = "Application startup complete"
 
@@ -373,6 +380,10 @@ class VllmForkLauncher:
 
     # keys the manifest's ``runtime:`` block may contain for this kind
     RUNTIME_KEYS = ("vllm", "extension", "lock", "model_dir")
+
+    # see VllmPluginLauncher.LOCK_EXCLUDES; here vLLM and the plugin are editable installs
+    # of the fork checkout.
+    LOCK_EXCLUDES = ("ttnn", "vllm", "vllm-tt-plugin")
 
     # The line whose appearance means the OpenAI server is accepting requests. The
     # readiness runner redirects vLLM's own output into a file inside the container, so
@@ -687,6 +698,9 @@ class TtDitServerLauncher:
 
     # keys the manifest's ``runtime:`` block may contain for this kind
     RUNTIME_KEYS = ("app", "packages", "lock", "mesh_shape_env")
+
+    # see VllmPluginLauncher.LOCK_EXCLUDES; only ttnn is built in-image for this kind.
+    LOCK_EXCLUDES = ("ttnn",)
 
     # Env var carrying the resolved mesh SHAPE, when the manifest does not name one.
     # These servers read the shape from the environment under a name they each choose;
