@@ -10,6 +10,18 @@ import pytest
 from tt_kernel import container
 
 
+#: Captured at import, before any fixture can stub it, so a test that wants the genuine
+#: picker (against a faked docker + a temporary device root) can ask for it by fixture.
+_REAL_PICK_FREE_DEVICES = container.pick_free_devices
+
+
+@pytest.fixture
+def real_picker(monkeypatch):
+    """Undo ``_no_real_device_scan`` for a test that exercises the picker itself."""
+    monkeypatch.setattr(container, "pick_free_devices", _REAL_PICK_FREE_DEVICES)
+    return _REAL_PICK_FREE_DEVICES
+
+
 @pytest.fixture(autouse=True)
 def _no_real_device_scan(monkeypatch):
     """Stub the free-chip picker so no test shells out to docker or reads /dev/tenstorrent.
@@ -22,7 +34,7 @@ def _no_real_device_scan(monkeypatch):
     exercises the picker itself re-patches this within its own body.
     """
     monkeypatch.setattr(container, "pick_free_devices",
-                        lambda count, dev_root=None: list(range(count)))
+                        lambda count, dev_root=None, rootless=None: list(range(count)))
 
 
 @pytest.fixture(autouse=True)

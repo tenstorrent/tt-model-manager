@@ -193,11 +193,26 @@ _ROOTLESS_HUGEPAGES_FIX = (
 )
 
 
+def _reachable_device_ids(dev_root: Path, ids: Sequence[int]) -> List[int]:
+    """Which of ``ids`` a rootless container could actually open read-write.
+
+    The picker uses this so ONE inaccessible node does not cost the whole board: a profile
+    that needs a chip it can open should get one, not be refused because an unrelated node
+    is locked down. See ``_reachable_in_userns`` for why this is not ``os.access``.
+    """
+    if not _reachable_in_userns(dev_root, mode=os.R_OK | os.X_OK):
+        return []
+    return [i for i in ids
+            if _reachable_in_userns(dev_root / str(i), mode=os.R_OK | os.W_OK)]
+
+
 def _unreachable_devices(dev_root: Path) -> List[str]:
     """Which /dev/tenstorrent nodes a rootless container could not open read-write.
 
-    The directory needs search, then every numbered node needs read-write: umd opens all
-    of them, so one unreachable board is a failed boot rather than a smaller mesh.
+    Reported so a board dropping out of the usable pool is visible; no longer fatal on its
+    own, because a container is now scoped to the chip(s) it was given and the picker only
+    hands out nodes it can open (``_reachable_device_ids``). A board with NOTHING reachable
+    is still a failed preflight -- see ``preflight``.
     """
     if not _reachable_in_userns(dev_root, mode=os.R_OK | os.X_OK):
         return [str(dev_root)]
@@ -264,11 +279,20 @@ def preflight(*, need_devices: bool, proc_mounts: Optional[Path] = None,
         ))
     else:
         unreachable = _unreachable_devices(dev) if rootless else []
+        # Partial inaccessibility is NOT fatal any more: serve scopes a container to the
+        # specific chip(s) it picks, and the picker only ever hands out a node it can
+        # actually open, so one locked-down node must not refuse a profile that needs a
+        # different one. Only a board with nothing usable left is a failed preflight.
+        try:
+            present = [p.name for p in dev.iterdir() if p.name.isdigit()]
+        except OSError:
+            present = []
+        fatal = bool(unreachable) and (not present or len(unreachable) >= len(present))
         out.append(Requirement(
-            "tt devices", not unreachable,
+            "tt devices", not fatal,
             str(dev) if not unreachable else
             f"{', '.join(unreachable)} not accessible to your uid",
-            "" if not unreachable else _ROOTLESS_DEVICE_FIX,
+            "" if not fatal else _ROOTLESS_DEVICE_FIX,
         ))
 
     mounts = Path(proc_mounts) if proc_mounts is not None else Path("/proc/mounts")
@@ -316,7 +340,33 @@ def _parse_device_ids(raw: str) -> Optional[List[int]]:
     return ids or None
 
 
-def _claimed_from_container(info: dict, all_ids: Sequence[int]) -> Set[int]:
+def _shares_host_ipc(info: dict, by_id: Dict[str, dict]) -> bool:
+    """Does this container end up in the HOST ipc namespace, directly or by joining?
+
+    ``IpcMode`` is ``host``, ``private``, ``shareable``, or ``container:<id>`` -- and that
+    last one is why this is not a string compare: a container that joins a ``--ipc host``
+    container's namespace is just as exposed to the UMD lock as if it had asked for the host
+    namespace itself. The chain is followed through the containers we inspected, and anything
+    that cannot be resolved (a target we cannot see, a cycle) is treated as shared, because
+    the safe answer when we cannot tell is "it might be contending".
+    """
+    mode = ((info.get("HostConfig") or {}).get("IpcMode") or "")
+    seen: Set[str] = set()
+    while mode.startswith("container:"):
+        ref = mode.split(":", 1)[1]
+        if ref in seen:
+            return True
+        seen.add(ref)
+        target = by_id.get(ref) or next(
+            (v for k, v in by_id.items() if k.startswith(ref)), None)
+        if target is None:
+            return True
+        mode = ((target.get("HostConfig") or {}).get("IpcMode") or "")
+    return mode == "host"
+
+
+def _claimed_from_container(info: dict, all_ids: Sequence[int], *,
+                            host_ipc: Optional[bool] = None) -> Set[int]:
     """Chip ids one ``docker inspect`` entry claims (every id, if it holds the whole
     directory) -- from any container, ours or not.
 
@@ -342,7 +392,7 @@ def _claimed_from_container(info: dict, all_ids: Sequence[int]) -> Set[int]:
         return {int(x) for x in own.split(",") if x.strip().isdigit()}
 
     host_config = info.get("HostConfig") or {}
-    if host_config.get("IpcMode") != "host":
+    if not (host_config.get("IpcMode") == "host" if host_ipc is None else host_ipc):
         return set()
     if host_config.get("Privileged"):
         return set(all_ids)
@@ -392,9 +442,11 @@ def _claimed_devices(all_ids: Sequence[int]) -> Optional[Set[int]]:
         containers = json.loads(inspected.stdout)
     except (json.JSONDecodeError, ValueError, TypeError):
         return None
+    by_id = {info["Id"]: info for info in containers if info.get("Id")}
     claimed: Set[int] = set()
     for info in containers:
-        claimed |= _claimed_from_container(info, all_ids)
+        claimed |= _claimed_from_container(
+            info, all_ids, host_ipc=_shares_host_ipc(info, by_id))
     return claimed
 
 
@@ -412,7 +464,8 @@ def all_device_ids(dev_root: Optional[Path] = None) -> List[int]:
         raise DeviceScanUnavailable(f"could not list {root}: {e}") from e
 
 
-def pick_free_devices(count: int, *, dev_root: Optional[Path] = None) -> List[int]:
+def pick_free_devices(count: int, *, dev_root: Optional[Path] = None,
+                      rootless: Optional[bool] = None) -> List[int]:
     """The lowest ``count`` chip indices not already claimed by any running container.
 
     Ascending and deterministic: the common, uncontended case always lands on the same low
@@ -421,20 +474,30 @@ def pick_free_devices(count: int, *, dev_root: Optional[Path] = None) -> List[in
     rather than silently. Raises rather than guesses when the host can't be read or doesn't
     have enough free chips; the alternative is the silent, indefinite UMD lock hang this
     replaces.
+
+    Under a rootless daemon a node the container's identity cannot open is skipped rather
+    than handed out: the permission failure would otherwise land minutes into a boot.
     """
-    all_ids = all_device_ids(dev_root)
+    root = dev_root or Path(TT_DEVICE)
+    all_ids = all_device_ids(root)
+    if rootless is None:
+        rootless = docker_is_rootless()
+    usable = _reachable_device_ids(root, all_ids) if rootless else list(all_ids)
     claimed = _claimed_devices(all_ids)
     if claimed is None:
         raise DeviceScanUnavailable(
             "could not determine which tt devices are already in use (docker ps/inspect "
             "failed) — refusing to guess"
         )
-    free = [i for i in all_ids if i not in claimed]
+    free = [i for i in usable if i not in claimed]
     if len(free) < count:
+        locked_out = sorted(set(all_ids) - set(usable))
         raise ContainerError(
             f"only {len(free)} of {len(all_ids)} tt device(s) are free "
-            f"(chip(s) {', '.join(map(str, sorted(claimed)))} in use); this profile needs "
-            f"{count}"
+            f"(chip(s) {', '.join(map(str, sorted(claimed))) or 'none'} in use"
+            + (f"; chip(s) {', '.join(map(str, locked_out))} not accessible to your uid "
+               f"under rootless docker" if locked_out else "")
+            + f"); this profile needs {count}"
         )
     return free[:count]
 
@@ -980,16 +1043,7 @@ def stop(name: str, image: Optional[str] = None) -> bool:
     ``DEVICES_LABEL`` set at launch — otherwise recovering one container's dirty mesh would
     grab the whole directory and reset chips a sibling container is still using.
     """
-    inspect = _run(
-        ["docker", "inspect", "--format",
-         '{{.State.Running}}\t{{index .Config.Labels "' + DEVICES_LABEL + '"}}', name],
-        capture_output=True, text=True,
-    )
-    parts = inspect.stdout.strip().split("\t") if inspect.returncode == 0 else []
-    was_running = bool(parts) and parts[0] == "true"
-    device_ids = _parse_device_ids(parts[1]) if len(parts) > 1 else None
-
-    # Held across the WHOLE teardown, starting before `docker stop`: this container drops out
+    # Held across the WHOLE teardown, INCLUDING the state/label read: this container drops out
     # of the `docker ps` scan the moment it stops running, not when it is removed, so every
     # step after the stop is a window in which a concurrent serve could claim these chips --
     # and if the shutdown turns out to have been dirty, the reset below (scoped to those same
@@ -999,6 +1053,18 @@ def stop(name: str, image: Optional[str] = None) -> bool:
     # racing a slow stop gets `alloc_lock`'s bounded timeout and a retry message rather than a
     # corrupted mesh.
     with alloc_lock():
+        # Read INSIDE the lock: taken outside it, a replacement container could be started
+        # under the same name while this call waits, and the teardown would then stop the
+        # REPLACEMENT while resetting the chips the old one held.
+        inspect = _run(
+            ["docker", "inspect", "--format",
+             '{{.State.Running}}\t{{index .Config.Labels "' + DEVICES_LABEL + '"}}', name],
+            capture_output=True, text=True,
+        )
+        parts = inspect.stdout.strip().split("\t") if inspect.returncode == 0 else []
+        was_running = bool(parts) and parts[0] == "true"
+        device_ids = _parse_device_ids(parts[1]) if len(parts) > 1 else None
+
         _run(["docker", "stop", "--timeout", str(STOP_TIMEOUT_S), name],
              capture_output=True, text=True)
 

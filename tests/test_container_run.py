@@ -798,8 +798,11 @@ def test_group_only_devices_still_pass_under_a_rootful_daemon(tmp_path, monkeypa
     assert _fail_names(_pf(tmp_path, monkeypatch, rootless=False, dev_mode=0o660)) == []
 
 
-def test_a_single_unreachable_board_fails_and_is_named(tmp_path, monkeypatch):
-    """umd opens every node, so one unreachable board is a failed boot, not a small mesh."""
+def test_a_single_unreachable_board_is_named_but_no_longer_fatal(tmp_path, monkeypatch):
+    """It used to be fatal because every container opened every node. Now serve scopes a
+    container to the chip(s) it picks, and the picker skips nodes it cannot open — so one
+    locked-down board must not refuse a profile that only needs a different one. Still
+    NAMED, because a board silently dropping out of the pool is worth seeing."""
     _as_stranger(monkeypatch)
     monkeypatch.setattr(container, "_docker_version", lambda: "29.5.3")
     mounts = tmp_path / "mounts"
@@ -810,10 +813,25 @@ def test_a_single_unreachable_board_fails_and_is_named(tmp_path, monkeypatch):
         node = dev / name
         node.touch()
         node.chmod(mode)
-    bad = container.preflight_failures(container.preflight(
-        need_devices=True, proc_mounts=mounts, dev_root=dev, rootless=True))
-    assert [r.name for r in bad] == ["tt devices"]
-    assert bad[0].detail == "1 not accessible to your uid"
+    reqs = container.preflight(need_devices=True, proc_mounts=mounts, dev_root=dev,
+                               rootless=True)
+    assert container.preflight_failures(reqs) == []
+    assert next(r for r in reqs if r.name == "tt devices").detail == \
+        "1 not accessible to your uid"
+
+
+def test_the_picker_skips_a_node_it_could_not_open_under_rootless(tmp_path, monkeypatch, real_picker):
+    """The other half of the same contract: a node preflight no longer rejects the board
+    for must not then be handed to a container that cannot open it."""
+    _as_stranger(monkeypatch)
+    dev = tmp_path / "tenstorrent"
+    dev.mkdir()
+    for name, mode in (("0", 0o660), ("1", 0o666)):
+        node = dev / name
+        node.touch()
+        node.chmod(mode)
+    monkeypatch.setattr(container, "_claimed_devices", lambda ids: set())
+    assert container.pick_free_devices(1, dev_root=dev, rootless=True) == [1]
 
 
 def test_hugepages_unwritable_under_rootless_is_caught_with_the_mount_fix(

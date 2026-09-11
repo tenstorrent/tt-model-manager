@@ -428,7 +428,8 @@ checklist above; `--detach` skips the wait).
 `container.compose_run()` builds the `docker run` argv (pure — its only environment inputs
 are `HF_HOME`/`HF_TOKEN`, both overridable, so `--print` and tests are deterministic):
 
-- `--device /dev/tenstorrent` — the boards.
+- `--device /dev/tenstorrent/<n>` — one flag per chip the profile needs, and **only** those
+  chips. See [Which chips a serve gets](#which-chips-a-serve-gets) below.
 - `--mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G` — **verbatim** src and dst,
   because umd regex-matches that exact line in `/proc/mounts`; a subdirectory or 2M
   hugepages fails the match and surfaces as a device-open error.
@@ -451,6 +452,49 @@ while writing it against 80 s reading it. It is a tradeoff, not a free win — i
 roughly equal to the weights (105 GB for FLUX.2, on top of what the HF cache already holds),
 and nothing reports it, because `tt_dit` silently reconverts when `TT_DIT_CACHE_DIR` is unset
 rather than failing. `tt-model rm` removes the whole parent; `--keep-cache` keeps it.
+
+### Which chips a serve gets
+
+A container is scoped to exactly as many chips as its profile needs — the count comes from
+the resolved profile's `hardware` (cross-checked against `mesh_device` at package time), and
+the specific chips are picked from whatever is free on the box at launch:
+
+```
+tt-model serve org/model                 # auto-picks free chip(s)
+tt-model serve org/model --device-id 0,1 # pins specific ones instead
+```
+
+This matters because it is not just bookkeeping. tt-metal/UMD takes a host-wide lock on every
+chip it can *see* during cluster bring-up — not only the one it computes on — and holds it for
+the container's whole life. A container handed the whole `/dev/tenstorrent` directory therefore
+locks the entire board, and the next serve (even one wanting a different chip) blocks forever
+on that lock with no error and no timeout. Scoping the mount is what makes several models
+coexist on one board at all.
+
+What the picker does:
+
+- **Counts what's in use host-wide**, not just tt-model's own containers: the lock is shared
+  through `--ipc host` regardless of who launched the other container, so a tt-studio or
+  tt-inference-server container counts too. Our own containers carry a
+  `org.tenstorrent.tt-model.devices` label read back exactly; anything else is read from its
+  actual grant (`--device`, a bind mount, or `--privileged`, which reaches every node without
+  listing any). A container that cannot reach the host ipc namespace claims nothing.
+- **Refuses instead of hanging.** Not enough free chips is an immediate error naming what is
+  busy, raised before the slow work (image load, weights prefetch), not after it.
+- **Serializes with a host-wide `flock`** on `/dev/tenstorrent` itself, held across
+  "check what's free → pick → `docker run`" and across a `stop`'s whole teardown, so two
+  concurrent invocations cannot choose the same chip and a dirty-mesh reset cannot land on a
+  chip that has since been handed to someone else.
+- **Skips a chip it could not open** under a rootless daemon rather than handing it over, and
+  `--device-id` is validated against the real inventory (`--device-id 99` on a four-chip box
+  is refused up front, not minutes later inside docker).
+
+One wrinkle worth knowing: a single chip that is physically one ASIC of a fused multi-chip
+board (half a P300) reports the *board's* type to tt-metal, which cannot match "P300 board,
+one chip visible" to any built-in preset and refuses to open a mesh at all. For a single-chip
+scope, `compose_run` therefore also sets `TT_MESH_GRAPH_DESC_PATH` to tt-metal's own generic
+1×1 descriptor (never overriding one the author set). Multi-chip profiles keep their real
+fabric topology.
 
 ### Inside the image
 

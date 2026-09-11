@@ -826,6 +826,21 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                 f"{profile.name!r} needs {chip_count}"
             )
 
+    if not print_only:
+        # A first, NON-RESERVING look at the board, before any slow work. The authoritative
+        # check happens under the allocation lock just before `docker run`, but that is on
+        # the far side of the image repair and the weights prefetch -- so without this a
+        # full board is only reported after minutes (or, on a cold cache, hours) of
+        # downloading weights the serve was never going to be able to use. Not knowing yet
+        # (no docker, no card) is not a refusal: let the authoritative check decide.
+        try:
+            if requested_device_ids is not None:
+                container.ensure_devices_free(requested_device_ids)
+            else:
+                container.pick_free_devices(chip_count)
+        except container.DeviceScanUnavailable:
+            pass
+
     if port is not None:
         # Override BEFORE composition, so --publish and the launcher's --port are both
         # derived from the same value and cannot diverge. Explicit means exact: a busy
@@ -966,53 +981,51 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     with console.checklist() as view:
         view.instant("host ready", _host_summary(host_reqs))
         view.instant(f"image {container.image_ref(manifest)}")
-        if container.container_exists(name) and not container.is_running(name):
-            # Not running, but holding the name — `docker run` creates the container before
-            # it binds ports, so a failed start (a busy port, usually) leaves one in
-            # "Created". Refusing here would make the obvious retry impossible. The
-            # `not is_running` guard matters under concurrency: a container that appeared
-            # between the check above and now belongs to another invocation that WON, and
-            # force-removing it would kill a live serve.
-            view.begin(f"removing a stopped {name}")
-            container.remove(name, force=True)
-            view.done()
         view.begin(f"starting {name}")
 
         def _start(ids: Optional[List[int]]) -> None:
-            # Re-checked HERE, under the allocation lock: two concurrent serves of the same
-            # model+profile both pass the `is_running` check far above, and without this the
-            # loser would fail on docker's name conflict and then, in the handler below,
-            # force-remove the winner's freshly started container.
+            # EVERYTHING that inspects or mutates this container name runs in here, under the
+            # allocation lock. Two concurrent serves of the same model+profile both pass the
+            # `is_running` check far above; outside the lock the loser would fail on docker's
+            # name conflict and then force-remove the winner's container -- and `docker run`
+            # creates a container before it starts it, so "exists but not running" is not
+            # evidence of a stale leftover either unless nobody else can be mid-launch.
             if container.is_running(name):
                 raise ContainerCliError(
                     f"{name} is already running. Stop it first:  tt-model stop {what}"
                 )
+            if container.container_exists(name):
+                # Holding the name but not running: a previous start failed (a busy port,
+                # usually) and left one in "Created". Refusing would make the obvious retry
+                # impossible.
+                view.detail(f"removed a stopped {name}")
+                container.remove(name, force=True)
             run_argv = container.compose_run(manifest, profile, argv, env, detach=True,
                                              device_ids=ids,
                                              rootless=container.docker_is_rootless())
-            container.run_checked(run_argv)
+            try:
+                container.run_checked(run_argv)
+            except container.ContainerError:
+                # Leave no half-created container behind to block the next attempt. Safe to
+                # judge by name here only because we still hold the lock: nothing else can
+                # have created this name since the checks above.
+                if container.container_exists(name) and not container.is_running(name):
+                    container.remove(name, force=True)
+                raise
 
-        try:
-            if requested_device_ids is not None:
-                # Same lock the auto-picker uses (container.device_allocation), held across
-                # the same "check free -> launch" window -- an explicit pin still has to
-                # coordinate with a concurrent stop()'s teardown, or with another concurrent
-                # serve, even though it skips the picker itself.
-                with container.alloc_lock():
-                    container.ensure_devices_free(requested_device_ids)
-                    _start(requested_device_ids)
-            else:
-                # Held only across "check what's free -> pick -> docker run" -- see
-                # container.device_allocation for why that's enough.
-                with container.device_allocation(chip_count) as picked_ids:
-                    _start(picked_ids)
-        except container.ContainerError:
-            # Leave no half-created container behind to block the next attempt -- but never
-            # remove one that is RUNNING: under a concurrent start that container is the
-            # other invocation's, and this one failing is not a licence to kill it.
-            if container.container_exists(name) and not container.is_running(name):
-                container.remove(name, force=True)
-            raise
+        if requested_device_ids is not None:
+            # Same lock the auto-picker uses (container.device_allocation), held across the
+            # same "check free -> launch" window -- an explicit pin still has to coordinate
+            # with a concurrent stop()'s teardown, or with another concurrent serve, even
+            # though it skips the picker itself.
+            with container.alloc_lock():
+                container.ensure_devices_free(requested_device_ids)
+                _start(requested_device_ids)
+        else:
+            # Held across "check what's free -> pick -> docker run" -- see
+            # container.device_allocation.
+            with container.device_allocation(chip_count) as picked_ids:
+                _start(picked_ids)
         view.done("container started")
         if detach:
             view.close()

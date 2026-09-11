@@ -21,12 +21,6 @@ from tt_kernel.launchers import launcher_for
 
 from test_container_manifest import BASE
 
-# The autouse fixture in conftest.py stubs `pick_free_devices` for every test in the suite
-# (so serve_container tests never touch real docker/hardware) -- captured here, before any
-# test runs, so the tests below that exercise the real picker can restore it explicitly.
-_real_pick_free_devices = container.pick_free_devices
-
-
 class _R:
     def __init__(self, stdout="", rc=0):
         self.stdout, self.returncode = stdout, rc
@@ -44,6 +38,8 @@ def _fake_docker(monkeypatch, *, ps_ids=(), inspected=(), ps_rc=0, inspect_rc=0,
         if argv[:2] == ["docker", "inspect"] and "--format" not in argv:
             stdout = inspect_stdout if inspect_stdout is not None else json.dumps(list(inspected))
             return _R(stdout, inspect_rc)
+        if argv[:2] == ["docker", "info"]:
+            return _R("[]")  # a rootful daemon: no name=rootless in SecurityOptions
         raise AssertionError(f"unexpected docker call: {argv}")
     monkeypatch.setattr(container, "_run", fake)
 
@@ -129,6 +125,38 @@ def test_claimed_devices_aggregates_across_every_running_container(monkeypatch):
     assert container._claimed_devices([0, 1, 2, 3]) == {0, 2}
 
 
+def test_a_container_joining_a_host_ipc_namespace_still_claims_its_chips(monkeypatch):
+    """`--ipc container:<id>` pointing at an --ipc host container lands in the SAME host
+    namespace, so it is just as exposed to the UMD lock as asking for host directly."""
+    holder = _container(ipc="host")
+    holder["Id"] = "deadbeefcafe"
+    joiner = _container(ipc="container:deadbeefcafe",
+                        devices=[{"PathOnHost": "/dev/tenstorrent/2"}])
+    joiner["Id"] = "0ther"
+    _fake_docker(monkeypatch, ps_ids=["a", "b"], inspected=[holder, joiner])
+    assert container._claimed_devices([0, 1, 2, 3]) == {2}
+
+
+def test_a_container_joining_a_private_namespace_claims_nothing(monkeypatch):
+    holder = _container(ipc="private")
+    holder["Id"] = "deadbeefcafe"
+    joiner = _container(ipc="container:deadbeefcafe",
+                        devices=[{"PathOnHost": "/dev/tenstorrent/2"}])
+    joiner["Id"] = "0ther"
+    _fake_docker(monkeypatch, ps_ids=["a", "b"], inspected=[holder, joiner])
+    assert container._claimed_devices([0, 1, 2, 3]) == set()
+
+
+def test_an_unresolvable_ipc_target_is_treated_as_shared(monkeypatch):
+    """It joined a namespace we cannot see. The safe answer when we cannot tell is
+    "it might be contending"."""
+    joiner = _container(ipc="container:vanished",
+                        devices=[{"PathOnHost": "/dev/tenstorrent/1"}])
+    joiner["Id"] = "0ther"
+    _fake_docker(monkeypatch, ps_ids=["a"], inspected=[joiner])
+    assert container._claimed_devices([0, 1, 2, 3]) == {1}
+
+
 def test_claimed_devices_is_empty_when_nothing_is_running(monkeypatch):
     _fake_docker(monkeypatch, ps_ids=[])
     assert container._claimed_devices([0, 1, 2, 3]) == set()
@@ -152,16 +180,14 @@ def test_claimed_devices_returns_none_on_unparsable_inspect_output(monkeypatch):
 # ------------------------------------------------------------------------ pick_free_devices
 
 
-def test_pick_free_devices_returns_the_lowest_free_ids_ascending(tmp_path, monkeypatch):
-    monkeypatch.setattr(container, "pick_free_devices", _real_pick_free_devices)
+def test_pick_free_devices_returns_the_lowest_free_ids_ascending(tmp_path, monkeypatch, real_picker):
     _fake_docker(monkeypatch, ps_ids=["a"], inspected=[
         _container(devices=[{"PathOnHost": "/dev/tenstorrent/0"}]),
     ])
     assert container.pick_free_devices(2, dev_root=_dev_root(tmp_path)) == [1, 2]
 
 
-def test_pick_free_devices_raises_a_capacity_error_naming_whats_busy(tmp_path, monkeypatch):
-    monkeypatch.setattr(container, "pick_free_devices", _real_pick_free_devices)
+def test_pick_free_devices_raises_a_capacity_error_naming_whats_busy(tmp_path, monkeypatch, real_picker):
     _fake_docker(monkeypatch, ps_ids=["a"], inspected=[
         _container(devices=[{"PathOnHost": "/dev/tenstorrent"}]),
     ])
@@ -169,8 +195,7 @@ def test_pick_free_devices_raises_a_capacity_error_naming_whats_busy(tmp_path, m
         container.pick_free_devices(1, dev_root=_dev_root(tmp_path))
 
 
-def test_pick_free_devices_raises_scan_unavailable_when_the_host_cant_be_read(tmp_path, monkeypatch):
-    monkeypatch.setattr(container, "pick_free_devices", _real_pick_free_devices)
+def test_pick_free_devices_raises_scan_unavailable_when_the_host_cant_be_read(tmp_path, monkeypatch, real_picker):
     _fake_docker(monkeypatch, ps_ids=["a"], ps_rc=1)
     with pytest.raises(container.DeviceScanUnavailable):
         container.pick_free_devices(1, dev_root=_dev_root(tmp_path))
@@ -179,17 +204,19 @@ def test_pick_free_devices_raises_scan_unavailable_when_the_host_cant_be_read(tm
 # ------------------------------------------------------------------------ ensure_devices_free
 
 
-def test_ensure_devices_free_passes_when_nothing_claims_the_requested_ids(monkeypatch):
+def test_ensure_devices_free_passes_when_nothing_claims_the_requested_ids(tmp_path, monkeypatch):
     _fake_docker(monkeypatch, ps_ids=[])
-    container.ensure_devices_free([0, 1])  # must not raise
+    # dev_root, not the real /dev/tenstorrent: ensure_devices_free inventories the host now,
+    # so without this the test depends on the runner having a card.
+    container.ensure_devices_free([0, 1], dev_root=_dev_root(tmp_path))  # must not raise
 
 
-def test_ensure_devices_free_refuses_an_already_claimed_pin(monkeypatch):
+def test_ensure_devices_free_refuses_an_already_claimed_pin(tmp_path, monkeypatch):
     _fake_docker(monkeypatch, ps_ids=["a"], inspected=[
         _container(devices=[{"PathOnHost": "/dev/tenstorrent/1"}]),
     ])
     with pytest.raises(container.ContainerError, match="chip.*1.*already in use"):
-        container.ensure_devices_free([0, 1])
+        container.ensure_devices_free([0, 1], dev_root=_dev_root(tmp_path))
 
 
 def test_ensure_devices_free_raises_scan_unavailable_on_a_broken_scan(tmp_path, monkeypatch):
