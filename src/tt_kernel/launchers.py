@@ -374,8 +374,11 @@ class VllmForkLauncher:
     # keys the manifest's ``runtime:`` block may contain for this kind
     RUNTIME_KEYS = ("vllm", "extension", "lock", "model_dir")
 
-    # the log line whose appearance means the OpenAI server is accepting requests
-    READY_LINE = "Server ready at"
+    # The line whose appearance means the OpenAI server is accepting requests. The
+    # readiness runner redirects vLLM's own output into a file inside the container, so
+    # the only ready signal that reaches `docker logs` is the runner's print after its
+    # /health poll succeeds: "  Server ready after ~240s".
+    READY_LINE = "Server ready after"
 
     # how the card describes what ``serve`` starts. Beside READY_LINE because it is
     # the same category of fact -- what this stack exposes -- and the card must not
@@ -554,7 +557,13 @@ class VllmForkLauncher:
         # The mesh goes through --mesh-device here, NOT through a MESH_DEVICE env var.
         # tt_transformers-style adapters read the model id from HF_MODEL, not from
         # vLLM's --model.
-        env = {"HF_MODEL": _weights_id(m)}
+        env = {
+            "HF_MODEL": _weights_id(m),
+            # The runner is PID 1 with stdout on a pipe and announces readiness with a
+            # bare print. Block-buffered, that line sits in Python's buffer for as long
+            # as the runner lives, and `serve --follow` times out on a server that is up.
+            "PYTHONUNBUFFERED": "1",
+        }
         env.update(profile.env)
         return env
 
