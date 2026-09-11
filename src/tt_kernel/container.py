@@ -322,6 +322,11 @@ def _claimed_from_container(info: dict, all_ids: Sequence[int]) -> Set[int]:
     claims nothing here -- this is what keeps a device-management service (e.g. tt-studio's
     backend, which mounts the whole directory for telemetry but runs with a private
     namespace) from making every chip look permanently busy.
+
+    A ``--privileged`` container is a separate case: it can reach every ``/dev/tenstorrent/*``
+    node through the disabled device cgroup without any of it appearing in ``Devices`` or
+    ``Mounts`` at all, so (combined with ``--ipc host``) it is conservatively treated as
+    claiming everything rather than silently reading as free.
     """
     labels = (info.get("Config") or {}).get("Labels") or {}
     own = labels.get(DEVICES_LABEL)
@@ -331,6 +336,8 @@ def _claimed_from_container(info: dict, all_ids: Sequence[int]) -> Set[int]:
     host_config = info.get("HostConfig") or {}
     if host_config.get("IpcMode") != "host":
         return set()
+    if host_config.get("Privileged"):
+        return set(all_ids)
 
     ids: Set[int] = set()
     for d in host_config.get("Devices") or []:
@@ -442,10 +449,18 @@ def _open_alloc_lock() -> int:
     Shared across users deliberately: more than one person can run ``tt-model serve`` on
     the same box, and the race this guards against (two invocations both seeing the same
     chip as free) is exactly the one that crosses users.
+
+    ``O_NOFOLLOW`` refuses to open the path if it is ever a symlink instead of a regular
+    file, and the permission widen happens via ``fchmod`` on the already-open descriptor
+    rather than a second path-based ``chmod`` -- a predictable, world-writable path in
+    ``/tmp`` is otherwise exactly the setup for another user to plant a symlink here
+    pointing at a file you own, and have this function unlock/widen it for them.
     """
-    fd = os.open(str(_DEVICE_ALLOC_LOCK_PATH), os.O_RDWR | os.O_CREAT, 0o666)
+    fd = os.open(
+        str(_DEVICE_ALLOC_LOCK_PATH), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o666
+    )
     try:
-        os.chmod(_DEVICE_ALLOC_LOCK_PATH, 0o666)  # in case an earlier run created it stricter
+        os.fchmod(fd, 0o666)  # in case an earlier run created it stricter
     except OSError:
         pass
     return fd
