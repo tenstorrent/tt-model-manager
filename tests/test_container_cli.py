@@ -284,6 +284,168 @@ def test_serve_picks_the_named_profile(tmp_path, monkeypatch):
     assert "tt-model-my-model-p150x2" in ran[0]
 
 
+def test_a_full_board_is_refused_before_any_weights_are_downloaded(tmp_path, monkeypatch):
+    """The authoritative capacity check is under the allocation lock, on the far side of the
+    image repair and the weights prefetch -- so a full board would otherwise only be reported
+    after minutes (or, cold, hours) of downloading weights the serve could never use."""
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "ensure_weights",
+                        lambda *a, **k: pytest.fail("downloaded weights for a full board"))
+
+    def busy(count, dev_root=None, rootless=None):
+        raise container.ContainerError("only 0 of 4 tt device(s) are free")
+
+    monkeypatch.setattr(container, "pick_free_devices", busy)
+    with pytest.raises(container.ContainerError, match="only 0 of 4"):
+        container_cli.serve_container(_manifest(tmp_path), target="org/m")
+
+
+def test_an_unavailable_scan_does_not_block_the_serve_early(tmp_path, monkeypatch):
+    """Not knowing yet (no docker, no card) is not a refusal -- the authoritative check
+    under the lock decides."""
+    ran = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    calls = {"n": 0}
+
+    def sometimes(count, dev_root=None, rootless=None):
+        calls["n"] += 1
+        if calls["n"] == 1:  # the early, non-reserving look
+            raise container.DeviceScanUnavailable("no docker")
+        return list(range(count))
+
+    monkeypatch.setattr(container, "pick_free_devices", sometimes)
+    container_cli.serve_container(_manifest(tmp_path), target="org/m")
+    assert ran, "the serve should have proceeded to docker run"
+
+
+def test_a_stale_leftover_is_removed_inside_the_start_critical_section(tmp_path, monkeypatch):
+    """A container holding the name but not running is a failed previous start; the retry
+    has to clear it -- but only from inside the allocation lock, where "exists but not
+    running" cannot be another invocation's container mid-launch."""
+    ran, removed = [], []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "container_exists", lambda n: not removed)
+    monkeypatch.setattr(container, "remove", lambda n, force=False: removed.append(n))
+    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    container_cli.serve_container(_manifest(tmp_path), target="org/m")
+    assert removed == ["tt-model-my-model-p150x4"]
+    assert ran
+
+
+def test_the_picked_devices_reach_the_docker_run(tmp_path, monkeypatch):
+    """End-to-end wiring: whatever the picker selects must become the container's actual
+    device grant, not just be computed and dropped."""
+    ran = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "pick_free_devices", lambda count, dev_root=None: [2, 3, 4, 5])
+    container_cli.serve_container(_manifest(tmp_path), target="org/m")
+    argv = ran[0]
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--device"] == [
+        "/dev/tenstorrent/2:/dev/tenstorrent/2",
+        "/dev/tenstorrent/3:/dev/tenstorrent/3",
+        "/dev/tenstorrent/4:/dev/tenstorrent/4",
+        "/dev/tenstorrent/5:/dev/tenstorrent/5",
+    ]
+    assert f"{container.DEVICES_LABEL}=2,3,4,5" in argv
+
+
+def test_an_explicit_pin_reaches_the_docker_run(tmp_path, monkeypatch):
+    ran = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "ensure_devices_free", lambda ids, **kw: None)
+    container_cli.serve_container(_manifest(tmp_path), target="org/m", device_id="4,5,6,7")
+    assert f"{container.DEVICES_LABEL}=4,5,6,7" in ran[0]
+
+
+def test_a_concurrent_start_of_the_same_profile_is_refused_under_the_lock(tmp_path, monkeypatch):
+    """Both invocations pass the is_running check far above; the loser must bail out rather
+    than fail on docker's name conflict and then remove the winner's live container."""
+    _serving_ok(monkeypatch)
+    removed = []
+    # Not running when serve_container first looks, running by the time the lock is held.
+    seen = {"n": 0}
+
+    def is_running(name):
+        seen["n"] += 1
+        return seen["n"] > 1
+
+    monkeypatch.setattr(container, "is_running", is_running)
+    monkeypatch.setattr(container, "container_exists", lambda n: True)
+    monkeypatch.setattr(container, "remove", lambda n, force=False: removed.append(n))
+    monkeypatch.setattr(container, "run_checked",
+                        lambda argv: pytest.fail("started over a running container"))
+    with pytest.raises(container_cli.ContainerCliError, match="already running"):
+        container_cli.serve_container(_manifest(tmp_path), target="org/m")
+    assert removed == []  # never force-removes the winner
+
+
+def test_a_failed_start_leaves_a_running_container_alone(tmp_path, monkeypatch):
+    """The cleanup path exists for a half-created container; a RUNNING one belongs to
+    another invocation and must survive this one's failure."""
+    _serving_ok(monkeypatch)
+    removed = []
+    running = {"v": False}
+    at_failure = {}
+    monkeypatch.setattr(container, "container_exists", lambda n: True)
+    monkeypatch.setattr(container, "is_running", lambda n: running["v"])
+    monkeypatch.setattr(container, "remove", lambda n, force=False: removed.append(n))
+
+    def boom(argv):
+        running["v"] = True  # another invocation's container appeared, and is live
+        at_failure["n"] = len(removed)
+        raise container.ContainerError("name already in use")
+
+    monkeypatch.setattr(container, "run_checked", boom)
+    with pytest.raises(container.ContainerError):
+        container_cli.serve_container(_manifest(tmp_path), target="org/m")
+    assert len(removed) == at_failure["n"]  # the handler removed nothing
+
+
+def test_print_falls_back_to_the_whole_directory_when_the_host_cant_be_scanned(
+        tmp_path, monkeypatch, capsys):
+    """--print must keep working on a machine with no card and no docker."""
+    def unavailable(count, dev_root=None):
+        raise container.DeviceScanUnavailable("no docker")
+
+    monkeypatch.setattr(container, "pick_free_devices", unavailable)
+    container_cli.serve_container(_manifest(tmp_path), print_only=True)
+    out = capsys.readouterr().out
+    assert "--device /dev/tenstorrent " in out
+    assert "/dev/tenstorrent/0" not in out
+
+
+def test_print_surfaces_a_real_capacity_refusal_instead_of_a_misleading_preview(
+        tmp_path, monkeypatch):
+    """A known-but-busy board is real information about what a real serve would do now;
+    papering over it with a whole-directory preview would be a lie."""
+    def busy(count, dev_root=None):
+        raise container.ContainerError("only 0 of 4 tt device(s) are free")
+
+    monkeypatch.setattr(container, "pick_free_devices", busy)
+    with pytest.raises(container.ContainerError, match="only 0 of 4"):
+        container_cli.serve_container(_manifest(tmp_path), print_only=True)
+
+
+def test_device_id_rejects_a_duplicate_index(tmp_path):
+    """"0,0" passes a bare length check while actually naming one physical chip twice,
+    silently under-sizing whatever mesh the profile asked for."""
+    with pytest.raises(container_cli.ContainerCliError, match="distinct"):
+        container_cli.serve_container(_manifest(tmp_path), print_only=True, device_id="0,0")
+
+
+def test_device_id_rejects_a_negative_index(tmp_path):
+    with pytest.raises(container_cli.ContainerCliError, match="distinct"):
+        container_cli.serve_container(_manifest(tmp_path), print_only=True, device_id="-1,0")
+
+
+def test_device_id_still_enforces_the_chip_count_once_ids_are_valid(tmp_path):
+    with pytest.raises(container_cli.ContainerCliError, match="needs 4"):
+        container_cli.serve_container(_manifest(tmp_path), print_only=True, device_id="0,1")
+
+
 def test_an_unknown_profile_is_refused_with_the_available_ones(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "running", lambda name=None: [])
     with pytest.raises(container_cli.ContainerCliError, match="p150x4"):

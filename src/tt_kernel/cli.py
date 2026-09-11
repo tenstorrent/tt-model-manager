@@ -1203,6 +1203,11 @@ def serve(
         "it must be a flag, not a passthrough argument); for a v5/v6 bundle it is "
         "appended to the launch command, where argparse last-wins."
     ),
+    device_id: Optional[str] = typer.Option(
+        None, "--device-id", help="For a container package: pin specific chip indices "
+        "(comma-separated, e.g. '0,1') instead of auto-picking free ones. The count must "
+        "match what the profile needs."
+    ),
     refresh: bool = typer.Option(
         False, "--refresh", help="Before serving an already-installed package, re-pull it if "
         "the Hub has a newer revision (so a republished source isn't served with stale launch "
@@ -1267,6 +1272,7 @@ def serve(
                 cmani, profile_name=profile, print_only=print_only, follow=follow,
                 extra_args=extra_args, source=src, port=port, target=repo_id,
                 local_only=local_only, no_weights=no_weights, detach=detach,
+                device_id=device_id,
             )
         except container_cli.ContainerCliError as e:
             if e.diagnosis is not None:

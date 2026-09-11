@@ -485,9 +485,13 @@ def _fake_docker(monkeypatch, *, running_state, exit_code):
 
     def fake(argv, **kw):
         calls.append(argv)
-        if "{{.State.Running}}" in argv:
+        joined = " ".join(argv)
+        # The running/exit-code probes now share their format string with a Labels lookup
+        # (stop() reads the devices label back in the same call), so match by substring
+        # rather than exact element equality.
+        if "{{.State.Running}}" in joined:
             return R(running_state)
-        if "{{.State.ExitCode}}" in argv:
+        if "{{.State.ExitCode}}" in joined:
             return R(exit_code)
         return R()
 
@@ -509,6 +513,28 @@ def test_a_sigkilled_container_triggers_a_mesh_reset(monkeypatch):
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137")
     assert container.stop("c", image="img") is False
     assert any("--entrypoint" in c for c in calls)
+
+
+def test_a_dirty_stop_resets_only_the_chips_that_container_held(monkeypatch):
+    """The reset is a `tt-smi -r all` in a throwaway container, so an unscoped one would
+    reset a SIBLING container's live mesh. The ids come from the label stop() reads back."""
+    calls = _fake_docker(monkeypatch, running_state="true\t0,1", exit_code="137")
+    assert container.stop("c", image="img") is False
+    reset = next(c for c in calls if "--entrypoint" in c)
+    assert [reset[i + 1] for i, a in enumerate(reset) if a == "--device"] == [
+        "/dev/tenstorrent/0:/dev/tenstorrent/0",
+        "/dev/tenstorrent/1:/dev/tenstorrent/1",
+    ]
+    assert "/dev/tenstorrent" not in reset  # never the whole directory
+
+
+def test_a_dirty_stop_without_a_devices_label_falls_back_to_the_whole_directory(monkeypatch):
+    """A container from before the label existed (or one started by hand) still has to be
+    recoverable -- there is no id to scope to, so the old behaviour is the fallback."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137")
+    assert container.stop("c", image="img") is False
+    reset = next(c for c in calls if "--entrypoint" in c)
+    assert reset[reset.index("--device") + 1] == "/dev/tenstorrent"
 
 
 def test_an_already_stopped_container_is_just_removed(monkeypatch):
@@ -772,8 +798,11 @@ def test_group_only_devices_still_pass_under_a_rootful_daemon(tmp_path, monkeypa
     assert _fail_names(_pf(tmp_path, monkeypatch, rootless=False, dev_mode=0o660)) == []
 
 
-def test_a_single_unreachable_board_fails_and_is_named(tmp_path, monkeypatch):
-    """umd opens every node, so one unreachable board is a failed boot, not a small mesh."""
+def test_a_single_unreachable_board_is_named_but_no_longer_fatal(tmp_path, monkeypatch):
+    """It used to be fatal because every container opened every node. Now serve scopes a
+    container to the chip(s) it picks, and the picker skips nodes it cannot open — so one
+    locked-down board must not refuse a profile that only needs a different one. Still
+    NAMED, because a board silently dropping out of the pool is worth seeing."""
     _as_stranger(monkeypatch)
     monkeypatch.setattr(container, "_docker_version", lambda: "29.5.3")
     mounts = tmp_path / "mounts"
@@ -784,10 +813,25 @@ def test_a_single_unreachable_board_fails_and_is_named(tmp_path, monkeypatch):
         node = dev / name
         node.touch()
         node.chmod(mode)
-    bad = container.preflight_failures(container.preflight(
-        need_devices=True, proc_mounts=mounts, dev_root=dev, rootless=True))
-    assert [r.name for r in bad] == ["tt devices"]
-    assert bad[0].detail == "1 not accessible to your uid"
+    reqs = container.preflight(need_devices=True, proc_mounts=mounts, dev_root=dev,
+                               rootless=True)
+    assert container.preflight_failures(reqs) == []
+    assert next(r for r in reqs if r.name == "tt devices").detail == \
+        "1 not accessible to your uid"
+
+
+def test_the_picker_skips_a_node_it_could_not_open_under_rootless(tmp_path, monkeypatch, real_picker):
+    """The other half of the same contract: a node preflight no longer rejects the board
+    for must not then be handed to a container that cannot open it."""
+    _as_stranger(monkeypatch)
+    dev = tmp_path / "tenstorrent"
+    dev.mkdir()
+    for name, mode in (("0", 0o660), ("1", 0o666)):
+        node = dev / name
+        node.touch()
+        node.chmod(mode)
+    monkeypatch.setattr(container, "_claimed_devices", lambda ids: set())
+    assert container.pick_free_devices(1, dev_root=dev, rootless=True) == [1]
 
 
 def test_hugepages_unwritable_under_rootless_is_caught_with_the_mount_fix(
