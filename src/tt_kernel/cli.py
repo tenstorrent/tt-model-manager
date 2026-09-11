@@ -1758,30 +1758,40 @@ def push(
     target = repo or (cmani.container.built or {}).get("repo")
     if not target:
         raise _err(f"{out} records no target repo; pass --repo namespace/name.")
+    # Read BEFORE the upload: `push_container` re-uploads the model card `package` rendered
+    # from the manifest alone, whose tag set does not include the catalog tag. Without this a
+    # plain re-push (a card-only update) would overwrite the frontmatter and silently DELIST a
+    # published repo — only `tt-model unpublish` should ever remove a listing (issue #96).
+    was_listed = hub.is_listed(target)
     _ensure_repo(target, private)
     try:
         container_cli.push_container(str(out), cmani, target)
     except container_cli.ContainerCliError as e:
         raise _err(str(e))
 
-    if publish:
+    if publish or was_listed:
         # AFTER the upload, so the tag lands on the model card `package` generated and
         # `push_container` just wrote (set_catalog_listing reloads and unions onto it,
-        # rather than clobbering it the way tag_repo would).
+        # rather than clobbering it the way tag_repo would). `--publish` lists it; a repo that
+        # was ALREADY listed keeps its listing across the card overwrite this push just did.
+        restoring = was_listed and not publish
         try:
             hub.set_catalog_listing(target, listed=True)
         except Exception as exc:  # noqa: BLE001
             # The bytes are already on the Hub; a failed tag write must not read as a
             # failed push. Say exactly what is left to do instead.
-            console.note(f"uploaded {target}, but could not list it in the catalog: {exc}",
+            verb = "preserve its catalog listing" if restoring else "list it in the catalog"
+            console.note(f"uploaded {target}, but could not {verb}: {exc}",
                          marker="!", style="warning")
-            console.note(f"retry the listing alone with: tt-model publish {target}",
-                         marker="→")
+            console.note(f"re-list it with: tt-model publish {target}", marker="→")
         else:
-            console.milestone(
-                f"listed {target} in the community catalog (pointer only; content stays "
-                f"yours) — delist with `tt-model unpublish {target}`"
-            )
+            if restoring:
+                console.note(f"kept {target} listed in the community catalog", marker="•")
+            else:
+                console.milestone(
+                    f"listed {target} in the community catalog (pointer only; content stays "
+                    f"yours) — delist with `tt-model unpublish {target}`"
+                )
 
 
 def _split_revision(repo_id: str) -> "tuple[str, Optional[str]]":

@@ -192,6 +192,21 @@ def is_private(repo_id: str) -> bool:
     return bool(getattr(info, "private", False))
 
 
+def is_listed(repo_id: str) -> bool:
+    """Is this repo currently in the community catalog (carries ``TT_MODEL_CATALOG_TAG``)?
+
+    Reads the LIVE tags. Deliberately total: any failure — the repo does not exist yet (a
+    first push), the Hub is unreachable, the repo is gated — reports ``False``, so a caller
+    that uses this to decide whether to PRESERVE a listing never blocks a push and never
+    "restores" a listing that was never there.
+    """
+    try:
+        tags = getattr(_api().model_info(repo_id), "tags", None) or []
+        return TT_MODEL_CATALOG_TAG in tags
+    except Exception:  # noqa: BLE001 — advisory only; absent/offline/gated all mean "not listed"
+        return False
+
+
 def is_private_safe(repo_id: str) -> Optional[bool]:
     """``is_private`` that answers ``None`` instead of raising when the Hub won't say.
 
