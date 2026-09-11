@@ -444,8 +444,10 @@ def render_run_sh(manifest: Manifest) -> str:
     """A standalone launcher that wires the engine env and serves the model.
 
     Sets the non-obvious env this stack needs (LD_PRELOAD of _ttnncpp.so; TT_METAL_HOME at the
-    installed ttnn; EXTRA_MODELS_DIR at this folder so the plugin finds vllm_metadata.json;
-    single-chip fabric-off defaults) plus any model-specific ``manifest.env``, then launches the
+    installed ttnn; EXTRA_MODELS_DIR at this folder so the plugin finds vllm_metadata.json; the
+    mesh from ``mesh.topology`` and, when the manifest declares them, ``mesh.fabric`` /
+    ``resources.trace_region_bytes`` via ``--additional-config``) plus any model-specific
+    ``manifest.env``, then launches the
     serving front end: vLLM's OpenAI server for ``deps.kind == "vllm"`` (v5 fat has no ``kind``
     concept and is always this case), or ``deps.app`` directly with uvicorn for any other v6 thin
     ``kind`` (e.g. ``"tt-dit-server"`` — see ``Deps.kind``'s docstring). Works with only tt-model
@@ -481,6 +483,21 @@ def render_run_sh(manifest: Manifest) -> str:
             serving += f" --reasoning_parser {cap.reasoning_parser}"
     if res and res.extra_args:
         serving += " " + " ".join(str(a) for a in res.extra_args)
+    # Fabric + trace region for the TT backend, rendered into --additional-config as JSON — the
+    # same shape the v5.1 CONTAINER path emits (see launchers.VllmPluginLauncher.serve_argv). Without
+    # this, run.sh only ever exported MESH_DEVICE and left fabric off, so a v6 thin bundle authored
+    # for a multi-chip mesh (mesh.fabric = FABRIC_1D...) ran fabric-OFF and could not form its mesh —
+    # even though the manifest declared it (issue #86). Single-chip bundles set neither field and are
+    # byte-for-byte unchanged (no empty --additional-config).
+    tt_cfg: Dict[str, object] = {}
+    if manifest.mesh and manifest.mesh.fabric:
+        tt_cfg["fabric_config"] = manifest.mesh.fabric
+    if res and res.trace_region_bytes:
+        tt_cfg["trace_region_size"] = res.trace_region_bytes
+    if tt_cfg:
+        # json has only double-quoted keys/values, so shlex.quote wraps the whole blob in single
+        # quotes cleanly — one argv token when this string is spliced into the CMD=() array below.
+        serving += " --additional-config " + shlex.quote(json.dumps({"tt": tt_cfg}))
     # PYTHONPATH: a v5 fat bundle embeds the modified metal tree at metal/; a v6 thin bundle gets
     # tt_transformers/TTTv2 from the installed wheels and only needs its own model.py on the path
     # (bundle root, or deps.model_dir). This is the one serve-time difference between the regimes.
