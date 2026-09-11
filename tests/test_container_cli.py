@@ -411,7 +411,7 @@ def test_serve_walks_the_boot_landmarks_and_ends_on_a_ready_card(tmp_path, monke
 
 
 def test_stop_reports_a_clean_shutdown(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(container, "running", lambda name=None: [{"name": name}])
+    monkeypatch.setattr(container, "is_running", lambda name: True)
     monkeypatch.setattr(container, "stop", lambda name, image=None: True)
     container_cli.stop_container(_manifest(tmp_path))
     out = capsys.readouterr().out
@@ -420,14 +420,14 @@ def test_stop_reports_a_clean_shutdown(tmp_path, monkeypatch, capsys):
 
 
 def test_stop_warns_loudly_when_a_kill_forced_a_mesh_reset(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(container, "running", lambda name=None: [{"name": name}])
+    monkeypatch.setattr(container, "is_running", lambda name: True)
     monkeypatch.setattr(container, "stop", lambda name, image=None: False)
     container_cli.stop_container(_manifest(tmp_path))
     assert "mesh was left dirty" in capsys.readouterr().out
 
 
 def test_stopping_nothing_says_so_rather_than_failing(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "is_running", lambda name: False)
     container_cli.stop_container(_manifest(tmp_path))
     assert "nothing running" in capsys.readouterr().out
 
@@ -436,15 +436,66 @@ def test_stopping_nothing_says_so_rather_than_failing(tmp_path, monkeypatch, cap
 
 
 def test_logs_without_a_running_container_says_how_to_start_one(tmp_path, monkeypatch):
-    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "is_running", lambda name: False)
     with pytest.raises(container_cli.ContainerCliError, match="tt-model serve"):
         container_cli.logs_container(_manifest(tmp_path))
 
 
+TWO_PROFILES = json.loads(json.dumps(BASE))["serve_profiles"] + [
+    {"name": "p150x2", "hardware": "p150x2", "mesh_device": "P150x2", "max_num_seqs": 8}]
+
+
+def _two_containers(tmp_path, monkeypatch, *, running: set):
+    """A package with two profiles; `docker ps --all` lists BOTH containers (one exited,
+    one running), `docker inspect` knows which is actually up."""
+    m = _manifest(tmp_path, serve_profiles=TWO_PROFILES, default_profile="p150x2")
+    both = ["tt-model-my-model-p150x4", "tt-model-my-model-p150x2"]
+    monkeypatch.setattr(container, "running",
+                        lambda name=None: [{"name": n} for n in both if not name or name in n])
+    monkeypatch.setattr(container, "is_running", lambda name: name in running)
+    return m
+
+
+def test_logs_without_profile_picks_the_running_default_over_an_exited_first_profile(
+        tmp_path, monkeypatch):
+    """p150x4 is declared first but EXITED; p150x2 is the default and RUNNING. `docker ps
+    --all` lists both, so iterating declaration order used to tail the dead one."""
+    m = _two_containers(tmp_path, monkeypatch, running={"tt-model-my-model-p150x2"})
+    asked = []
+    monkeypatch.setattr(container, "logs", lambda name, follow=False: asked.append(name) or 0)
+    container_cli.logs_container(m)
+    assert asked == ["tt-model-my-model-p150x2"]
+
+
+def test_logs_without_profile_prefers_the_default_when_both_run(tmp_path, monkeypatch):
+    m = _two_containers(tmp_path, monkeypatch,
+                        running={"tt-model-my-model-p150x4", "tt-model-my-model-p150x2"})
+    asked = []
+    monkeypatch.setattr(container, "logs", lambda name, follow=False: asked.append(name) or 0)
+    container_cli.logs_container(m)
+    assert asked == ["tt-model-my-model-p150x2"]
+
+
+def test_stop_without_profile_stops_only_what_is_running_and_says_so(
+        tmp_path, monkeypatch, capsys):
+    m = _two_containers(tmp_path, monkeypatch, running={"tt-model-my-model-p150x2"})
+    stopped = []
+    monkeypatch.setattr(container, "stop", lambda name, image=None: stopped.append(name) or True)
+    container_cli.stop_container(m)
+    assert stopped == ["tt-model-my-model-p150x2"]
+    assert "stopped 1" in capsys.readouterr().out
+
+
+def test_stop_with_only_exited_containers_reports_nothing_running(tmp_path, monkeypatch, capsys):
+    m = _two_containers(tmp_path, monkeypatch, running=set())
+    monkeypatch.setattr(container, "stop",
+                        lambda name, image=None: pytest.fail(f"stopped exited {name}"))
+    container_cli.stop_container(m)
+    assert "nothing running" in capsys.readouterr().out
+
+
 def test_profiles_marks_the_default(tmp_path, monkeypatch, capsys):
-    two = json.loads(json.dumps(BASE))["serve_profiles"] + [
-        {"name": "p150x2", "hardware": "p150x2", "mesh_device": "P150x2", "max_num_seqs": 8}]
-    m = _manifest(tmp_path, serve_profiles=two, default_profile="p150x4")
+    m = _manifest(tmp_path, serve_profiles=TWO_PROFILES, default_profile="p150x4")
     container_cli.list_containers(m)
     out = capsys.readouterr().out
     assert "p150x4" in out and "default" in out and "p150x2" in out
