@@ -485,9 +485,13 @@ def _fake_docker(monkeypatch, *, running_state, exit_code):
 
     def fake(argv, **kw):
         calls.append(argv)
-        if "{{.State.Running}}" in argv:
+        joined = " ".join(argv)
+        # The running/exit-code probes now share their format string with a Labels lookup
+        # (stop() reads the devices label back in the same call), so match by substring
+        # rather than exact element equality.
+        if "{{.State.Running}}" in joined:
             return R(running_state)
-        if "{{.State.ExitCode}}" in argv:
+        if "{{.State.ExitCode}}" in joined:
             return R(exit_code)
         return R()
 

@@ -25,7 +25,7 @@ from typing import List, Optional
 from . import MANIFEST_NAME, console, container, hub, localdb, oci
 from .boot_progress import BootTracker, diagnose_boot, summarize
 from .build import BuildError, build_log_path, finalize, run_build, stage
-from .container_manifest import ContainerManifestError
+from .container_manifest import ContainerManifestError, hardware_chip_count
 from .launchers import launcher_for
 from .manifest import DEFAULT_PORT, Manifest
 
@@ -751,7 +751,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     target: Optional[str] = None,
                     local_only: bool = False,
                     no_weights: bool = False,
-                    detach: bool = False) -> None:
+                    detach: bool = False,
+                    device_id: Optional[str] = None) -> None:
     """Run one serve profile, and (unless ``detach``) watch it boot.
 
     The boot is shown as a checklist of its landmarks -- device opened, weights loaded, KV
@@ -765,6 +766,12 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     circle. ``no_weights`` keeps the pre-flight from fetching missing weights, leaving that
     to the model inside the container. ``follow`` is accepted for compatibility; waiting is
     the default now.
+
+    By default the container is scoped to exactly as many free chips as the profile needs
+    (picked automatically, and reserved for the duration of the ``docker run`` so two
+    concurrent serves cannot pick the same one) rather than the whole board — the whole
+    board is what let one model's container hang a second, unrelated model forever. Pass
+    ``device_id`` (comma-separated chip indices) to pin specific ones instead of auto-picking.
     """
     del follow  # the old opt-in; kept so callers written against it still work
     spec = manifest.container
@@ -792,6 +799,26 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         profile = spec.resolve_profile(profile_name)
     except ValueError as e:
         raise ContainerCliError(str(e)) from None
+
+    # How many chips this profile needs, and which specific ones to use -- either the
+    # operator's own pin, or (the default) auto-picked from what's actually free right now.
+    # `hardware` is validated against `mesh_device` at package time, so this is trustworthy
+    # for any manifest that made it through `tt-model package`.
+    chip_count = hardware_chip_count(profile.hardware or "") or 1
+    requested_device_ids: Optional[List[int]] = None
+    if device_id:
+        try:
+            requested_device_ids = [int(x) for x in device_id.split(",")]
+        except ValueError:
+            raise ContainerCliError(
+                f"--device-id must be a comma-separated list of integers, got {device_id!r}"
+            ) from None
+        if len(requested_device_ids) != chip_count:
+            raise ContainerCliError(
+                f"--device-id gave {len(requested_device_ids)} chip(s) but profile "
+                f"{profile.name!r} needs {chip_count}"
+            )
+
     if port is not None:
         # Override BEFORE composition, so --publish and the launcher's --port are both
         # derived from the same value and cannot diverge. Explicit means exact: a busy
@@ -871,13 +898,20 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     launcher = launcher_for(spec.kind)
     argv = launcher.serve_argv(manifest, profile) + list(extra_args or [])
     env = launcher.serve_env(manifest, profile)
-    # Probed here, not in compose_run, so composition stays pure. Safe on a host with
-    # no docker at all (returns False), which --print has to keep working on.
-    run_argv = container.compose_run(manifest, profile, argv, env,
-                                     detach=not print_only,
-                                     rootless=container.docker_is_rootless())
 
     if print_only:
+        # Best-effort device pick for display: nothing is actually launched, so there is no
+        # race to protect against, and a host with no docker at all (which --print must
+        # keep working on) just falls back to showing the whole-directory form.
+        preview_ids = requested_device_ids
+        if preview_ids is None:
+            try:
+                preview_ids = container.pick_free_devices(chip_count)
+            except container.ContainerError:
+                preview_ids = None
+        run_argv = container.compose_run(manifest, profile, argv, env, detach=False,
+                                         device_ids=preview_ids,
+                                         rootless=container.docker_is_rootless())
         # shlex.join, not " ".join: the argv carries tokens a shell would take apart --
         # chiefly the JSON of --additional-config / --tt-config and anything the author put
         # in serve.args, e.g. --override-generation-config '{"temperature": 0.6}'. Joined
@@ -930,8 +964,22 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
             container.remove(name, force=True)
             view.done()
         view.begin(f"starting {name}")
-        try:
+
+        def _start(ids: Optional[List[int]]) -> None:
+            run_argv = container.compose_run(manifest, profile, argv, env, detach=True,
+                                             device_ids=ids,
+                                             rootless=container.docker_is_rootless())
             container.run_checked(run_argv)
+
+        try:
+            if requested_device_ids is not None:
+                container.ensure_devices_free(requested_device_ids)
+                _start(requested_device_ids)
+            else:
+                # Held only across "check what's free -> pick -> docker run" -- see
+                # container.device_allocation for why that's enough.
+                with container.device_allocation(chip_count) as picked_ids:
+                    _start(picked_ids)
         except container.ContainerError:
             # Leave no half-created container behind to block the next attempt.
             if container.container_exists(name):
