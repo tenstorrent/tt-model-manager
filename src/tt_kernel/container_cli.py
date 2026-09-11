@@ -798,14 +798,15 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         # port the user asked for by name fails (docker's "already allocated") rather
         # than silently moving the endpoint.
         profile = profile.model_copy(update={"port": port})
-    elif not print_only:
+    else:
         # No explicit --port: start at 20000 and walk upward past busy ports — 20000
         # taken → 20001 → 20002 ... — instead of failing. The manifest's own `port`
         # is deliberately NOT the seed: authors write 8000 there (vLLM's default, and
         # what the bare-docker CMD wrapper binds inside the image), which is exactly the
         # port that collides on a shared box. Under tt-model the host port is tt-model's
-        # call. Skipped under --print, which must stay pure and deterministic.
-        chosen = container.pick_free_port(DEFAULT_PORT)
+        # call. --print must stay pure and deterministic, so it skips the walk but still
+        # prints the 20000 a real run starts from — not the manifest's 8000.
+        chosen = DEFAULT_PORT if print_only else container.pick_free_port(DEFAULT_PORT)
         if chosen != DEFAULT_PORT:
             console.note(f"port {DEFAULT_PORT} is in use; serving on {chosen} instead",
                          marker="•")
