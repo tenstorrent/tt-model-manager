@@ -63,6 +63,7 @@ Pre-v5 bundles are refused; re-publish them with a current `tt-model`.
 | [docs/self_contained_packages.md](docs/self_contained_packages.md) | v5 design, layout, and testing reference |
 | [docs/container_packages.md](docs/container_packages.md) | v5.1 container packages: `tt-model.yaml`, the image on the wire, serving |
 | [docs/thin_packages.md](docs/thin_packages.md) | v6 thin bundles (draft) |
+| [docs/multi_host_mesh.md](docs/multi_host_mesh.md) | Multi-host (cross-box) mesh — design of record (issue #87) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, testing, PR process |
 | [AGENTS.md](AGENTS.md) | Design invariants and workflow notes for maintainers and coding agents |
 
