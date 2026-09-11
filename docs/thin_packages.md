@@ -84,38 +84,46 @@ path as a v5 fat one.
 > `tt-model serve` is the managed wrapper. The author doesn't write it — `package`/`package-thin`
 > generate it; the author writes `model.py`.
 
-## Serving front end — LLM today, other model types later (NOT in this draft)
+## Serving front end — `deps.kind` picks vLLM or a direct ASGI app
 
 The engine + bundle + install are **modality-agnostic** and shared. The one modality-specific layer
-is the **serving front end**, which in v6 today is **vLLM only** (`run.sh` launches vLLM's OpenAI
-server; the `vllm_metadata.json` / `EXTRA_MODELS_DIR` registration is LLM-specific).
+is the **serving front end**, picked by `deps.kind` (default `"vllm"`, the only behavior v6 had
+before this field existed) — placed inside the `Deps` block rather than a new top-level `serve.kind`
+(an earlier revision of this doc anticipated the latter) to match how the v5.1 CONTAINER schema
+already scopes its own `kind` inside its own schema-specific block (`ContainerSpec.kind`, see
+`launchers.py`), not as a separate manifest field.
 
-Supporting diffusion / other model types is a **future extension** — a `serve.kind` on the manifest
-that `render_run_sh` dispatches on (e.g. `vllm` today; a `custom` kind where `run.sh` launches
-`model.py`'s own server). That needs a new serving contract + a `model.py` runner protocol + a
-different API surface, so it is **deliberately out of scope for this draft** (tracked in #29) — not a
-drop-in. The shape it would take:
+- `"vllm"`: `run.sh` launches vLLM's OpenAI server; `vllm_metadata.json` / `EXTRA_MODELS_DIR`
+  registers `Manifest.entrypoint` (arch + `module:Class`) with the plugin. Needs `deps.vllm` (the
+  empty-target vLLM build step) and `Manifest.entrypoint`.
+- `"tt-dit-server"`: for a model with no tokens/KV-cache/continuous batching (diffusion,
+  vision-language-action, ...) — nothing for vLLM to do. `run.sh` serves `deps.app` (a
+  `"module:attribute"` ASGI target) directly with uvicorn instead; no vLLM step regardless of
+  `--vllm`/`--no-vllm`, no `vllm_metadata.json`, no `Manifest.entrypoint`. Mirrors what the
+  same-named v5.1 CONTAINER kind already does (`launchers.TtDitServerLauncher`) — an author who has
+  published a `tt-dit-server` container recognizes the same term and shape here.
 
 ```mermaid
 flowchart TB
   subgraph shared1["SHARED — same v6 bundle for every model type"]
-    w["Pointer to weights"] --- man["Manifest (serve.kind + config)"] --- mp["model.py"] --- venv["uv venv: ttnn + tt-metal-models + generic_op"]
+    w["Pointer to weights"] --- man["Manifest (deps.kind + config)"] --- mp["model.py / app.py"] --- venv["uv venv: ttnn + tt-metal-models + generic_op"]
   end
-  shared1 --> fork{{"manifest: serve.kind ?"}}
-  fork -->|"vllm  (implemented)"| llm
-  fork -->|"diffusion | custom  (planned)"| other
+  shared1 --> fork{{"manifest: deps.kind ?"}}
+  fork -->|"vllm  (default)"| llm
+  fork -->|"tt-dit-server"| other
   subgraph llm["LLM"]
     l1["run.sh → vLLM OpenAI server"] --> l2["vllm_metadata.json (EXTRA_MODELS_DIR)"] --> l3["model.py = generator adapter"] --> l4["POST /v1/chat/completions"]
   end
-  subgraph other["Diffusion / other — NOT in this draft"]
-    o1["run.sh → model.py's own server"] --> o2["model.py brings the API"] --> o3["model.py = pipeline (UNet/VAE)"] --> o4["POST /v1/images/generations"]
+  subgraph other["Diffusion / vision-language-action / ..."]
+    o1["run.sh → uvicorn deps.app"] --> o2["app.py brings its own ASGI API"] --> o3["app.py = pipeline (e.g. UNet/VAE, or a vision+LLM stack)"] --> o4["whatever routes app.py declares"]
   end
   llm --> eng["SHARED ENGINE — ttnn + generic_op on the TT card (+ SFPI, firmware)"]
   other --> eng
 ```
 
-The **diffusion model code** itself would live in `tt-metal-models`, not tt-model — the engine
-already runs it; only the serving layer is the gap.
+The **model code** itself (diffusion pipeline, or anything else) lives in `tt-metal-models` or the
+author's own bundled `app.py`, not in tt-model — the engine already runs it; tt-model only renders
+the install/serve scripts.
 
 ## Box prerequisites
 A TT **card**, its **firmware/driver**, and **SFPI** (SFPI is a separate, externally-managed box

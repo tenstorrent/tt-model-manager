@@ -137,6 +137,12 @@ class Vllm(BaseModel):
     wheel: Optional[str] = None
 
 
+# Every value ``Deps.kind`` accepts. Kept as a single source of truth so the CLI (fail-fast, a
+# clean error before any staging work happens) and ``stage_thin_package``/``render_run_sh``
+# (defense-in-depth for callers that build a ``Deps`` directly) validate against the same list.
+THIN_KINDS = ("vllm", "tt-dit-server")
+
+
 class Deps(BaseModel):
     """v6 "thin" bundle: the per-model venv is built from pip dependency pins + bundled wheels,
     not from embedded platform wheels (see issue #29).
@@ -150,6 +156,17 @@ class Deps(BaseModel):
     empty-target vLLM install step (see ``Vllm``) — vLLM is NOT in ``requirements`` or ``wheels``
     because it needs its own ordered build. ``model_dir`` is where ``model.py`` lives (added to
     PYTHONPATH at serve). SFPI and firmware are external, box-managed deps — never in here.
+
+    ``kind`` picks the serving front end ``render_run_sh`` puts in ``run.sh``, mirroring the v5.1
+    container schema's ``ContainerSpec.kind`` (see ``launchers.py``) so an author who has already
+    published a ``tt-dit-server`` container recognizes the same term here. ``"vllm"`` (the
+    default, and the only kind this schema supported before this field existed) serves
+    ``vllm.entrypoints.openai.api_server`` and expects ``Manifest.entrypoint`` +
+    (optionally) ``vllm``. ``"tt-dit-server"`` serves ``app`` directly with ``uvicorn`` instead —
+    no vLLM engine, no ``entrypoint``/``vllm_metadata.json`` — for a model with no tokens/KV-cache/
+    continuous batching (diffusion, vision-language-action, ...), matching what the same-named
+    container kind already does. See issue #29 and ``docs/thin_packages.md`` for the design note
+    this follows.
     """
 
     python: Optional[str] = None            # pinned interpreter (major.minor), uv provisions
@@ -165,6 +182,10 @@ class Deps(BaseModel):
     # vLLM core install (empty-target, for the plugin). None => bundle serves no vLLM (non-vLLM model).
     vllm: Optional["Vllm"] = None
     model_dir: str = "."                     # where model.py lives (bundle root), added to PYTHONPATH
+    kind: str = "vllm"                       # one of THIN_KINDS (see class docstring)
+    # The ASGI entrypoint ("module:attribute") a "tt-dit-server" kind serves with uvicorn — the v6
+    # analog of ContainerSpec.runtime["app"]. Unused (must be None) for kind="vllm".
+    app: Optional[str] = None
 
 
 class Mesh(BaseModel):
