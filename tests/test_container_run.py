@@ -515,6 +515,28 @@ def test_a_sigkilled_container_triggers_a_mesh_reset(monkeypatch):
     assert any("--entrypoint" in c for c in calls)
 
 
+def test_a_dirty_stop_resets_only_the_chips_that_container_held(monkeypatch):
+    """The reset is a `tt-smi -r all` in a throwaway container, so an unscoped one would
+    reset a SIBLING container's live mesh. The ids come from the label stop() reads back."""
+    calls = _fake_docker(monkeypatch, running_state="true\t0,1", exit_code="137")
+    assert container.stop("c", image="img") is False
+    reset = next(c for c in calls if "--entrypoint" in c)
+    assert [reset[i + 1] for i, a in enumerate(reset) if a == "--device"] == [
+        "/dev/tenstorrent/0:/dev/tenstorrent/0",
+        "/dev/tenstorrent/1:/dev/tenstorrent/1",
+    ]
+    assert "/dev/tenstorrent" not in reset  # never the whole directory
+
+
+def test_a_dirty_stop_without_a_devices_label_falls_back_to_the_whole_directory(monkeypatch):
+    """A container from before the label existed (or one started by hand) still has to be
+    recoverable -- there is no id to scope to, so the old behaviour is the fallback."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137")
+    assert container.stop("c", image="img") is False
+    reset = next(c for c in calls if "--entrypoint" in c)
+    assert reset[reset.index("--device") + 1] == "/dev/tenstorrent"
+
+
 def test_an_already_stopped_container_is_just_removed(monkeypatch):
     calls = _fake_docker(monkeypatch, running_state="false", exit_code="")
     assert container.stop("c", image="img") is True

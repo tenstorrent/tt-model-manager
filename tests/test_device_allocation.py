@@ -11,10 +11,15 @@ on any real docker daemon.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
 from tt_kernel import container
+from tt_kernel.container_manifest import ContainerManifest
+from tt_kernel.launchers import launcher_for
+
+from test_container_manifest import BASE
 
 # The autouse fixture in conftest.py stubs `pick_free_devices` for every test in the suite
 # (so serve_container tests never touch real docker/hardware) -- captured here, before any
@@ -187,7 +192,115 @@ def test_ensure_devices_free_refuses_an_already_claimed_pin(monkeypatch):
         container.ensure_devices_free([0, 1])
 
 
-def test_ensure_devices_free_raises_scan_unavailable_on_a_broken_scan(monkeypatch):
+def test_ensure_devices_free_raises_scan_unavailable_on_a_broken_scan(tmp_path, monkeypatch):
     _fake_docker(monkeypatch, ps_ids=["a"], inspect_rc=1)
     with pytest.raises(container.DeviceScanUnavailable):
-        container.ensure_devices_free([0])
+        container.ensure_devices_free([0], dev_root=_dev_root(tmp_path))
+
+
+def test_ensure_devices_free_refuses_a_chip_this_host_does_not_have(tmp_path, monkeypatch):
+    """`--device-id 99` on a four-chip box otherwise passes every earlier check and fails
+    minutes later inside docker -- the late failure the flag exists to prevent."""
+    _fake_docker(monkeypatch, ps_ids=[])
+    with pytest.raises(container.ContainerError, match="does not have"):
+        container.ensure_devices_free([99], dev_root=_dev_root(tmp_path))
+
+
+# ------------------------------------------------ scan failures the preview must tolerate
+
+
+def test_an_absent_device_root_is_scan_unavailable_not_a_capacity_error(tmp_path):
+    """`serve --print` on a machine with no card falls back to the whole-directory preview,
+    which it can only do if this is classified as not-knowing rather than a refusal."""
+    with pytest.raises(container.DeviceScanUnavailable):
+        container.all_device_ids(tmp_path / "nope")
+
+
+def test_a_missing_docker_binary_reads_as_a_scan_failure(monkeypatch):
+    """With no docker at all `_run` raises instead of returning non-zero; `--print` has to
+    keep working there, so it must normalise to the same None as an unreachable daemon."""
+    def boom(argv, **kw):
+        raise FileNotFoundError("docker")
+    monkeypatch.setattr(container, "_run", boom)
+    assert container._claimed_devices([0, 1]) is None
+
+
+# ------------------------------------------------------- scoped docker run / reset composition
+
+
+def _wire(**over):
+    raw = json.loads(json.dumps(BASE))
+    raw.update(over)
+    m = ContainerManifest.model_validate(raw)
+    m.validate_semantics()
+    return m.to_wire(image_tag="tt-model/my-model:abc123", tt_metal_version="0.72.1",
+                     tt_kernel_version="0.1.0", hostname="h",
+                     created_at="2026-01-01T00:00:00+00:00")
+
+
+_SINGLE_CHIP = [{"name": "p150", "hardware": "p150", "mesh_device": "P150",
+                 "max_num_seqs": 32, "max_model_len": 131072}]
+
+
+def _run_argv(m, **kw):
+    profile = m.container.resolve_profile()
+    launcher = launcher_for(m.container.kind)
+    return container.compose_run(
+        m, profile, launcher.serve_argv(m, profile), launcher.serve_env(m, profile),
+        hf_home_dir=Path("/home/u/.cache/huggingface"),
+        cache_dir=Path("/home/u/c"), weight_cache_dir=Path("/home/u/w"),
+        tensor_cache_dir=Path("/home/u/t"), include_hf_token=False, **kw,
+    )
+
+
+def _device_flags(argv):
+    return [argv[i + 1] for i, a in enumerate(argv) if a == "--device"]
+
+
+def test_scoped_ids_become_one_device_flag_per_chip():
+    argv = _run_argv(_wire(), device_ids=[1, 2])
+    assert _device_flags(argv) == [
+        "/dev/tenstorrent/1:/dev/tenstorrent/1",
+        "/dev/tenstorrent/2:/dev/tenstorrent/2",
+    ]
+    assert "/dev/tenstorrent" not in argv  # never the whole directory alongside them
+
+
+def test_scoped_ids_are_recorded_as_a_label_for_stop_to_read_back():
+    argv = _run_argv(_wire(), device_ids=[1, 2])
+    assert f"{container.DEVICES_LABEL}=1,2" in argv
+
+
+def test_no_ids_keeps_the_whole_directory_and_writes_no_devices_label():
+    argv = _run_argv(_wire())
+    assert _device_flags(argv) == ["/dev/tenstorrent"]
+    assert not [a for a in argv if a.startswith(f"{container.DEVICES_LABEL}=")]
+
+
+def test_a_single_chip_scope_adds_the_generic_mesh_graph_descriptor():
+    """One ASIC of a fused board (half a P300) reports its real board type, which tt-metal
+    cannot match to a preset -- without a descriptor it refuses to open the mesh at all."""
+    argv = _run_argv(_wire(serve_profiles=_SINGLE_CHIP), device_ids=[3])
+    assert ("TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/"
+            "p150_mesh_graph_descriptor.textproto") in argv
+
+
+def test_a_multi_chip_scope_does_not_override_the_real_fabric_topology():
+    argv = _run_argv(_wire(), device_ids=[0, 1, 2, 3])
+    assert not [a for a in argv if a.startswith("TT_MESH_GRAPH_DESC_PATH=")]
+
+
+def test_an_author_set_mesh_graph_descriptor_is_never_overridden():
+    profiles = json.loads(json.dumps(_SINGLE_CHIP))
+    profiles[0]["env"] = {"TT_MESH_GRAPH_DESC_PATH": "/custom/mine.textproto"}
+    argv = _run_argv(_wire(serve_profiles=profiles), device_ids=[0])
+    assert "TT_MESH_GRAPH_DESC_PATH=/custom/mine.textproto" in argv
+    assert len([a for a in argv if a.startswith("TT_MESH_GRAPH_DESC_PATH=")]) == 1
+
+
+def test_the_reset_container_is_scoped_to_the_same_ids():
+    argv = container.compose_reset_mesh("img", device_ids=[2, 3])
+    assert _device_flags(argv) == [
+        "/dev/tenstorrent/2:/dev/tenstorrent/2",
+        "/dev/tenstorrent/3:/dev/tenstorrent/3",
+    ]

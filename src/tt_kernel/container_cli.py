@@ -966,16 +966,27 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     with console.checklist() as view:
         view.instant("host ready", _host_summary(host_reqs))
         view.instant(f"image {container.image_ref(manifest)}")
-        if container.container_exists(name):
+        if container.container_exists(name) and not container.is_running(name):
             # Not running, but holding the name — `docker run` creates the container before
             # it binds ports, so a failed start (a busy port, usually) leaves one in
-            # "Created". Refusing here would make the obvious retry impossible.
+            # "Created". Refusing here would make the obvious retry impossible. The
+            # `not is_running` guard matters under concurrency: a container that appeared
+            # between the check above and now belongs to another invocation that WON, and
+            # force-removing it would kill a live serve.
             view.begin(f"removing a stopped {name}")
             container.remove(name, force=True)
             view.done()
         view.begin(f"starting {name}")
 
         def _start(ids: Optional[List[int]]) -> None:
+            # Re-checked HERE, under the allocation lock: two concurrent serves of the same
+            # model+profile both pass the `is_running` check far above, and without this the
+            # loser would fail on docker's name conflict and then, in the handler below,
+            # force-remove the winner's freshly started container.
+            if container.is_running(name):
+                raise ContainerCliError(
+                    f"{name} is already running. Stop it first:  tt-model stop {what}"
+                )
             run_argv = container.compose_run(manifest, profile, argv, env, detach=True,
                                              device_ids=ids,
                                              rootless=container.docker_is_rootless())
@@ -985,8 +996,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
             if requested_device_ids is not None:
                 # Same lock the auto-picker uses (container.device_allocation), held across
                 # the same "check free -> launch" window -- an explicit pin still has to
-                # coordinate with a concurrent stop()'s remove-then-reset sequence, or with
-                # another concurrent serve, even though it skips the picker itself.
+                # coordinate with a concurrent stop()'s teardown, or with another concurrent
+                # serve, even though it skips the picker itself.
                 with container.alloc_lock():
                     container.ensure_devices_free(requested_device_ids)
                     _start(requested_device_ids)
@@ -996,8 +1007,10 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                 with container.device_allocation(chip_count) as picked_ids:
                     _start(picked_ids)
         except container.ContainerError:
-            # Leave no half-created container behind to block the next attempt.
-            if container.container_exists(name):
+            # Leave no half-created container behind to block the next attempt -- but never
+            # remove one that is RUNNING: under a concurrent start that container is the
+            # other invocation's, and this one failing is not a licence to kill it.
+            if container.container_exists(name) and not container.is_running(name):
                 container.remove(name, force=True)
             raise
         view.done("container started")

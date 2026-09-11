@@ -42,7 +42,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -372,17 +371,22 @@ def _claimed_devices(all_ids: Sequence[int]) -> Optional[Set[int]]:
     Host-wide by design, not scoped to ``label={LABEL}``: the UMD lock this whole scheme
     protects against is shared through ``--ipc host`` regardless of who launched the other
     container, so a tt-studio or tt-inference-server container has to count too. None means
-    docker itself could not be asked (daemon unreachable, unparsable output) -- callers must
-    refuse to guess then, not silently proceed as if nothing were claimed.
+    docker itself could not be asked (not installed, daemon unreachable, unparsable output)
+    -- callers must refuse to guess then, not silently proceed as if nothing were claimed.
+    ``OSError`` is normalised into that same None: with no docker binary at all ``_run``
+    raises rather than returning non-zero, and ``serve --print`` has to keep working there.
     """
-    ps = _run(["docker", "ps", "-q"], capture_output=True, text=True)
-    if ps.returncode != 0:
-        return None
-    ids = ps.stdout.split()
-    if not ids:
-        return set()
-    inspected = _run(["docker", "inspect", *ids], capture_output=True, text=True)
-    if inspected.returncode != 0:
+    try:
+        ps = _run(["docker", "ps", "-q"], capture_output=True, text=True)
+        if ps.returncode != 0:
+            return None
+        ids = ps.stdout.split()
+        if not ids:
+            return set()
+        inspected = _run(["docker", "inspect", *ids], capture_output=True, text=True)
+        if inspected.returncode != 0:
+            return None
+    except OSError:
         return None
     try:
         containers = json.loads(inspected.stdout)
@@ -395,12 +399,17 @@ def _claimed_devices(all_ids: Sequence[int]) -> Optional[Set[int]]:
 
 
 def all_device_ids(dev_root: Optional[Path] = None) -> List[int]:
-    """Every numbered chip node under ``/dev/tenstorrent``, sorted."""
+    """Every numbered chip node under ``/dev/tenstorrent``, sorted.
+
+    An unreadable/absent root is ``DeviceScanUnavailable``, not a plain ``ContainerError``:
+    "this machine has no tt devices to inventory" is the same class of not-knowing as "docker
+    could not be asked", and ``serve --print`` has to stay usable on a machine with no card.
+    """
     root = dev_root or Path(TT_DEVICE)
     try:
         return sorted(int(p.name) for p in root.iterdir() if p.name.isdigit())
     except OSError as e:
-        raise ContainerError(f"could not list {root}: {e}") from e
+        raise DeviceScanUnavailable(f"could not list {root}: {e}") from e
 
 
 def pick_free_devices(count: int, *, dev_root: Optional[Path] = None) -> List[int]:
@@ -430,14 +439,25 @@ def pick_free_devices(count: int, *, dev_root: Optional[Path] = None) -> List[in
     return free[:count]
 
 
-def ensure_devices_free(device_ids: Sequence[int]) -> None:
-    """Refuse an explicit ``--device-id`` pin that collides with a chip already in use.
+def ensure_devices_free(device_ids: Sequence[int], *,
+                        dev_root: Optional[Path] = None) -> None:
+    """Refuse an explicit ``--device-id`` pin that names a chip this host doesn't have, or
+    one already in use.
 
-    There is no picker to avoid the collision automatically for an explicit pin, so this is
-    the same host-wide scan ``pick_free_devices`` uses, surfaced so the operator's choice
-    still gets checked rather than trusted blind.
+    There is no picker to avoid either mistake automatically for an explicit pin, so this is
+    the same host inventory + host-wide scan ``pick_free_devices`` uses, surfaced so the
+    operator's choice still gets checked rather than trusted blind: without the inventory
+    check, ``--device-id 99`` on a four-chip box passes every earlier validation and fails
+    minutes later inside docker, which is exactly the late failure the flag should prevent.
     """
-    claimed = _claimed_devices(device_ids)
+    inventory = all_device_ids(dev_root)
+    unknown = sorted(set(device_ids) - set(inventory))
+    if unknown:
+        raise ContainerError(
+            f"--device-id names chip(s) {', '.join(map(str, unknown))}, which this host does "
+            f"not have (it has {', '.join(map(str, inventory)) or 'none'})"
+        )
+    claimed = _claimed_devices(inventory)
     if claimed is None:
         raise DeviceScanUnavailable(
             "could not determine which tt devices are already in use (docker ps/inspect "
@@ -448,46 +468,49 @@ def ensure_devices_free(device_ids: Sequence[int]) -> None:
         raise ContainerError(f"chip(s) {', '.join(map(str, busy))} already in use by another container")
 
 
-_DEVICE_ALLOC_LOCK_PATH = Path(tempfile.gettempdir()) / "tt-model-device-alloc.lock"
 _DEVICE_ALLOC_LOCK_TIMEOUT_S = 5.0
 
 
-def _open_alloc_lock() -> int:
-    """The host-shared lock file, world read/write.
+def _open_alloc_lock(dev_root: Optional[Path] = None) -> int:
+    """A read-only descriptor on the device directory, to ``flock`` as the allocation lock.
 
-    Shared across users deliberately: more than one person can run ``tt-model serve`` on
-    the same box, and the race this guards against (two invocations both seeing the same
-    chip as free) is exactly the one that crosses users.
-
-    ``O_NOFOLLOW`` refuses to open the path if it is ever a symlink instead of a regular
-    file, and the permission widen happens via ``fchmod`` on the already-open descriptor
-    rather than a second path-based ``chmod`` -- a predictable, world-writable path in
-    ``/tmp`` is otherwise exactly the setup for another user to plant a symlink here
-    pointing at a file you own, and have this function unlock/widen it for them.
+    The lock target is ``/dev/tenstorrent`` ITSELF rather than a file of our own, because
+    every alternative was worse. A path under ``tempfile.gettempdir()`` is not actually
+    host-shared -- ``TMPDIR`` is per-user, so two users would take two DIFFERENT locks and
+    the cross-user guarantee this exists for would silently not hold. A fixed, world-writable
+    path in ``/tmp`` is host-shared but needs permissive mode bits and is a standing invitation
+    to plant a symlink at a predictable name. The device directory has none of those problems:
+    it is the canonical, per-host location of the very resource being arbitrated, it is created
+    by the driver (root-owned, ``0755``), and ``flock`` needs no write access at all -- so there
+    is nothing to create, nothing to chmod, and nothing an unprivileged user can redirect.
     """
-    fd = os.open(
-        str(_DEVICE_ALLOC_LOCK_PATH), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o666
-    )
-    try:
-        os.fchmod(fd, 0o666)  # in case an earlier run created it stricter
-    except OSError:
-        pass
-    return fd
+    root = dev_root or Path(TT_DEVICE)
+    return os.open(str(root), os.O_RDONLY)
 
 
 @contextlib.contextmanager
-def alloc_lock(timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S):
+def alloc_lock(timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S,
+               dev_root: Optional[Path] = None):
     """The host-shared flock guarding every device-allocation-sensitive critical section.
 
     Used both by ``device_allocation`` (check-free -> pick -> docker run) and by ``stop``
-    (remove -> dirty-mesh reset): a killed container's claimed chip(s) stop appearing in the
-    scan the instant ``docker rm`` runs, so without holding this same lock across removal AND
-    the reset that follows, a concurrent serve could pick one of those chips and start using
-    it before the reset (which targets it by id) actually runs. Bounded on purpose -- a caller
-    that cannot get the lock within ``timeout_s`` fails fast rather than risking a second,
+    (stop -> remove -> dirty-mesh reset): a killed container's claimed chip(s) stop appearing
+    in the scan the moment it stops running, so without holding this same lock across the
+    whole teardown, a concurrent serve could pick one of those chips and start using it before
+    the reset (which targets it by id) actually runs -- and the reset would then wipe the new
+    container's live mesh. Bounded on purpose for the callers that ACQUIRE it: one that cannot
+    get in within ``timeout_s`` fails fast with a retry message rather than risking a second,
     quieter version of the hang this whole mechanism exists to prevent.
+
+    A host with no device root at all (no driver, no card, CI) has nothing to arbitrate, so
+    the section runs unlocked there rather than failing: the callers that actually need a
+    device still fail on the inventory itself, with a message about THAT.
     """
-    fd = _open_alloc_lock()
+    try:
+        fd = _open_alloc_lock(dev_root)
+    except OSError:
+        yield
+        return
     deadline = time.monotonic() + timeout_s
     while True:
         try:
@@ -518,7 +541,7 @@ def device_allocation(count: int, *, dev_root: Optional[Path] = None,
     devices. This just closes the window where two concurrent ``tt-model serve`` calls could
     both see the same chip as free before either container exists yet.
     """
-    with alloc_lock(timeout_s):
+    with alloc_lock(timeout_s, dev_root=dev_root):
         yield pick_free_devices(count, dev_root=dev_root)
 
 
@@ -966,29 +989,30 @@ def stop(name: str, image: Optional[str] = None) -> bool:
     was_running = bool(parts) and parts[0] == "true"
     device_ids = _parse_device_ids(parts[1]) if len(parts) > 1 else None
 
-    _run(["docker", "stop", "--timeout", str(STOP_TIMEOUT_S), name],
-         capture_output=True, text=True)
+    # Held across the WHOLE teardown, starting before `docker stop`: this container drops out
+    # of the `docker ps` scan the moment it stops running, not when it is removed, so every
+    # step after the stop is a window in which a concurrent serve could claim these chips --
+    # and if the shutdown turns out to have been dirty, the reset below (scoped to those same
+    # ids) would then wipe the new container's live mesh. Taking the lock only around
+    # remove+reset left exactly that gap. The cost is that a stop holds the lock for as long
+    # as the server takes to exit (up to STOP_TIMEOUT_S in the pathological case), so a serve
+    # racing a slow stop gets `alloc_lock`'s bounded timeout and a retry message rather than a
+    # corrupted mesh.
+    with alloc_lock():
+        _run(["docker", "stop", "--timeout", str(STOP_TIMEOUT_S), name],
+             capture_output=True, text=True)
 
-    clean = True
-    if was_running:
-        code = _run(
-            ["docker", "inspect", "--format", "{{.State.ExitCode}}", name],
-            capture_output=True, text=True,
-        ).stdout.strip()
-        clean = code not in (SIGKILL_EXIT_CODE, "")
-
-    if not clean and image:
-        # Held across BOTH steps deliberately: the instant `docker rm` runs, this
-        # container's claimed chip(s) stop showing up in the scan, so a concurrent serve's
-        # picker could grab one and start using it before the reset below actually runs --
-        # the reset would then stomp on that brand-new container's live mesh. A clean
-        # shutdown skips the lock entirely (a mesh closed by the server itself is genuinely
-        # free the moment it's removed, so there's no race to protect against).
-        with alloc_lock():
-            _run(["docker", "rm", name], capture_output=True, text=True)
-            reset_mesh(image, device_ids=device_ids)
-    else:
+        clean = True
+        if was_running:
+            code = _run(
+                ["docker", "inspect", "--format", "{{.State.ExitCode}}", name],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            clean = code not in (SIGKILL_EXIT_CODE, "")
         _run(["docker", "rm", name], capture_output=True, text=True)
+
+        if not clean and image:
+            reset_mesh(image, device_ids=device_ids)
     return clean
 
 
