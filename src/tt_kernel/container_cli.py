@@ -22,7 +22,7 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
-from . import MANIFEST_NAME, console, container, hub, localdb, oci
+from . import MANIFEST_NAME, compat, console, container, hub, localdb, oci
 from .boot_progress import BootTracker, diagnose_boot, summarize
 from .build import BuildError, build_log_path, finalize, run_build, stage
 from .container_manifest import ContainerManifestError
@@ -197,7 +197,7 @@ def push_container(staged_dir: str, manifest: Manifest, repo_id: str) -> None:
 
 def pull_dir(repo_id: str) -> Path:
     """Where a pulled package's manifest is kept, so serve/stop can find it by id."""
-    return Path.home() / ".cache" / "tt-model" / "pulled" / repo_id.replace("/", "__")
+    return compat.cache_dir() / "pulled" / repo_id.replace("/", "__")
 
 
 def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,

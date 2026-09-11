@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence
 
-from . import MANIFEST_NAME, __version__
+from . import MANIFEST_NAME, __version__, compat
 from .container_manifest import (
     ContainerManifest,
     ContainerManifestError,
@@ -61,7 +61,7 @@ class BuildError(RuntimeError):
 
 
 def build_log_path(name: str) -> Path:
-    d = Path.home() / ".cache" / "tt-model" / "build"
+    d = compat.cache_dir() / "build"
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{name}.log"
 
