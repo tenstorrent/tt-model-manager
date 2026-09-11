@@ -206,7 +206,7 @@ def test_ordinary_flags_print_exactly_as_before(tmp_path, monkeypatch, capsys):
     put quotes around the paths, labels, mounts and ports that were already fine -- the
     docs quote this line verbatim."""
     out = _printed(tmp_path, monkeypatch, capsys, serve=dict(JSON_SERVE))
-    for fragment in ("docker run", "--device /dev/tenstorrent", "--publish 8000:8000",
+    for fragment in ("docker run", "--device /dev/tenstorrent", "--publish 20000:20000",
                      "--env HF_HOME=/hf", "--block-size 64",
                      "--mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G"):
         assert fragment in out
@@ -780,6 +780,19 @@ def test_print_never_scans_ports(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "port_is_free",
                         lambda p: pytest.fail("--print must not probe ports"))
     container_cli.serve_container(_manifest(tmp_path), print_only=True)
+
+
+def test_print_shows_the_port_a_real_run_starts_from(tmp_path, monkeypatch, capsys):
+    """The manifest says `port: 8000`. A real run ignores that and starts at 20000, so
+    the printed command must too -- otherwise `--print` shows a command that a plain
+    `tt-model serve` would never execute (and one that collides on a shared box)."""
+    monkeypatch.setattr(container, "port_is_free",
+                        lambda p: pytest.fail("--print must not probe ports"))
+    out = _printed(tmp_path, monkeypatch, capsys)
+    argv = shlex.split(out)
+    assert argv[argv.index("--publish") + 1] == "20000:20000"
+    assert argv[argv.index("--port") + 1] == "20000"
+    assert "8000" not in argv
 
 
 def test_the_cli_accepts_port_before_the_target(tmp_path, monkeypatch):
