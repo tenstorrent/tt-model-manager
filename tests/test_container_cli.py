@@ -560,12 +560,48 @@ def test_a_container_push_without_publish_lists_nothing(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(container_cli, "push_container", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: None)
+    monkeypatch.setattr(hub, "is_listed", lambda r: False)   # not previously listed
     monkeypatch.setattr(hub, "set_catalog_listing",
                         lambda repo_id, listed: calls.append(repo_id))
 
     res = runner.invoke(cli.app, ["push", str(_staged(tmp_path))])
     assert res.exit_code == 0, res.output
     assert calls == []
+
+
+def test_a_plain_push_preserves_an_existing_catalog_listing(tmp_path, monkeypatch):
+    """#96: `push` re-uploads a model card whose tag set is computed from the manifest alone
+    (no catalog tag), overwriting the frontmatter. A repo that was already listed must NOT be
+    silently delisted by a card-only re-push — only `tt-model unpublish` removes a listing."""
+    calls = []
+    monkeypatch.setattr(container_cli, "push_container", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: None)
+    monkeypatch.setattr(hub, "is_listed", lambda r: True)    # already in the catalog
+    monkeypatch.setattr(hub, "set_catalog_listing",
+                        lambda repo_id, listed: calls.append((repo_id, listed)))
+
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path))])   # no --publish
+    assert res.exit_code == 0, res.output
+    assert calls == [("raahem/qwen", True)], calls   # listing restored, not dropped
+    assert "kept" in res.output and "catalog" in res.output
+
+
+def test_is_listed_reads_the_live_catalog_tag(monkeypatch):
+    from tt_kernel import TT_MODEL_CATALOG_TAG
+
+    class _Info:
+        def __init__(self, tags): self.tags = tags
+
+    monkeypatch.setattr(hub, "_api", lambda: type("A", (), {
+        "model_info": staticmethod(lambda r: _Info(["blackhole", TT_MODEL_CATALOG_TAG]))})())
+    assert hub.is_listed("you/x") is True
+    monkeypatch.setattr(hub, "_api", lambda: type("A", (), {
+        "model_info": staticmethod(lambda r: _Info(["blackhole"]))})())
+    assert hub.is_listed("you/x") is False
+    # total: any failure (absent repo, offline, gated) reports "not listed"
+    def boom(r): raise RuntimeError("404")
+    monkeypatch.setattr(hub, "_api", lambda: type("A", (), {"model_info": staticmethod(boom)})())
+    assert hub.is_listed("you/x") is False
 
 
 def test_publish_with_private_is_a_conflict(tmp_path, monkeypatch):
