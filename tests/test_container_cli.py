@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from tt_kernel import cli, container, container_cli, hub
+from tt_kernel import cli, console, container, container_cli, hub
 from tt_kernel.container_manifest import ContainerManifest
 from tt_kernel.manifest import Manifest
 
@@ -405,6 +405,17 @@ def test_serve_walks_the_boot_landmarks_and_ends_on_a_ready_card(tmp_path, monke
     assert "org/x ready" in out
     assert "http://127.0.0.1:20000" in out and "tt-model stop org/x" in out
     assert "kv_cache_utils.py" not in out, "a raw log line reached the terminal"
+
+
+def test_ready_card_suggests_a_curl_that_actually_parses(capsys):
+    """`tt-model curl` takes a prompt, not a package id. The card used to print
+    `tt-model curl org/x "hello"`, which fails with "unexpected argument: hello"
+    the moment a user pastes it."""
+    console.console.print(container_cli._ready_card("org/x", "http://127.0.0.1:8000", "org/x"))
+    out = capsys.readouterr().out
+    assert 'tt-model curl "hello"' in out
+    assert 'tt-model curl org/x' not in out
+    assert "tt-model stop org/x" in out  # the target still belongs on stop/logs
 
 
 # ------------------------------------------------------------------ stop
