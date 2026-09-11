@@ -813,6 +813,13 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
             raise ContainerCliError(
                 f"--device-id must be a comma-separated list of integers, got {device_id!r}"
             ) from None
+        # Caught here rather than left to the count check below: a duplicate (e.g. "0,0" for
+        # a 2-chip profile) passes a bare length check while actually naming one physical
+        # chip twice, silently under-sizing the mesh the profile asked for.
+        if any(d < 0 for d in requested_device_ids) or len(set(requested_device_ids)) != len(requested_device_ids):
+            raise ContainerCliError(
+                f"--device-id must be distinct, non-negative chip indices, got {device_id!r}"
+            )
         if len(requested_device_ids) != chip_count:
             raise ContainerCliError(
                 f"--device-id gave {len(requested_device_ids)} chip(s) but profile "
@@ -901,13 +908,16 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
 
     if print_only:
         # Best-effort device pick for display: nothing is actually launched, so there is no
-        # race to protect against, and a host with no docker at all (which --print must
-        # keep working on) just falls back to showing the whole-directory form.
+        # race to protect against. A host that can't even be inspected (no docker at all,
+        # which --print must keep working on) falls back to the whole-directory form -- but
+        # a genuine "not enough free chips" refusal is real information about what a real
+        # serve would do right now, so that one is allowed to propagate rather than be
+        # papered over with a preview that doesn't reflect reality.
         preview_ids = requested_device_ids
         if preview_ids is None:
             try:
                 preview_ids = container.pick_free_devices(chip_count)
-            except container.ContainerError:
+            except container.DeviceScanUnavailable:
                 preview_ids = None
         run_argv = container.compose_run(manifest, profile, argv, env, detach=False,
                                          device_ids=preview_ids,
@@ -973,8 +983,13 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
 
         try:
             if requested_device_ids is not None:
-                container.ensure_devices_free(requested_device_ids)
-                _start(requested_device_ids)
+                # Same lock the auto-picker uses (container.device_allocation), held across
+                # the same "check free -> launch" window -- an explicit pin still has to
+                # coordinate with a concurrent stop()'s remove-then-reset sequence, or with
+                # another concurrent serve, even though it skips the picker itself.
+                with container.alloc_lock():
+                    container.ensure_devices_free(requested_device_ids)
+                    _start(requested_device_ids)
             else:
                 # Held only across "check what's free -> pick -> docker run" -- see
                 # container.device_allocation for why that's enough.

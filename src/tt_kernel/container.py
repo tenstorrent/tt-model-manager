@@ -71,6 +71,15 @@ class ContainerError(RuntimeError):
     """A docker operation that must not proceed. The message is user-facing."""
 
 
+class DeviceScanUnavailable(ContainerError):
+    """The host couldn't be inspected to see which tt devices are free (docker
+    unreachable, unparsable output) -- distinct from a successful scan finding too few
+    free chips, so a caller that can tolerate not knowing (``serve --print``'s best-effort
+    preview) can fall back for THIS reason without also swallowing a genuine "board's too
+    busy" refusal, which must still surface as an error.
+    """
+
+
 # --------------------------------------------------------------------------- preflight
 
 #: Docker < 25 does not emit an OCI layout from `docker save`, which `oci.save` requires.
@@ -407,7 +416,7 @@ def pick_free_devices(count: int, *, dev_root: Optional[Path] = None) -> List[in
     all_ids = all_device_ids(dev_root)
     claimed = _claimed_devices(all_ids)
     if claimed is None:
-        raise ContainerError(
+        raise DeviceScanUnavailable(
             "could not determine which tt devices are already in use (docker ps/inspect "
             "failed) — refusing to guess"
         )
@@ -430,7 +439,7 @@ def ensure_devices_free(device_ids: Sequence[int]) -> None:
     """
     claimed = _claimed_devices(device_ids)
     if claimed is None:
-        raise ContainerError(
+        raise DeviceScanUnavailable(
             "could not determine which tt devices are already in use (docker ps/inspect "
             "failed) — refusing to guess"
         )
@@ -467,16 +476,16 @@ def _open_alloc_lock() -> int:
 
 
 @contextlib.contextmanager
-def device_allocation(count: int, *, dev_root: Optional[Path] = None,
-                      timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S):
-    """Claim ``count`` free tt devices for one ``docker run``, race-free across processes.
+def alloc_lock(timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S):
+    """The host-shared flock guarding every device-allocation-sensitive critical section.
 
-    Held only across "check what's free -> pick -> docker run": the real, indefinite
-    exclusion is UMD's own per-chip lock, taken once the container actually opens its
-    devices. This just closes the window where two concurrent ``tt-model serve`` calls could
-    both see the same chip as free before either container exists yet. Bounded on purpose --
-    a serve that cannot get the lock within ``timeout_s`` fails fast rather than risking a
-    second, quieter version of the hang this whole mechanism exists to prevent.
+    Used both by ``device_allocation`` (check-free -> pick -> docker run) and by ``stop``
+    (remove -> dirty-mesh reset): a killed container's claimed chip(s) stop appearing in the
+    scan the instant ``docker rm`` runs, so without holding this same lock across removal AND
+    the reset that follows, a concurrent serve could pick one of those chips and start using
+    it before the reset (which targets it by id) actually runs. Bounded on purpose -- a caller
+    that cannot get the lock within ``timeout_s`` fails fast rather than risking a second,
+    quieter version of the hang this whole mechanism exists to prevent.
     """
     fd = _open_alloc_lock()
     deadline = time.monotonic() + timeout_s
@@ -488,15 +497,29 @@ def device_allocation(count: int, *, dev_root: Optional[Path] = None,
             if time.monotonic() >= deadline:
                 os.close(fd)
                 raise ContainerError(
-                    "timed out waiting for another `tt-model serve` to finish picking a "
-                    "device; retry in a moment"
+                    "timed out waiting for another `tt-model serve`/`stop` to finish with "
+                    "the device allocation lock; retry in a moment"
                 )
             time.sleep(0.1)
     try:
-        yield pick_free_devices(count, dev_root=dev_root)
+        yield
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+@contextlib.contextmanager
+def device_allocation(count: int, *, dev_root: Optional[Path] = None,
+                      timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S):
+    """Claim ``count`` free tt devices for one ``docker run``, race-free across processes.
+
+    Held only across "check what's free -> pick -> docker run": the real, indefinite
+    exclusion is UMD's own per-chip lock, taken once the container actually opens its
+    devices. This just closes the window where two concurrent ``tt-model serve`` calls could
+    both see the same chip as free before either container exists yet.
+    """
+    with alloc_lock(timeout_s):
+        yield pick_free_devices(count, dev_root=dev_root)
 
 
 def _require_container(m: Manifest):
@@ -953,10 +976,19 @@ def stop(name: str, image: Optional[str] = None) -> bool:
             capture_output=True, text=True,
         ).stdout.strip()
         clean = code not in (SIGKILL_EXIT_CODE, "")
-    _run(["docker", "rm", name], capture_output=True, text=True)
 
     if not clean and image:
-        reset_mesh(image, device_ids=device_ids)
+        # Held across BOTH steps deliberately: the instant `docker rm` runs, this
+        # container's claimed chip(s) stop showing up in the scan, so a concurrent serve's
+        # picker could grab one and start using it before the reset below actually runs --
+        # the reset would then stomp on that brand-new container's live mesh. A clean
+        # shutdown skips the lock entirely (a mesh closed by the server itself is genuinely
+        # free the moment it's removed, so there's no race to protect against).
+        with alloc_lock():
+            _run(["docker", "rm", name], capture_output=True, text=True)
+            reset_mesh(image, device_ids=device_ids)
+    else:
+        _run(["docker", "rm", name], capture_output=True, text=True)
     return clean
 
 

@@ -284,6 +284,23 @@ def test_serve_picks_the_named_profile(tmp_path, monkeypatch):
     assert "tt-model-my-model-p150x2" in ran[0]
 
 
+def test_device_id_rejects_a_duplicate_index(tmp_path):
+    """"0,0" passes a bare length check while actually naming one physical chip twice,
+    silently under-sizing whatever mesh the profile asked for."""
+    with pytest.raises(container_cli.ContainerCliError, match="distinct"):
+        container_cli.serve_container(_manifest(tmp_path), print_only=True, device_id="0,0")
+
+
+def test_device_id_rejects_a_negative_index(tmp_path):
+    with pytest.raises(container_cli.ContainerCliError, match="distinct"):
+        container_cli.serve_container(_manifest(tmp_path), print_only=True, device_id="-1,0")
+
+
+def test_device_id_still_enforces_the_chip_count_once_ids_are_valid(tmp_path):
+    with pytest.raises(container_cli.ContainerCliError, match="needs 4"):
+        container_cli.serve_container(_manifest(tmp_path), print_only=True, device_id="0,1")
+
+
 def test_an_unknown_profile_is_refused_with_the_available_ones(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "running", lambda name=None: [])
     with pytest.raises(container_cli.ContainerCliError, match="p150x4"):
