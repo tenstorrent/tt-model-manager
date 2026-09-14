@@ -923,16 +923,25 @@ def retag_to_digest(staged: "Staged") -> str:
     return final
 
 
-def freeze_from_image(image: str) -> str:
+def freeze_from_image(image: str, *, exclude: Sequence[str] = ()) -> str:
     """The exact python env inside the built image, as a requirements lock.
 
     This is what turns the FIRST build of a model (which resolves live) into every later
     build being reproducible: commit the result and name it under ``runtime.lock``.
+
+    Only what an index can serve again goes in. The launchers also install packages from
+    local sources inside the image -- ttnn editable from /opt/tt-metal, the plugin
+    checkout, the model's extension, local wheels -- and those carry a PEP 610
+    ``direct_url.json``; their versions exist nowhere else (ttnn's scm version even moves
+    with every commit of the tree), so pinning them makes the lock unsatisfiable on the
+    very next rebuild. ``exclude`` names what the kind rebuilds regardless of the lock
+    (vLLM's empty-target sdist build, whose ``+empty`` version is on no index either).
     """
     code = (
         "import importlib.metadata as md\n"
         "for d in sorted(md.distributions(), key=lambda d: (d.metadata['Name'] or '').lower()):\n"
-        "    print(f\"{d.metadata['Name']}=={d.version}\")\n"
+        "    origin = 'local' if d.read_text('direct_url.json') is not None else 'index'\n"
+        "    print(f\"{d.metadata['Name']}=={d.version}\\t{origin}\")\n"
     )
     r = subprocess.run(
         ["docker", "run", "--rm", "--entrypoint", "/opt/tt-venv/bin/python", image, "-c", code],
@@ -940,7 +949,36 @@ def freeze_from_image(image: str) -> str:
     )
     if r.returncode != 0:
         raise BuildError(f"could not freeze the image env: {r.stderr[-800:]}")
-    return r.stdout
+    return lock_from_freeze(r.stdout, exclude=exclude)
+
+
+def _dist_key(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def lock_from_freeze(freeze: str, *, exclude: Sequence[str] = ()) -> str:
+    """Turn the in-image freeze into a lock ``uv pip install -r`` can satisfy.
+
+    Each freeze line is ``name==version`` optionally followed by a tab and ``local`` or
+    ``index`` (how the distribution got there). Dropped: local-origin distributions, the
+    names in ``exclude``, and any repeat of a name already emitted -- a tree that carries a
+    stale egg-info beside its editable install freezes as two ttnn pins, which no resolver
+    can satisfy.
+    """
+    skip = {_dist_key(n) for n in exclude}
+    seen: set = set()
+    out: List[str] = []
+    for line in freeze.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        pin, _, origin = line.partition("\t")
+        key = _dist_key(pin.split("==", 1)[0])
+        if origin.strip() == "local" or key in skip or key in seen:
+            continue
+        seen.add(key)
+        out.append(pin)
+    return "".join(f"{pin}\n" for pin in out)
 
 
 def _https_repo_url(repo: str) -> Optional[str]:
@@ -1168,7 +1206,11 @@ def finalize(staged: Staged, *, echo: Optional[Callable[[str], None]] = None) ->
     retag_to_digest(staged)
 
     lock = staged.ctx / "requirements.lock"
-    lock_text = lock.read_text() if lock.exists() else freeze_from_image(staged.image)
+    if lock.exists():
+        lock_text = lock.read_text()
+    else:
+        from .launchers import launcher_for
+        lock_text = freeze_from_image(staged.image, exclude=launcher_for(m.kind).LOCK_EXCLUDES)
     (out / "requirements.lock").write_text(lock_text)
     m.runtime["lock"] = "requirements.lock"
 
