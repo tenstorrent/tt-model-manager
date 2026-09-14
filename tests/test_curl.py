@@ -14,7 +14,8 @@ import shlex
 import pytest
 from typer.testing import CliRunner
 
-from tt_kernel import cli, localdb, runtime
+from tt_kernel import cli, container_cli, localdb, runtime
+from tt_kernel.container_manifest import ContainerManifest
 
 runner = CliRunner()
 MODEL = "unsloth/Llama-3.2-3B-Instruct"
@@ -149,3 +150,59 @@ def test_print_still_works_with_nothing_serving(no_server, monkeypatch):
     monkeypatch.setattr(localdb, "all_entries", lambda: [{"repo_id": "a/b", "weights": MODEL}])
     res = runner.invoke(cli.app, ["curl", "hello", "--print"])
     assert res.exit_code == 0 and _body(res.stdout)["model"] == MODEL
+
+
+# ------------------------------------------------------------------ non-chat (tt-dit-server) packages
+DIT_REPO = "you/my-diffusion-model"
+
+
+def _pulled(monkeypatch, kind: str, repo_id: str = DIT_REPO, weights: str = "org/Weights"):
+    """A pulled container package of the given kind, as `localdb` + the pulled manifest see it."""
+    from test_container_manifest import BASE
+    from test_tt_dit_server_kind import DIT_BASE
+
+    raw = json.loads(json.dumps(DIT_BASE if kind == "tt-dit-server" else BASE))
+    raw.update({"repo": repo_id, "name": repo_id.split("/")[1], "weights": weights, "kind": kind})
+    m = ContainerManifest.model_validate(raw)
+    m.validate_semantics()
+    wire = m.to_wire(image_tag="tt-model/x:abc", tt_metal_version="0.72.1", tt_kernel_version="0.1.0")
+    monkeypatch.setattr(localdb, "all_entries", lambda: [{"repo_id": repo_id, "container": True}])
+    monkeypatch.setattr(container_cli, "load_pulled", lambda rid: wire if rid == repo_id else None)
+
+
+def test_curl_refuses_to_post_a_chat_body_at_a_dit_server(monkeypatch):
+    """The dit apps answer /v1/models like vLLM, so discovery 'works' and the chat body
+    404s. Name the kind and the endpoint that does exist instead."""
+    monkeypatch.setattr(runtime, "list_models", lambda *a, **k: ["org/Weights"])
+    _pulled(monkeypatch, "tt-dit-server")
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: pytest.fail("posted a chat body"))
+    res = runner.invoke(cli.app, ["curl", "hello"])
+    assert res.exit_code == 1
+    assert "serves tt-dit-server" in res.stderr
+    assert f"curl {runtime.DEFAULT_BASE_URL}/v1/health" in res.stderr
+    assert f"huggingface.co/{DIT_REPO}" in res.stderr
+
+
+def test_curl_names_the_dit_server_even_before_it_is_up(no_server, monkeypatch):
+    # Nothing listening and the only pulled package is a dit server: the old message was
+    # "no bundle is installed", which is false and points nowhere.
+    _pulled(monkeypatch, "tt-dit-server")
+    res = runner.invoke(cli.app, ["curl", "hello", "--print"])
+    assert res.exit_code == 1
+    assert "serves tt-dit-server" in res.stderr and "/v1/health" in res.stderr
+
+
+def test_curl_still_posts_chat_to_a_vllm_container_package(monkeypatch):
+    monkeypatch.setattr(runtime, "list_models", lambda *a, **k: ["org/Weights"])
+    _pulled(monkeypatch, "vllm-plugin")
+    res = runner.invoke(cli.app, ["curl", "hello", "--print"])
+    assert res.exit_code == 0
+    assert _body(res.stdout)["model"] == "org/Weights"
+
+
+def test_explicit_model_is_the_escape_hatch_for_a_dit_server(monkeypatch):
+    monkeypatch.setattr(runtime, "list_models", lambda *a, **k: ["org/Weights"])
+    _pulled(monkeypatch, "tt-dit-server")
+    res = runner.invoke(cli.app, ["curl", "hello", "--model", "org/Weights", "--print"])
+    assert res.exit_code == 0
+    assert _body(res.stdout)["model"] == "org/Weights"

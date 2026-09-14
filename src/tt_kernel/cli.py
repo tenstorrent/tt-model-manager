@@ -1364,6 +1364,48 @@ def _discover_model(served: List[str]) -> "tuple[Optional[str], Optional[str]]":
     return None, None
 
 
+# Container kinds that front an OpenAI chat endpoint, which is all `curl` knows how to
+# speak. Anything else (a diffusion or audio server) has routes of its own, and a chat
+# body posted at it just 404s.
+_CHAT_KINDS = frozenset({"vllm-plugin", "vllm-fork"})
+
+
+def _non_chat_package_hint(base: str, served: List[str]) -> Optional[str]:
+    """The message to print instead of a chat request when the package `curl` would hit
+    is not a chat server — else None.
+
+    A pulled ``kind: tt-dit-server`` package answers ``/v1/models`` like everyone else, so
+    model discovery "succeeds" and the chat body 404s with nothing to say about why. The
+    kind is in the pulled manifest; match it against what the server reports (its weights
+    id or its name), or — with nothing listening — take it when it is the only thing pulled.
+    """
+    from . import container_cli
+
+    hits, others = [], 0
+    for e in localdb.all_entries():
+        m = container_cli.load_pulled(e["repo_id"]) if e.get("container") else None
+        if m is None or m.container.kind in _CHAT_KINDS:
+            others += 1
+            continue
+        weights = m.weights.repo_id if m.weights else None
+        matched = any(s == weights or m.name in s for s in served)
+        hits.append((e["repo_id"], m.container.kind, matched))
+    if served:
+        chosen = next(((r, k) for r, k, matched in hits if matched), None)
+    else:
+        chosen = (hits[0][0], hits[0][1]) if len(hits) == 1 and not others else None
+    if not chosen:
+        return None
+    repo_id, kind = chosen
+    return (
+        f"{repo_id} serves {kind}, not chat completions, so `tt-model curl` cannot talk to it.\n"
+        f"  This package serves {kind}; try:  curl {base}/v1/health\n"
+        f"                                    curl {base}/v1/models\n"
+        f"  Its own routes (e.g. /v1/audio/speech, /v1/images/generations) are in its model "
+        f"card:  https://huggingface.co/{repo_id}"
+    )
+
+
 @app.command(name="curl", context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
              rich_help_panel="Run a model")
 def curl_cmd(
@@ -1396,6 +1438,10 @@ def curl_cmd(
     # One probe, used twice: it names the model AND tells us whether anything is listening,
     # so a down server is reported as such instead of as a bare curl exit code.
     served = runtime.list_models(base)
+    # --model is the escape hatch: name one and the request goes out as written.
+    hint = None if model else _non_chat_package_hint(base, served)
+    if hint:
+        raise _err(hint)
     resolved, source = (model, "--model") if model else _discover_model(served)
     if not resolved:
         installed = [e for e in localdb.all_entries() if e.get("weights")]
