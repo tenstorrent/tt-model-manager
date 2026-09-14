@@ -45,10 +45,24 @@ def test_arch_mismatch_is_fatal():
     assert report.issues[0].field == "arch"
 
 
-def test_device_count_mismatch_is_forceable():
-    report = compare(_manifest(device_count=1), _env(device_count=2))
+def test_bundle_needing_more_devices_than_host_is_forceable():
+    # The mesh the model was authored for cannot be formed on too few chips: keep warning.
+    report = compare(_manifest(device_count=4), _env(device_count=1))
     assert report.forceable
     assert any(i.field == "device_count" for i in report.issues)
+
+
+def test_bundle_needing_fewer_devices_than_host_is_allowed():
+    # #65: a 1-device model on a 4-card box is normal — it runs on a subset. No warning,
+    # no --force. Regression guard: this used to be flagged as a forceable mismatch.
+    report = compare(_manifest(device_count=1), _env(device_count=4))
+    assert report.compatible
+    assert not any(i.field == "device_count" for i in report.issues)
+
+
+def test_matching_device_count_is_clean():
+    report = compare(_manifest(device_count=4), _env(device_count=4))
+    assert report.compatible
 
 
 def test_unknown_local_fields_do_not_block():

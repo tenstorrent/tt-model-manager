@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from tt_kernel import cli, container, container_cli, hub
+from tt_kernel import cli, console, container, container_cli, hub
 from tt_kernel.container_manifest import ContainerManifest
 from tt_kernel.manifest import Manifest
 
@@ -212,7 +212,7 @@ def test_ordinary_flags_print_exactly_as_before(tmp_path, monkeypatch, capsys):
     docs quote this line verbatim."""
     out = _printed(tmp_path, monkeypatch, capsys, serve=dict(JSON_SERVE))
     for fragment in ("docker run", "--device /dev/tenstorrent/0:/dev/tenstorrent/0",
-                     "--publish 8000:8000",
+                     "--publish 20000:20000",
                      "--env HF_HOME=/hf", "--block-size 64",
                      "--mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G"):
         assert fragment in out
@@ -649,13 +649,23 @@ def test_serve_walks_the_boot_landmarks_and_ends_on_a_ready_card(tmp_path, monke
     assert "kv_cache_utils.py" not in out, "a raw log line reached the terminal"
 
 
+def test_ready_card_suggests_a_curl_that_actually_parses(capsys):
+    """`tt-model curl` takes a prompt, not a package id. The card used to print
+    `tt-model curl org/x "hello"`, which fails with "unexpected argument: hello"
+    the moment a user pastes it."""
+    console.console.print(container_cli._ready_card("org/x", "http://127.0.0.1:8000", "org/x"))
+    out = capsys.readouterr().out
+    assert 'tt-model curl "hello"' in out
+    assert 'tt-model curl org/x' not in out
+    assert "tt-model stop org/x" in out  # the target still belongs on stop/logs
+
+
 # ------------------------------------------------------------------ stop
 
 
 def test_stop_reports_a_clean_shutdown(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(container, "running", lambda name=None: [{"name": name}])
-    monkeypatch.setattr(container, "stop",
-                        lambda name, image=None: True)
+    monkeypatch.setattr(container, "is_running", lambda name: True)
+    monkeypatch.setattr(container, "stop", lambda name, image=None: True)
     container_cli.stop_container(_manifest(tmp_path))
     out = capsys.readouterr().out
     assert "stopped 1" in out
@@ -663,15 +673,14 @@ def test_stop_reports_a_clean_shutdown(tmp_path, monkeypatch, capsys):
 
 
 def test_stop_warns_loudly_when_a_kill_forced_a_mesh_reset(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(container, "running", lambda name=None: [{"name": name}])
-    monkeypatch.setattr(container, "stop",
-                        lambda name, image=None: False)
+    monkeypatch.setattr(container, "is_running", lambda name: True)
+    monkeypatch.setattr(container, "stop", lambda name, image=None: False)
     container_cli.stop_container(_manifest(tmp_path))
     assert "mesh was left dirty" in capsys.readouterr().out
 
 
 def test_stopping_nothing_says_so_rather_than_failing(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "is_running", lambda name: False)
     container_cli.stop_container(_manifest(tmp_path))
     assert "nothing running" in capsys.readouterr().out
 
@@ -680,15 +689,66 @@ def test_stopping_nothing_says_so_rather_than_failing(tmp_path, monkeypatch, cap
 
 
 def test_logs_without_a_running_container_says_how_to_start_one(tmp_path, monkeypatch):
-    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "is_running", lambda name: False)
     with pytest.raises(container_cli.ContainerCliError, match="tt-model serve"):
         container_cli.logs_container(_manifest(tmp_path))
 
 
+TWO_PROFILES = json.loads(json.dumps(BASE))["serve_profiles"] + [
+    {"name": "p150x2", "hardware": "p150x2", "mesh_device": "P150x2", "max_num_seqs": 8}]
+
+
+def _two_containers(tmp_path, monkeypatch, *, running: set):
+    """A package with two profiles; `docker ps --all` lists BOTH containers (one exited,
+    one running), `docker inspect` knows which is actually up."""
+    m = _manifest(tmp_path, serve_profiles=TWO_PROFILES, default_profile="p150x2")
+    both = ["tt-model-my-model-p150x4", "tt-model-my-model-p150x2"]
+    monkeypatch.setattr(container, "running",
+                        lambda name=None: [{"name": n} for n in both if not name or name in n])
+    monkeypatch.setattr(container, "is_running", lambda name: name in running)
+    return m
+
+
+def test_logs_without_profile_picks_the_running_default_over_an_exited_first_profile(
+        tmp_path, monkeypatch):
+    """p150x4 is declared first but EXITED; p150x2 is the default and RUNNING. `docker ps
+    --all` lists both, so iterating declaration order used to tail the dead one."""
+    m = _two_containers(tmp_path, monkeypatch, running={"tt-model-my-model-p150x2"})
+    asked = []
+    monkeypatch.setattr(container, "logs", lambda name, follow=False: asked.append(name) or 0)
+    container_cli.logs_container(m)
+    assert asked == ["tt-model-my-model-p150x2"]
+
+
+def test_logs_without_profile_prefers_the_default_when_both_run(tmp_path, monkeypatch):
+    m = _two_containers(tmp_path, monkeypatch,
+                        running={"tt-model-my-model-p150x4", "tt-model-my-model-p150x2"})
+    asked = []
+    monkeypatch.setattr(container, "logs", lambda name, follow=False: asked.append(name) or 0)
+    container_cli.logs_container(m)
+    assert asked == ["tt-model-my-model-p150x2"]
+
+
+def test_stop_without_profile_stops_only_what_is_running_and_says_so(
+        tmp_path, monkeypatch, capsys):
+    m = _two_containers(tmp_path, monkeypatch, running={"tt-model-my-model-p150x2"})
+    stopped = []
+    monkeypatch.setattr(container, "stop", lambda name, image=None: stopped.append(name) or True)
+    container_cli.stop_container(m)
+    assert stopped == ["tt-model-my-model-p150x2"]
+    assert "stopped 1" in capsys.readouterr().out
+
+
+def test_stop_with_only_exited_containers_reports_nothing_running(tmp_path, monkeypatch, capsys):
+    m = _two_containers(tmp_path, monkeypatch, running=set())
+    monkeypatch.setattr(container, "stop",
+                        lambda name, image=None: pytest.fail(f"stopped exited {name}"))
+    container_cli.stop_container(m)
+    assert "nothing running" in capsys.readouterr().out
+
+
 def test_profiles_marks_the_default(tmp_path, monkeypatch, capsys):
-    two = json.loads(json.dumps(BASE))["serve_profiles"] + [
-        {"name": "p150x2", "hardware": "p150x2", "mesh_device": "P150x2", "max_num_seqs": 8}]
-    m = _manifest(tmp_path, serve_profiles=two, default_profile="p150x4")
+    m = _manifest(tmp_path, serve_profiles=TWO_PROFILES, default_profile="p150x4")
     container_cli.list_containers(m)
     out = capsys.readouterr().out
     assert "p150x4" in out and "default" in out and "p150x2" in out
@@ -1024,6 +1084,19 @@ def test_print_never_scans_ports(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "port_is_free",
                         lambda p: pytest.fail("--print must not probe ports"))
     container_cli.serve_container(_manifest(tmp_path), print_only=True)
+
+
+def test_print_shows_the_port_a_real_run_starts_from(tmp_path, monkeypatch, capsys):
+    """The manifest says `port: 8000`. A real run ignores that and starts at 20000, so
+    the printed command must too -- otherwise `--print` shows a command that a plain
+    `tt-model serve` would never execute (and one that collides on a shared box)."""
+    monkeypatch.setattr(container, "port_is_free",
+                        lambda p: pytest.fail("--print must not probe ports"))
+    out = _printed(tmp_path, monkeypatch, capsys)
+    argv = shlex.split(out)
+    assert argv[argv.index("--publish") + 1] == "20000:20000"
+    assert argv[argv.index("--port") + 1] == "20000"
+    assert "8000" not in argv
 
 
 def test_the_cli_accepts_port_before_the_target(tmp_path, monkeypatch):

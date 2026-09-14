@@ -609,7 +609,17 @@ case "$1" in
     printf 'layer-bytes' > "$d/blobs/sha256/aaaaaaaaaaaaaaaa"
     tar -C "$d" -cf - .
     exit 0 ;;
-  run) echo "torch==2.11.0+cpu"; echo "vllm==0.24.0"; exit 0 ;;
+  run)
+    # the in-image freeze: name==version<TAB>origin (origin = index | local, local meaning
+    # a PEP 610 direct_url.json is present: built from a path inside the image)
+    printf 'torch==2.11.0+cpu\tindex\n'
+    printf 'ttnn==0.65.2.dev9797\tlocal\n'
+    printf 'ttnn==0.75.0rc10.dev1336+g8e18a76b7a2\tindex\n'
+    printf 'vllm==0.24.0+empty\tindex\n'
+    printf 'vllm-tt-plugin==0.1.0\tlocal\n'
+    printf 'my-runtime-extras==0.0.1\tlocal\n'
+    printf 'transformers==5.14.1\tindex\n'
+    exit 0 ;;
   image)
     # `image inspect --format {{.Id}}` — the digest the final tag is derived from — and
     # `image rm` for dropping the provisional tag.
@@ -674,8 +684,44 @@ def test_the_env_is_frozen_from_the_image_when_no_lock_was_supplied(tmp_path, mo
     out = build.finalize(staged)
 
     lock = (out / "requirements.lock").read_text()
-    assert "torch==2.11.0+cpu" in lock and "vllm==0.24.0" in lock
+    assert "torch==2.11.0+cpu" in lock and "transformers==5.14.1" in lock
     assert staged.manifest.runtime["lock"] == "requirements.lock"
+
+
+def test_the_frozen_lock_leaves_out_what_the_image_builds_itself(tmp_path, monkeypatch):
+    """The lock has to be installable by the NEXT build's `uv pip install -r`. ttnn is the
+    editable install of /opt/tt-metal (its scm version moves with every commit, and a tree
+    with a stale egg-info freezes as TWO ttnn pins), vLLM is the +empty sdist build and the
+    plugin / the model's extension are path installs: none of those is on any index. The
+    olmo3 package shipped exactly this freeze and every rebuild after a code change failed
+    with an unsatisfiable ttnn pin."""
+    _no_network(monkeypatch)
+    _fake_docker(tmp_path, monkeypatch, FAKE_DOCKER)
+    metal = _fake_metal(tmp_path)
+    staged = build.stage(_manifest_file(tmp_path, metal), out_root=tmp_path / "out")
+    build.run_build(staged)
+    out = build.finalize(staged)
+
+    lock = (out / "requirements.lock").read_text()
+    assert lock == "torch==2.11.0+cpu\ntransformers==5.14.1\n", lock
+
+
+def test_lock_from_freeze_drops_local_excluded_and_duplicate_pins():
+    freeze = (
+        "aiohttp==3.14.3\tindex\n"
+        "torch==2.11.0+cpu\tindex\n"
+        "ttnn==0.65.2.dev9797\tlocal\n"
+        "ttnn==0.75.0rc10.dev1336\tindex\n"   # stale egg-info beside the editable install
+        "vllm==0.26.0+empty\tindex\n"
+        "vllm_tt_plugin==0.1.0\tlocal\n"
+        "typing_extensions==4.16.0\tindex\n"
+        "typing-extensions==4.16.0\tindex\n"   # the same name spelled both ways
+    )
+    lock = build.lock_from_freeze(freeze, exclude=("ttnn", "vllm", "vllm-tt-plugin"))
+    assert lock == "aiohttp==3.14.3\ntorch==2.11.0+cpu\ntyping_extensions==4.16.0\n"
+    # a freeze without origin tags (older output) is taken as index-installed
+    assert build.lock_from_freeze("a==1\nb==2\n") == "a==1\nb==2\n"
+    assert build.lock_from_freeze("a==1\nb==2\n", exclude=("B",)) == "a==1\n"
 
 
 def test_an_existing_lock_is_passed_through_untouched(tmp_path, monkeypatch):

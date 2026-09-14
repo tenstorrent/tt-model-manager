@@ -872,14 +872,15 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         # port the user asked for by name fails (docker's "already allocated") rather
         # than silently moving the endpoint.
         profile = profile.model_copy(update={"port": port})
-    elif not print_only:
+    else:
         # No explicit --port: start at 20000 and walk upward past busy ports — 20000
         # taken → 20001 → 20002 ... — instead of failing. The manifest's own `port`
         # is deliberately NOT the seed: authors write 8000 there (vLLM's default, and
         # what the bare-docker CMD wrapper binds inside the image), which is exactly the
         # port that collides on a shared box. Under tt-model the host port is tt-model's
-        # call. Skipped under --print, which must stay pure and deterministic.
-        chosen = container.pick_free_port(DEFAULT_PORT)
+        # call. --print must stay pure and deterministic, so it skips the walk but still
+        # prints the 20000 a real run starts from — not the manifest's 8000.
+        chosen = DEFAULT_PORT if print_only else container.pick_free_port(DEFAULT_PORT)
         if chosen != DEFAULT_PORT:
             console.note(f"port {DEFAULT_PORT} is in use; serving on {chosen} instead",
                          marker="•")
@@ -1106,7 +1107,10 @@ def _ready_card(name: str, endpoint: str, target: str):
         [
             ("endpoint", endpoint),
             ("models", f"curl {endpoint}/v1/models"),
-            ("try", f'tt-model curl {target} "hello"'),
+            # `curl` takes a prompt, not a package id: it asks the running server which
+            # model it serves. A target here would be parsed as the prompt and "hello"
+            # rejected as an unexpected argument.
+            ("try", 'tt-model curl "hello"'),
         ],
         footer_lines=[f"[muted]tt-model logs {target} -f   ·   tt-model stop {target}[/muted]"],
     )
@@ -1115,18 +1119,27 @@ def _ready_card(name: str, endpoint: str, target: str):
 # ------------------------------------------------------------------------ stop / logs
 
 
-def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) -> None:
+def _live_containers(manifest: Manifest, profile_name: Optional[str] = None) -> List[str]:
+    """Names of this package's containers that are actually RUNNING, default profile first.
+
+    ``container.running()`` lists ``docker ps --all`` — an exited container of another
+    profile matched it too, so `logs`/`stop` without --profile could pick a dead container
+    over the live default. Only ``is_running`` (the inspect state field) answers "is it up".
+    """
     spec = manifest.container
     assert spec is not None
-    names = ([container.container_name(manifest, spec.resolve_profile(profile_name))]
-             if profile_name else
-             [container.container_name(manifest, spec.resolve_profile(n))
-              for n in spec.profile_names()])
+    if profile_name:
+        order = [profile_name]
+    else:
+        default = spec.resolved_default()
+        order = [default] + [n for n in spec.profile_names() if n != default]
+    names = [container.container_name(manifest, spec.resolve_profile(n)) for n in order]
+    return [n for n in names if container.is_running(n)]
 
+
+def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) -> None:
     stopped = 0
-    for name in names:
-        if not container.running(name):
-            continue
+    for name in _live_containers(manifest, profile_name):
         stopped += 1
         with console.step(f"stopping {name}") as st:
             clean = container.stop(name, image=container.image_ref(manifest))
@@ -1152,12 +1165,8 @@ def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) ->
 
 def logs_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                    follow: bool = False, target: Optional[str] = None) -> int:
-    spec = manifest.container
-    assert spec is not None
-    for n in ([profile_name] if profile_name else spec.profile_names()):
-        name = container.container_name(manifest, spec.resolve_profile(n))
-        if container.running(name):
-            return container.logs(name, follow=follow)
+    for name in _live_containers(manifest, profile_name):
+        return container.logs(name, follow=follow)
     what = target or manifest.name
     raise ContainerCliError(
         f"no running container for {manifest.name}. Start it:  tt-model serve {what}"
