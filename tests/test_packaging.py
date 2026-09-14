@@ -13,7 +13,7 @@ import subprocess
 from typer.testing import CliRunner
 
 from tt_kernel import cli, packaging
-from tt_kernel.manifest import Capabilities, Manifest, Mesh, Producer, WeightsRef
+from tt_kernel.manifest import Capabilities, Manifest, Mesh, Producer, Resources, WeightsRef
 
 _runner = CliRunner()
 
@@ -61,6 +61,41 @@ def test_render_run_sh_tool_parser_uses_vllm_flag_names():
     assert "--tool_parser" not in run and "--tool-parser" not in run
     assert "--enable-auto-tool-choice --tool-call-parser qwen3_coder" in run
     assert "--reasoning_parser qwen3_coder" in run
+
+
+def test_render_run_sh_emits_fabric_and_trace_region():
+    """#86: a v6 thin bundle authored for a multi-chip mesh must carry its fabric + trace region
+    into run.sh via --additional-config — the SAME JSON the v5.1 container path emits — or it
+    serves fabric-off and cannot form the mesh even though the manifest declared it."""
+    import json
+    import shlex
+
+    run = packaging.render_run_sh(_run_sh_manifest(
+        mesh=Mesh(devices=4, topology="1x4", fabric="FABRIC_1D_RING"),
+        resources=Resources(max_num_seqs=32, block_size=64, trace_region_bytes=268435648),
+    ))
+    expected = json.dumps({"tt": {"fabric_config": "FABRIC_1D_RING",
+                                  "trace_region_size": 268435648}})
+    assert f"--additional-config {shlex.quote(expected)}" in run
+    # and the JSON blob is exactly ONE argv token once the CMD=() array is lexed
+    cmd = next(l for l in run.splitlines() if l.strip().startswith("CMD=("))
+    inner = cmd[cmd.index("(") + 1:cmd.rindex(")")]
+    assert expected in shlex.split(inner)
+
+
+def test_render_run_sh_fabric_only_without_trace_region():
+    """fabric_config alone (no trace region) still emits, and omits the key it wasn't given."""
+    run = packaging.render_run_sh(_run_sh_manifest(
+        mesh=Mesh(devices=2, topology="1x2", fabric="FABRIC_1D")))
+    assert '"fabric_config": "FABRIC_1D"' in run
+    assert "trace_region_size" not in run
+
+
+def test_render_run_sh_single_chip_omits_additional_config():
+    """No fabric/trace declared => no --additional-config at all: the single-chip run.sh is
+    byte-for-byte unchanged, never an empty/degenerate config."""
+    run = packaging.render_run_sh(_run_sh_manifest())   # mesh P150, no fabric, no resources
+    assert "--additional-config" not in run
 
 
 def test_render_run_sh_no_tool_flags_without_capability():
