@@ -743,6 +743,44 @@ def resolve_target(target: str) -> Optional[Manifest]:
     return load_pulled(target)
 
 
+def precheck_capacity(manifest: Manifest, *, profile_name: Optional[str] = None,
+                      device_id: Optional[str] = None) -> None:
+    """Refuse a serve the board cannot fit, BEFORE anything slow happens.
+
+    The authoritative check runs under the allocation lock immediately before ``docker run``,
+    which is correct but late: by then the image may have been pulled or repaired and the
+    weights fetched. On a first-time ``tt-model serve org/name`` the pull happens earlier
+    still, in ``cli.serve``, so this is called from there too — a full board should cost a
+    second, not a multi-GB download of weights the serve can never use.
+
+    Non-reserving on purpose: it takes no lock and holds nothing, so it can be wrong by the
+    time the real check runs. That is fine — it only ever turns a late failure into an early
+    one. Not being able to tell yet (no docker, no card) is not a refusal.
+    """
+    spec = manifest.container
+    if spec is None:
+        return
+    try:
+        profile = spec.resolve_profile(profile_name)
+    except ValueError:
+        return  # an unknown profile is reported properly by the caller
+    chip_count = hardware_chip_count(profile.hardware or "") or 1
+    try:
+        if device_id:
+            ids = [int(x) for x in device_id.split(",")]
+        else:
+            ids = None
+    except ValueError:
+        return  # malformed --device-id is reported properly by the caller
+    try:
+        if ids is not None:
+            container.ensure_devices_free(ids)
+        else:
+            container.pick_free_devices(chip_count)
+    except container.DeviceScanUnavailable:
+        pass
+
+
 def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     print_only: bool = False, follow: bool = False,
                     extra_args: Optional[List[str]] = None,
@@ -827,19 +865,7 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
             )
 
     if not print_only:
-        # A first, NON-RESERVING look at the board, before any slow work. The authoritative
-        # check happens under the allocation lock just before `docker run`, but that is on
-        # the far side of the image repair and the weights prefetch -- so without this a
-        # full board is only reported after minutes (or, on a cold cache, hours) of
-        # downloading weights the serve was never going to be able to use. Not knowing yet
-        # (no docker, no card) is not a refusal: let the authoritative check decide.
-        try:
-            if requested_device_ids is not None:
-                container.ensure_devices_free(requested_device_ids)
-            else:
-                container.pick_free_devices(chip_count)
-        except container.DeviceScanUnavailable:
-            pass
+        precheck_capacity(manifest, profile_name=profile_name, device_id=device_id)
 
     if port is not None:
         # Override BEFORE composition, so --publish and the launcher's --port are both
@@ -1108,14 +1134,25 @@ def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) ->
     for name in names:
         if not container.running(name):
             continue
+        # Pin the identity to the container we just decided to stop: `stop` may wait on the
+        # allocation lock, and a name freed in the meantime can be taken by a replacement.
+        expect_id = container.container_id(name)
         stopped += 1
         with console.step(f"stopping {name}") as st:
-            clean = container.stop(name, image=container.image_ref(manifest))
-            st.detail("clean shutdown" if clean else "killed — mesh reset")
+            clean = container.stop(name, image=container.image_ref(manifest),
+                                   expect_id=expect_id)
+            st.detail("clean shutdown" if clean else "killed — mesh reset attempted")
         if not clean:
+            # Deliberately not "the next boot is safe" (issue #107): on a force-killed
+            # teardown `tt-smi -r` does NOT reliably recover the device — boots then wedge on
+            # the first large host→device DMA (`could only pin N of M pages`) until the host
+            # is rebooted. Promising a repair that may not have happened sends people
+            # debugging the model instead of the device.
             console.note(
-                "the server did not exit on SIGTERM, so the mesh was left dirty and has "
-                "been reset with tt-smi; the next boot is safe",
+                "the server did not exit on SIGTERM, so the mesh was left dirty. A reset was "
+                "attempted with tt-smi, but a force-killed teardown can leave the device "
+                "unusable until the HOST is rebooted (see issue #107) — if the next boot "
+                "hangs early, reboot rather than retrying",
                 marker="⚠", style="warning",
             )
     if not stopped:

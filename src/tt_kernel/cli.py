@@ -1250,6 +1250,12 @@ def serve(
         if remote is not None and remote.is_container:
             resolved = hub.latest_revision(repo_id, revision, timeout=None)
             try:
+                if not print_only:
+                    # BEFORE the pull, not just before the run: this auto-pull fetches the
+                    # image and (unless --no-weights) the weights, so a board with no room
+                    # would otherwise be reported only after that whole download.
+                    container_cli.precheck_capacity(remote, profile_name=profile,
+                                                    device_id=device_id)
                 # Forward --no-weights: on a first-time `serve org/name` this auto-pull is
                 # what would fetch the weights, so without it the flag was a no-op — the
                 # download happened here before serve_container ever saw the flag.

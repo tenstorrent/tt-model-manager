@@ -233,6 +233,48 @@ def test_ensure_devices_free_refuses_a_chip_this_host_does_not_have(tmp_path, mo
         container.ensure_devices_free([99], dev_root=_dev_root(tmp_path))
 
 
+def test_ensure_devices_free_refuses_a_node_the_rootless_identity_cannot_open(
+        tmp_path, monkeypatch):
+    """preflight deliberately tolerates a partially inaccessible board now, so without this
+    an explicit pin on one of those nodes passes every check and fails inside docker."""
+    _fake_docker(monkeypatch, ps_ids=[])
+    root = _dev_root(tmp_path, ids=(0, 1))
+    (root / "0").chmod(0o660)
+    monkeypatch.setattr(container, "_reachable_in_userns",
+                        lambda p, mode: p.name != "0")
+    with pytest.raises(container.ContainerError, match="not accessible to your uid"):
+        container.ensure_devices_free([0], dev_root=root, rootless=True)
+
+
+def test_ensure_devices_free_allows_a_reachable_node_on_the_same_board(tmp_path, monkeypatch):
+    _fake_docker(monkeypatch, ps_ids=[])
+    root = _dev_root(tmp_path, ids=(0, 1))
+    monkeypatch.setattr(container, "_reachable_in_userns",
+                        lambda p, mode: p.name != "0")
+    container.ensure_devices_free([1], dev_root=root, rootless=True)  # must not raise
+
+
+# --------------------------------------------------------------------------- alloc_lock
+
+
+def test_the_lock_is_bypassed_only_for_a_genuinely_absent_device_root(tmp_path):
+    """No driver, no card, CI: nothing to arbitrate, so the section runs unlocked."""
+    with container.alloc_lock(dev_root=tmp_path / "nope"):
+        pass  # must not raise
+
+
+def test_a_lock_we_cannot_open_is_surfaced_rather_than_silently_skipped(tmp_path, monkeypatch):
+    """A board that IS there but whose lock we cannot take means we cannot serialize --
+    running unlocked there is how two serves end up on the same chip."""
+    def denied(dev_root=None):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(container, "_open_alloc_lock", denied)
+    with pytest.raises(container.ContainerError, match="unsynchronized"):
+        with container.alloc_lock(dev_root=_dev_root(tmp_path)):
+            pytest.fail("the critical section must not run unlocked")
+
+
 # ------------------------------------------------ scan failures the preview must tolerate
 
 

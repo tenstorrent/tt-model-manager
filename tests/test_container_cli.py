@@ -284,6 +284,38 @@ def test_serve_picks_the_named_profile(tmp_path, monkeypatch):
     assert "tt-model-my-model-p150x2" in ran[0]
 
 
+def test_a_first_time_serve_checks_capacity_before_pulling_anything(tmp_path, monkeypatch):
+    """On `tt-model serve org/name` the auto-pull in cli.serve fetches the image and (unless
+    --no-weights) the weights BEFORE serve_container runs, so the capacity check has to sit
+    ahead of the pull or a full board costs a multi-GB download first."""
+    order = []
+    remote = _manifest(tmp_path)
+    monkeypatch.setattr(container_cli, "resolve_target", lambda t: None)
+    monkeypatch.setattr(hub, "fetch_manifest", lambda r, rev: remote)
+    monkeypatch.setattr(hub, "latest_revision", lambda *a, **k: "cafe1234")
+    monkeypatch.setattr(container_cli, "pull_container",
+                        lambda *a, **k: order.append("pull"))
+
+    def busy(count, dev_root=None, rootless=None):
+        order.append("capacity")
+        raise container.ContainerError("only 0 of 4 tt device(s) are free")
+
+    monkeypatch.setattr(container, "pick_free_devices", busy)
+    res = runner.invoke(cli.app, ["serve", "org/m"])
+    assert res.exit_code != 0
+    assert order == ["capacity"], f"pulled before checking the board: {order}"
+
+
+def test_the_capacity_precheck_never_refuses_on_a_host_it_cannot_read(tmp_path, monkeypatch):
+    """Non-reserving and advisory: not knowing yet (no docker, no card) must not block a
+    serve that the authoritative check under the lock would have allowed."""
+    def unavailable(count, dev_root=None, rootless=None):
+        raise container.DeviceScanUnavailable("no docker")
+
+    monkeypatch.setattr(container, "pick_free_devices", unavailable)
+    container_cli.precheck_capacity(_manifest(tmp_path))  # must not raise
+
+
 def test_a_full_board_is_refused_before_any_weights_are_downloaded(tmp_path, monkeypatch):
     """The authoritative capacity check is under the allocation lock, on the far side of the
     image repair and the weights prefetch -- so a full board would otherwise only be reported
@@ -574,7 +606,8 @@ def test_serve_walks_the_boot_landmarks_and_ends_on_a_ready_card(tmp_path, monke
 
 def test_stop_reports_a_clean_shutdown(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(container, "running", lambda name=None: [{"name": name}])
-    monkeypatch.setattr(container, "stop", lambda name, image=None: True)
+    monkeypatch.setattr(container, "stop",
+                        lambda name, image=None, expect_id=None: True)
     container_cli.stop_container(_manifest(tmp_path))
     out = capsys.readouterr().out
     assert "stopped 1" in out
@@ -583,7 +616,8 @@ def test_stop_reports_a_clean_shutdown(tmp_path, monkeypatch, capsys):
 
 def test_stop_warns_loudly_when_a_kill_forced_a_mesh_reset(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(container, "running", lambda name=None: [{"name": name}])
-    monkeypatch.setattr(container, "stop", lambda name, image=None: False)
+    monkeypatch.setattr(container, "stop",
+                        lambda name, image=None, expect_id=None: False)
     container_cli.stop_container(_manifest(tmp_path))
     assert "mesh was left dirty" in capsys.readouterr().out
 

@@ -340,8 +340,10 @@ run on a build host; a later `serve` starts the container. Around them:
   run` argv without running it (the test surface for every flag).
 - `tt-model logs you/my-model -f` — follow the boot (a cold first boot JIT-compiles kernels,
   ~10 min).
-- `tt-model stop you/my-model` — a clean `SIGTERM` closes the mesh; a `SIGKILL` would leave
-  the devices needing `tt-smi -r`.
+- `tt-model stop you/my-model` — a clean `SIGTERM` closes the mesh. A `SIGKILL` leaves it
+  dirty: `stop` then attempts a `tt-smi -r` scoped to that container's own chips, but that
+  is best-effort recovery, not a guarantee — a force-killed teardown can leave a device that
+  only a host reboot restores (issue #107).
 - `tt-model rm you/my-model` — removes a *pulled* container package, including its HF
   snapshot. `--keep-cache` keeps the JIT/weight caches for a fast re-pull;
   `--include-weights` also deletes the weights from the HF cache (off by default — they

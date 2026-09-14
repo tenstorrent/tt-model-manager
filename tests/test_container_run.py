@@ -476,7 +476,12 @@ def test_reset_mesh_runs_tt_smi_from_the_image_not_the_host():
     assert argv[-3:] == ["tt-model/x:1", "-r", "all"]
 
 
-def _fake_docker(monkeypatch, *, running_state, exit_code):
+#: What the fake container's `docker inspect` reports as its id. stop() addresses the
+#: container by id once it has one, so assertions match on this rather than the name.
+FAKE_ID = "c0ffee1234"
+
+
+def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="", cid=FAKE_ID):
     calls = []
 
     class R:
@@ -486,11 +491,10 @@ def _fake_docker(monkeypatch, *, running_state, exit_code):
     def fake(argv, **kw):
         calls.append(argv)
         joined = " ".join(argv)
-        # The running/exit-code probes now share their format string with a Labels lookup
-        # (stop() reads the devices label back in the same call), so match by substring
-        # rather than exact element equality.
+        # stop() reads id + running + the devices label in ONE format string, so match by
+        # substring rather than exact element equality and answer with all three fields.
         if "{{.State.Running}}" in joined:
-            return R(running_state)
+            return R(f"{cid}\t{running_state}\t{devices_label}")
         if "{{.State.ExitCode}}" in joined:
             return R(exit_code)
         return R()
@@ -518,7 +522,8 @@ def test_a_sigkilled_container_triggers_a_mesh_reset(monkeypatch):
 def test_a_dirty_stop_resets_only_the_chips_that_container_held(monkeypatch):
     """The reset is a `tt-smi -r all` in a throwaway container, so an unscoped one would
     reset a SIBLING container's live mesh. The ids come from the label stop() reads back."""
-    calls = _fake_docker(monkeypatch, running_state="true\t0,1", exit_code="137")
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
+                         devices_label="0,1")
     assert container.stop("c", image="img") is False
     reset = next(c for c in calls if "--entrypoint" in c)
     assert [reset[i + 1] for i, a in enumerate(reset) if a == "--device"] == [
@@ -537,10 +542,28 @@ def test_a_dirty_stop_without_a_devices_label_falls_back_to_the_whole_directory(
     assert reset[reset.index("--device") + 1] == "/dev/tenstorrent"
 
 
+def test_a_stop_never_touches_a_replacement_that_took_the_name(monkeypatch):
+    """stop() can wait on the allocation lock; if our container exits meanwhile, a
+    concurrent serve can remove it and start a replacement under the same name. Stopping
+    "the name" would then kill the winner and reset ITS chips."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
+                         devices_label="0", cid="replacement999")
+    assert container.stop("c", image="img", expect_id="theoneweasked") is True
+    assert not any(c[:2] == ["docker", "stop"] for c in calls)
+    assert not any(c[:2] == ["docker", "rm"] for c in calls)
+    assert not any("--entrypoint" in c for c in calls)
+
+
+def test_a_stop_proceeds_when_the_name_still_holds_the_expected_container(monkeypatch):
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="0", cid="samecid")
+    assert container.stop("c", image="img", expect_id="samecid") is True
+    assert any(c[:3] == ["docker", "rm", "samecid"] for c in calls)
+
+
 def test_an_already_stopped_container_is_just_removed(monkeypatch):
     calls = _fake_docker(monkeypatch, running_state="false", exit_code="")
     assert container.stop("c", image="img") is True
-    assert any(c[:3] == ["docker", "rm", "c"] for c in calls)
+    assert any(c[:3] == ["docker", "rm", FAKE_ID] for c in calls)
     assert not any("--entrypoint" in c for c in calls)
 
 
