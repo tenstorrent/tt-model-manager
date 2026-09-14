@@ -65,6 +65,10 @@ STOP_TIMEOUT_S = 120
 # 128 + SIGKILL(9): docker's grace period expired and it hard-killed the server.
 SIGKILL_EXIT_CODE = "137"
 
+#: Cap on each docker call in the free-chip scan. The scan runs while the allocation lock
+#: is held, so a wedged docker CLI must fail it rather than pin the lock open.
+SCAN_TIMEOUT_S = 30
+
 #: Cap on the dirty-mesh `tt-smi -r` a dirty `stop` runs. Generous (a real reset is tens of
 #: seconds) but finite, so a wedged reset container cannot hang `tt-model stop` forever.
 RESET_TIMEOUT_S = 180
@@ -314,10 +318,32 @@ def preflight_failures(reqs: List[Requirement]) -> List[Requirement]:
 _TT_NODE_RE = re.compile(r"^/dev/tenstorrent/(\d+)$")
 
 
+def _grant_claims_everything(path: str) -> bool:
+    """Does this host path hand over the WHOLE board rather than one node?
+
+    ``/dev/tenstorrent`` itself obviously does, but so does any ANCESTOR of it -- a
+    ``--volume /dev:/dev`` or a bare ``--device /dev`` exposes every ``/dev/tenstorrent/*``
+    node just as completely, while matching neither the directory nor the per-node pattern.
+    Reading such a grant as "claims nothing" is the failure that matters here, so anything
+    at or above the device root counts as the whole board.
+    """
+    if not path:
+        return False
+    return path == TT_DEVICE or TT_DEVICE.startswith(path.rstrip("/") + "/")
+
+
 def _parse_device_ids(raw: str) -> Optional[List[int]]:
-    """A comma list of ints from a docker label value, or None if it names none."""
-    ids = [int(x) for x in raw.split(",") if x.strip().isdigit()]
-    return ids or None
+    """A comma list of ints from a docker label value, or None if it is absent or malformed.
+
+    All-or-nothing on purpose. Dropping the tokens that fail to parse would silently NARROW
+    the scope -- ``0,garbage`` would reset chip 0 and leave chip 1 dirty -- whereas None
+    falls back to the whole-directory reset, which is over-broad but never leaves a chip
+    unrecovered. The label is the only scope metadata left once the container is gone.
+    """
+    fields = [x.strip() for x in raw.split(",") if x.strip()]
+    if not fields or not all(f.isdigit() for f in fields):
+        return None
+    return [int(f) for f in fields]
 
 
 def _shares_host_ipc(info: dict, by_id: Dict[str, dict]) -> bool:
@@ -381,18 +407,13 @@ def _claimed_from_container(info: dict, all_ids: Sequence[int], *,
     if host_config.get("Privileged"):
         return set(all_ids)
 
-    for d in host_config.get("Devices") or []:
-        path = (d.get("PathOnHost") or "").rstrip("/")
-        if path == TT_DEVICE:
+    granted = [(d.get("PathOnHost") or "") for d in host_config.get("Devices") or []]
+    granted += [(mnt.get("Source") or "") for mnt in info.get("Mounts") or []]
+    for path in granted:
+        path = path.rstrip("/") or "/"
+        if _grant_claims_everything(path):
             return set(all_ids)
         m = _TT_NODE_RE.match(path)
-        if m:
-            ids.add(int(m.group(1)))
-    for mnt in info.get("Mounts") or []:
-        src = (mnt.get("Source") or "").rstrip("/")
-        if src == TT_DEVICE:
-            return set(all_ids)
-        m = _TT_NODE_RE.match(src)
         if m:
             ids.add(int(m.group(1)))
     return ids
@@ -408,18 +429,25 @@ def _claimed_devices(all_ids: Sequence[int]) -> Optional[Set[int]]:
     -- callers must refuse to guess then, not silently proceed as if nothing were claimed.
     ``OSError`` is normalised into that same None: with no docker binary at all ``_run``
     raises rather than returning non-zero, and ``serve --print`` has to keep working there.
+
+    Both calls are bounded, because this runs INSIDE the allocation lock: an unbounded
+    docker CLI would make the holder -- not just the callers waiting to enter -- hang
+    forever, which is the shape of the bug this whole mechanism exists to remove. A timeout
+    is the same "could not be asked" as a daemon error, so it folds into that same None.
     """
     try:
-        ps = _run(["docker", "ps", "-q"], capture_output=True, text=True)
+        ps = _run(["docker", "ps", "-q"], capture_output=True, text=True,
+                  timeout=SCAN_TIMEOUT_S)
         if ps.returncode != 0:
             return None
         ids = ps.stdout.split()
         if not ids:
             return set()
-        inspected = _run(["docker", "inspect", *ids], capture_output=True, text=True)
+        inspected = _run(["docker", "inspect", *ids], capture_output=True, text=True,
+                         timeout=SCAN_TIMEOUT_S)
         if inspected.returncode != 0:
             return None
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return None
     try:
         containers = json.loads(inspected.stdout)
@@ -1080,10 +1108,11 @@ def compose_reset_mesh(image: str, *, device_ids: Optional[Sequence[int]] = None
 def reset_mesh(image: str, *, device_ids: Optional[Sequence[int]] = None) -> bool:
     """Run ``tt-smi -r all`` inside a throwaway container from the given image.
 
-    Bounded, because this runs while ``stop`` holds the allocation lock: an unbounded reset
-    is an unbounded hold, and then "wait for the teardown" stops being a promise anyone can
-    keep. A real reset takes tens of seconds; one still going after ``RESET_TIMEOUT_S`` is
-    wedged, and waiting longer would not have recovered the device either (issue #107).
+    Bounded by ``RESET_TIMEOUT_S`` -- the subprocess timeout is the only bound here, since
+    ``stop`` deliberately takes no lock. A real reset takes tens of seconds; one still going
+    after that is wedged, and waiting longer would not have recovered the device either
+    (issue #107). Note the timeout kills the local docker CLI, not the reset container it
+    started, so this reports failure rather than guaranteeing the reset has stopped.
     """
     try:
         return _run(compose_reset_mesh(image, device_ids=device_ids),

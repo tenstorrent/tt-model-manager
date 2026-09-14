@@ -531,6 +531,16 @@ def test_a_dirty_stop_resets_only_the_chips_that_container_held(monkeypatch):
     assert "/dev/tenstorrent" not in reset  # never the whole directory
 
 
+def test_a_malformed_devices_label_falls_back_instead_of_narrowing_the_reset(monkeypatch):
+    """Dropping the unparsable tokens would reset chip 0 and leave chip 1 dirty. The
+    whole-directory fallback is over-broad but never leaves a chip unrecovered."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
+                         devices_label="0,garbage")
+    assert container.stop("c", image="img") is False
+    reset = next(c for c in calls if "--entrypoint" in c)
+    assert reset[reset.index("--device") + 1] == "/dev/tenstorrent"
+
+
 def test_a_dirty_stop_without_a_devices_label_falls_back_to_the_whole_directory(monkeypatch):
     """A container from before the label existed (or one started by hand) still has to be
     recoverable -- there is no id to scope to, so the old behaviour is the fallback."""

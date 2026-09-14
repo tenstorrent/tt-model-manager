@@ -11,6 +11,7 @@ on any real docker daemon.
 """
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -111,6 +112,23 @@ def test_a_foreign_whole_directory_bind_mount_claims_every_id():
     assert container._claimed_from_container(info, all_ids=[0, 1, 2, 3]) == {0, 1, 2, 3}
 
 
+def test_an_ancestor_grant_claims_every_id_too():
+    """`--volume /dev:/dev` (or a bare `--device /dev`) exposes every node just as
+    completely as the device directory itself, while matching neither exact path."""
+    for grant in ("/dev", "/"):
+        assert container._claimed_from_container(
+            _container(mounts=[{"Source": grant}]), all_ids=[0, 1, 2, 3]) == {0, 1, 2, 3}
+        assert container._claimed_from_container(
+            _container(devices=[{"PathOnHost": grant}]), all_ids=[0, 1, 2, 3]) == {0, 1, 2, 3}
+
+
+def test_a_sibling_path_that_merely_shares_a_prefix_claims_nothing():
+    """The guard is an ancestor test, not a string prefix: /dev/tenstorrent-foo is a
+    different path and must not be read as the whole board."""
+    assert container._claimed_from_container(
+        _container(mounts=[{"Source": "/dev/tenstorrent-foo"}]), all_ids=[0, 1]) == set()
+
+
 def test_a_private_ipc_container_claims_nothing_even_with_the_whole_directory_bound():
     """The tt-studio-backend case: broad device access for telemetry, but it cannot share
     the UMD lock without --ipc host, so it must not make every chip look busy."""
@@ -191,6 +209,29 @@ def test_claimed_devices_returns_none_when_inspect_fails(monkeypatch):
 def test_claimed_devices_returns_none_on_unparsable_inspect_output(monkeypatch):
     _fake_docker(monkeypatch, ps_ids=["a"], inspect_stdout="not json")
     assert container._claimed_devices([0, 1, 2, 3]) is None
+
+
+@pytest.mark.parametrize("stdout", ['{"Id": "a"}', '[["Id", "a"]]', "null"])
+def test_claimed_devices_returns_none_on_a_wrong_shaped_inspect_answer(monkeypatch, stdout):
+    """Valid JSON that is not the documented list-of-objects is "could not be asked", not
+    "nothing is claimed" -- the latter would hand out a chip somebody else is holding."""
+    _fake_docker(monkeypatch, ps_ids=["a"], inspect_stdout=stdout)
+    assert container._claimed_devices([0, 1, 2, 3]) is None
+
+
+def test_a_wedged_docker_fails_the_scan_instead_of_pinning_the_allocation_lock(monkeypatch):
+    """The scan runs inside the flock, so an unbounded docker CLI would hang the HOLDER.
+    Every call is bounded and a timeout reads as the same "could not be asked" as a
+    daemon error."""
+    seen = []
+
+    def wedged(argv, **kw):
+        seen.append(kw.get("timeout"))
+        raise subprocess.TimeoutExpired(argv, kw.get("timeout") or 0)
+
+    monkeypatch.setattr(container, "_run", wedged)
+    assert container._claimed_devices([0, 1, 2, 3]) is None
+    assert seen == [container.SCAN_TIMEOUT_S], "the scan must pass a bounded timeout"
 
 
 # ------------------------------------------------------------------------ pick_free_devices

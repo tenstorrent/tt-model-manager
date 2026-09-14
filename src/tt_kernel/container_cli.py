@@ -20,7 +20,7 @@ import shlex
 import shutil
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional
 
 from . import MANIFEST_NAME, console, container, hub, localdb, oci
 from .boot_progress import BootTracker, diagnose_boot, summarize
@@ -768,18 +768,34 @@ def parse_device_id(device_id: Optional[str], *, chip_count: int,
     return ids
 
 
-def precheck_capacity(chip_count: int, device_ids: Optional[Sequence[int]]) -> None:
-    """Refuse a serve the board cannot fit, BEFORE the weights are fetched.
+def precheck_capacity(manifest: Manifest, *, profile_name: Optional[str] = None,
+                      device_id: Optional[str] = None) -> None:
+    """Refuse a serve the board cannot fit, BEFORE anything slow happens.
 
-    The authoritative check runs under the allocation lock immediately before ``docker run``,
-    which is correct but late: by then a multi-GB weight download has happened for a serve
-    that could never have started. Non-reserving on purpose -- it takes no lock and holds
-    nothing, so it can only ever turn a late failure into an early one. Not being able to
-    tell yet (no docker, no card) is not a refusal.
+    The authoritative check runs under the allocation lock immediately before ``docker
+    run``, which is correct but late: a first-time ``tt-model serve org/name`` auto-pulls
+    the image AND the weights from ``cli.serve`` long before ``serve_container`` ever scans,
+    so without this a full board costs a multi-GB (sometimes multi-hundred-GB) download for
+    a serve that could never have started.
+
+    Non-reserving on purpose -- it takes no lock and holds nothing, so it can be wrong by
+    the time the real check runs. That is fine: it only ever turns a late failure into an
+    early one. Not being able to tell yet (no docker, no card) is not a refusal, but a bad
+    ``--profile`` or ``--device-id`` is, for the same reason -- reporting a typo after the
+    download is worse than reporting it now.
     """
+    spec = manifest.container
+    if spec is None:
+        return
     try:
-        if device_ids is not None:
-            container.ensure_devices_free(device_ids)
+        profile = spec.resolve_profile(profile_name)
+    except ValueError as e:
+        raise ContainerCliError(str(e)) from None
+    chip_count = hardware_chip_count(profile.hardware or "") or 1
+    ids = parse_device_id(device_id, chip_count=chip_count, profile_name=profile.name)
+    try:
+        if ids is not None:
+            container.ensure_devices_free(ids)
         else:
             container.pick_free_devices(chip_count)
     except container.DeviceScanUnavailable:
@@ -876,6 +892,19 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
             marker="•",
         )
 
+    name = container.container_name(manifest, profile)
+    what = target or manifest.name
+    if not print_only:
+        # Both checks sit ahead of every expensive step below (the image self-heal can
+        # re-pull a multi-GB image; ensure_weights can fetch hundreds of GB). is_running
+        # first, so an already-running model reports THAT rather than the "not enough free
+        # chips" its own container is the reason for.
+        if container.is_running(name):
+            raise ContainerCliError(
+                f"{name} is already running. Stop it first:  tt-model stop {what}"
+            )
+        precheck_capacity(manifest, profile_name=profile_name, device_id=device_id)
+
     # An image can go missing between package and serve — `docker image prune`, or a
     # manifest edit that moved the tag. Without this, docker tries to PULL
     # "tt-model/<name>:<sha>" from Docker Hub and reports "pull access denied", which
@@ -955,17 +984,6 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         # that need no quoting, so the ordinary flags print exactly as they always have.
         console.raw(shlex.join(run_argv))
         return
-
-    name = container.container_name(manifest, profile)
-    what = target or manifest.name
-    if container.is_running(name):
-        raise ContainerCliError(
-            f"{name} is already running. Stop it first:  tt-model stop {what}"
-        )
-    # After the is_running check, so an already-running model reports that rather than the
-    # "not enough free chips" its own container is the reason for. Before ensure_weights,
-    # which is the expensive step this exists to get ahead of.
-    precheck_capacity(chip_count, requested_device_ids)
 
     # As the host user, so the daemon does not create them as root: see
     # container.ensure_mount_sources.

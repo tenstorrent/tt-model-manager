@@ -157,7 +157,12 @@ def test_serve_print_emits_the_docker_run_without_running_it(tmp_path, monkeypat
     monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
     container_cli.serve_container(_manifest(tmp_path), print_only=True)
     out = capsys.readouterr().out
-    assert "docker run" in out and "--device /dev/tenstorrent" in out
+    assert "docker run" in out
+    # The SCOPED form, not just the "--device /dev/tenstorrent" prefix it contains: a
+    # substring check here passes for the whole-directory flag too and would stop
+    # distinguishing them.
+    assert "--device /dev/tenstorrent/0:/dev/tenstorrent/0" in out
+    assert "--device /dev/tenstorrent " not in out + " "
     assert not ran
 
 
@@ -206,7 +211,8 @@ def test_ordinary_flags_print_exactly_as_before(tmp_path, monkeypatch, capsys):
     put quotes around the paths, labels, mounts and ports that were already fine -- the
     docs quote this line verbatim."""
     out = _printed(tmp_path, monkeypatch, capsys, serve=dict(JSON_SERVE))
-    for fragment in ("docker run", "--device /dev/tenstorrent", "--publish 8000:8000",
+    for fragment in ("docker run", "--device /dev/tenstorrent/0:/dev/tenstorrent/0",
+                     "--publish 8000:8000",
                      "--env HF_HOME=/hf", "--block-size 64",
                      "--mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G"):
         assert fragment in out
@@ -292,6 +298,50 @@ def test_an_invalid_device_id_is_rejected_before_any_weights_are_downloaded(tmp_
     with pytest.raises(container_cli.ContainerCliError, match="distinct"):
         container_cli.serve_container(_manifest(tmp_path), target="org/m", device_id="0,0")
 
+def test_a_first_time_serve_checks_capacity_before_pulling_anything(tmp_path, monkeypatch):
+    """`cli.serve`'s auto-pull fetches the image AND the weights before serve_container
+    ever scans, so a full board has to be reported ahead of that download."""
+    order = []
+    remote = _manifest(tmp_path)
+    monkeypatch.setattr(container_cli, "resolve_target", lambda t: None)
+    monkeypatch.setattr(hub, "fetch_manifest", lambda r, rev: remote)
+    monkeypatch.setattr(hub, "latest_revision", lambda *a, **k: "cafe1234")
+    monkeypatch.setattr(container_cli, "pull_container",
+                        lambda *a, **k: order.append("pull"))
+
+    def busy(count, dev_root=None):
+        order.append("capacity")
+        raise container.ContainerError("only 0 of 4 tt device(s) are free")
+
+    monkeypatch.setattr(container, "pick_free_devices", busy)
+    res = runner.invoke(cli.app, ["serve", "org/m"])
+    assert res.exit_code != 0
+    assert order == ["capacity"], f"pulled before checking the board: {order}"
+
+
+def test_an_invalid_device_id_is_rejected_before_the_auto_pull(tmp_path, monkeypatch):
+    """A bad flag reported only inside serve_container would cost the whole download
+    first -- the precheck validates it at the first point it runs."""
+    order = []
+    remote = _manifest(tmp_path)
+    monkeypatch.setattr(container_cli, "resolve_target", lambda t: None)
+    monkeypatch.setattr(hub, "fetch_manifest", lambda r, rev: remote)
+    monkeypatch.setattr(hub, "latest_revision", lambda *a, **k: "cafe1234")
+    monkeypatch.setattr(container_cli, "pull_container",
+                        lambda *a, **k: order.append("pull"))
+    res = runner.invoke(cli.app, ["serve", "org/m", "--device-id", "0,0"])
+    assert res.exit_code != 0
+    assert "distinct" in res.output
+    assert order == [], f"pulled before rejecting the flag: {order}"
+
+
+def test_an_unknown_profile_is_reported_rather_than_swallowed_by_the_precheck(tmp_path):
+    """Returning silently here let a typo reach the auto-pull, so the download happened
+    before the profile error surfaced."""
+    with pytest.raises(container_cli.ContainerCliError):
+        container_cli.precheck_capacity(_manifest(tmp_path), profile_name="nope")
+
+
 def test_the_capacity_precheck_never_refuses_on_a_host_it_cannot_read(tmp_path, monkeypatch):
     """Non-reserving and advisory: not knowing yet (no docker, no card) must not block a
     serve that the authoritative check under the lock would have allowed."""
@@ -299,7 +349,7 @@ def test_the_capacity_precheck_never_refuses_on_a_host_it_cannot_read(tmp_path, 
         raise container.DeviceScanUnavailable("no docker")
 
     monkeypatch.setattr(container, "pick_free_devices", unavailable)
-    container_cli.precheck_capacity(4, None)  # must not raise
+    container_cli.precheck_capacity(_manifest(tmp_path))  # must not raise
 
 
 def test_a_full_board_is_refused_before_any_weights_are_downloaded(tmp_path, monkeypatch):

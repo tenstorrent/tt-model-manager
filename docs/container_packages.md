@@ -484,7 +484,8 @@ What the picker does:
   a label can only ever over-claim, never hide a held chip. A container that does not share
   the host ipc namespace claims nothing.
 - **Refuses instead of hanging.** Not enough free chips is an immediate error naming what is
-  busy, raised before the weights prefetch rather than after it.
+  busy, raised ahead of the expensive steps — the first-time auto-pull, the image self-heal,
+  the weights prefetch — and re-checked authoritatively under the lock before `docker run`.
 - **Serializes with a host-wide `flock`** on `/dev/tenstorrent` itself, held across
   "check what's free → pick → `docker run`", so two concurrent `serve` invocations cannot
   choose the same chip.
