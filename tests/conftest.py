@@ -3,8 +3,6 @@
 
 """Shared fixtures for the whole suite."""
 
-import os
-
 import pytest
 
 from tt_kernel import container
@@ -35,27 +33,3 @@ def _no_real_device_scan(monkeypatch):
     """
     monkeypatch.setattr(container, "pick_free_devices",
                         lambda count, dev_root=None: list(range(count)))
-
-
-@pytest.fixture(autouse=True)
-def _hermetic_alloc_lock(monkeypatch, tmp_path_factory):
-    """Point the allocation flock at a scratch file instead of the real device directory.
-
-    ``alloc_lock`` flocks ``/dev/tenstorrent`` itself (see ``_open_alloc_lock``), which a
-    test must not touch — but the lock's own logic (contention timeout, release, close) is
-    worth keeping under test, so only the descriptor is redirected, not the mechanism.
-    """
-    lock = tmp_path_factory.mktemp("alloc-lock") / "lock"
-    lock.touch()
-    real = container._open_alloc_lock
-
-    def redirected(dev_root=None):
-        # Only the DEFAULT (real /dev/tenstorrent) is redirected. A test that passes an
-        # explicit dev_root is saying something about that path -- an absent root, an
-        # unopenable one -- so it must reach the real implementation, or it would silently
-        # assert nothing.
-        if dev_root is not None:
-            return real(dev_root)
-        return os.open(str(lock), os.O_RDONLY)
-
-    monkeypatch.setattr(container, "_open_alloc_lock", redirected)

@@ -484,11 +484,17 @@ What the picker does:
   a label can only ever over-claim, never hide a held chip. A container that does not share
   the host ipc namespace claims nothing.
 - **Refuses instead of hanging.** Not enough free chips is an immediate error naming what is
-  busy, raised ahead of the expensive steps — the first-time auto-pull, the image self-heal,
-  the weights prefetch — and re-checked authoritatively under the lock before `docker run`.
-- **Serializes with a host-wide `flock`** on `/dev/tenstorrent` itself, held across
-  "check what's free → pick → `docker run`", so two concurrent `serve` invocations cannot
-  choose the same chip.
+  busy, raised ahead of the expensive steps — the first-time auto-pull, the `--refresh`
+  pull, the image self-heal, the weights prefetch — and re-checked immediately before
+  `docker run`.
+
+The pick is advisory, not a reservation: nothing is held between the scan and the container
+starting (~100ms), so two `serve` commands launched within that window could choose the same
+chip — the second then hangs on the UMD lock, recoverable with `tt-model stop`. A host-wide
+lock would close that sliver, at the cost of every docker call inside it being able to pin a
+lock that blocks *every* serve on the box; that is the worse failure, so it is not taken.
+Two serves of the same model and profile are excluded regardless, by docker's own container
+name uniqueness.
 - **Validates `--device-id` against the real inventory** — `--device-id 99` on a four-chip
   box is refused up front, not minutes later inside docker.
 

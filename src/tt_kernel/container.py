@@ -10,7 +10,7 @@ reads a manifest file, or touches the Hub.
 The docker flags are not folklore; each one is load-bearing:
 
 - ``--device`` — scoped to the specific chip(s) a profile needs (picked by
-  ``device_allocation``/``pick_free_devices``, or pinned with ``--device-id``), not the whole
+  ``pick_free_devices``, or pinned with ``--device-id``), not the whole
   ``/dev/tenstorrent`` directory. tt-metal/UMD takes a host-wide lock on every chip it can SEE
   during cluster bring-up, not just the one it computes on, and holds it for the container's
   whole life — so handing over the whole directory means a second container, even one that
@@ -35,8 +35,6 @@ The docker flags are not folklore; each one is load-bearing:
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
 import json
 import os
 import re
@@ -65,15 +63,6 @@ STOP_TIMEOUT_S = 120
 # 128 + SIGKILL(9): docker's grace period expired and it hard-killed the server.
 SIGKILL_EXIT_CODE = "137"
 
-# Cap on the `docker run` that launches a container. It is the last operation inside the
-# allocation lock, and `docker run --detach` only creates and starts (the boot itself
-# happens afterwards, unlocked), so seconds is normal and this is already very generous.
-RUN_TIMEOUT_S = 120
-
-#: Cap on each docker call in the free-chip scan. The scan runs while the allocation lock
-#: is held, so a wedged docker CLI must fail it rather than pin the lock open.
-SCAN_TIMEOUT_S = 30
-
 #: Cap on the dirty-mesh `tt-smi -r` a dirty `stop` runs. Generous (a real reset is tens of
 #: seconds) but finite, so a wedged reset container cannot hang `tt-model stop` forever.
 RESET_TIMEOUT_S = 180
@@ -81,16 +70,6 @@ RESET_TIMEOUT_S = 180
 
 class ContainerError(RuntimeError):
     """A docker operation that must not proceed. The message is user-facing."""
-
-
-class DockerUnresponsive(ContainerError):
-    """A docker command exceeded its timeout, so the daemon is presumed wedged.
-
-    Distinct from a docker command that FAILED: a failure leaves a knowable state worth
-    cleaning up, whereas this leaves an unknowable one -- and the cleanup would be more
-    calls to the same unresponsive daemon, which is how a bounded operation becomes an
-    unbounded one again.
-    """
 
 
 class DeviceScanUnavailable(ContainerError):
@@ -444,25 +423,18 @@ def _claimed_devices(all_ids: Sequence[int]) -> Optional[Set[int]]:
     -- callers must refuse to guess then, not silently proceed as if nothing were claimed.
     ``OSError`` is normalised into that same None: with no docker binary at all ``_run``
     raises rather than returning non-zero, and ``serve --print`` has to keep working there.
-
-    Both calls are bounded, because this runs INSIDE the allocation lock: an unbounded
-    docker CLI would make the holder -- not just the callers waiting to enter -- hang
-    forever, which is the shape of the bug this whole mechanism exists to remove. A timeout
-    is the same "could not be asked" as a daemon error, so it folds into that same None.
     """
     try:
-        ps = _run(["docker", "ps", "-q"], capture_output=True, text=True,
-                  timeout=SCAN_TIMEOUT_S)
+        ps = _run(["docker", "ps", "-q"], capture_output=True, text=True)
         if ps.returncode != 0:
             return None
         ids = ps.stdout.split()
         if not ids:
             return set()
-        inspected = _run(["docker", "inspect", *ids], capture_output=True, text=True,
-                         timeout=SCAN_TIMEOUT_S)
+        inspected = _run(["docker", "inspect", *ids], capture_output=True, text=True)
         if inspected.returncode != 0:
             return None
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError:
         return None
     try:
         containers = json.loads(inspected.stdout)
@@ -503,6 +475,15 @@ def pick_free_devices(count: int, *, dev_root: Optional[Path] = None) -> List[in
     rather than silently. Raises rather than guesses when the host can't be read or doesn't
     have enough free chips; the alternative is the silent, indefinite UMD lock hang this
     replaces.
+
+    Advisory, not a reservation: nothing is held between this returning and the container
+    actually starting (~100ms later), so two serves launched within that window could pick
+    the same chip. Deliberately not locked. A host-wide lock around "scan then docker run"
+    closes that sliver, but only by making every docker call inside it able to pin a lock
+    that blocks EVERY serve on the box -- a worse failure than the one it prevents, which
+    is one container hung on the UMD lock and recoverable with `tt-model stop`. Races
+    between two serves of the same model+profile are already excluded by docker's own
+    container-name uniqueness.
     """
     all_ids = all_device_ids(dev_root or Path(TT_DEVICE))
     claimed = _claimed_devices(all_ids)
@@ -546,92 +527,6 @@ def ensure_devices_free(device_ids: Sequence[int], *,
     busy = sorted(set(device_ids) & claimed)
     if busy:
         raise ContainerError(f"chip(s) {', '.join(map(str, busy))} already in use by another container")
-
-
-#: How long a caller waits to ENTER a device-allocation critical section.
-#:
-#: Only serve holds this lock, and only across "scan the host, then `docker run`" -- seconds,
-#: not minutes -- so a wait longer than this means the daemon itself is wedged, and saying so
-#: beats blocking a serve forever. Waited on rather than failed fast, because a queued serve
-#: will get in: flock is released by the kernel when the holder exits, crash included.
-_DEVICE_ALLOC_LOCK_TIMEOUT_S = 30.0
-
-
-def _open_alloc_lock(dev_root: Optional[Path] = None) -> int:
-    """A read-only descriptor on the device directory, to ``flock`` as the allocation lock.
-
-    The lock target is ``/dev/tenstorrent`` ITSELF rather than a file of our own, because
-    every alternative was worse. A path under ``tempfile.gettempdir()`` is not actually
-    host-shared -- ``TMPDIR`` is per-user, so two users would take two DIFFERENT locks and
-    the cross-user guarantee this exists for would silently not hold. A fixed, world-writable
-    path in ``/tmp`` is host-shared but needs permissive mode bits and is a standing invitation
-    to plant a symlink at a predictable name. The device directory has none of those problems:
-    it is the canonical, per-host location of the very resource being arbitrated, it is created
-    by the driver (root-owned, ``0755``), and ``flock`` needs no write access at all -- so there
-    is nothing to create, nothing to chmod, and nothing an unprivileged user can redirect.
-    """
-    root = dev_root or Path(TT_DEVICE)
-    return os.open(str(root), os.O_RDONLY)
-
-
-@contextlib.contextmanager
-def alloc_lock(timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S,
-               dev_root: Optional[Path] = None):
-    """The host-shared flock guarding the device-allocation critical section.
-
-    A contended lock is WAITED on, not failed (see ``_DEVICE_ALLOC_LOCK_TIMEOUT_S``): every
-    hold is short and bounded, so the caller will get in.
-
-    A host with no device root AT ALL (no driver, no card, CI) has nothing to arbitrate, so
-    the section runs unlocked there rather than failing: the callers that actually need a
-    device still fail on the inventory itself, with a message about THAT. That bypass is
-    deliberately narrow -- only a genuinely absent root. Any other open failure (permissions,
-    fd exhaustion) means the board is there but we cannot serialize against it, and running
-    unlocked then is how two serves end up on the same chip; those are surfaced, not swallowed.
-    """
-    try:
-        fd = _open_alloc_lock(dev_root)
-    except (FileNotFoundError, NotADirectoryError):
-        yield
-        return
-    except OSError as e:
-        raise ContainerError(
-            f"could not take the tt device allocation lock on "
-            f"{dev_root or TT_DEVICE}: {e} — refusing to allocate a device unsynchronized"
-        ) from e
-    deadline = time.monotonic() + timeout_s
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            break
-        except OSError:
-            if time.monotonic() >= deadline:
-                os.close(fd)
-                raise ContainerError(
-                    f"waited {timeout_s:.0f}s for another `tt-model serve` to release the "
-                    f"device allocation lock and it is still held — every hold is short, so "
-                    f"this usually means the docker daemon is wedged"
-                )
-            time.sleep(0.1)
-    try:
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-
-
-@contextlib.contextmanager
-def device_allocation(count: int, *, dev_root: Optional[Path] = None,
-                      timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S):
-    """Claim ``count`` free tt devices for one ``docker run``, race-free across processes.
-
-    Held only across "check what's free -> pick -> docker run": the real, indefinite
-    exclusion is UMD's own per-chip lock, taken once the container actually opens its
-    devices. This just closes the window where two concurrent ``tt-model serve`` calls could
-    both see the same chip as free before either container exists yet.
-    """
-    with alloc_lock(timeout_s, dev_root=dev_root):
-        yield pick_free_devices(count, dev_root=dev_root)
 
 
 def _require_container(m: Manifest):
@@ -775,9 +670,9 @@ def compose_run(
 
     ``device_ids``, when given, scopes the container to exactly those ``/dev/tenstorrent/<N>``
     nodes instead of the whole directory -- see the module docstring for why that matters.
-    The caller supplies it from ``pick_free_devices``/``device_allocation`` or an explicit
-    ``--device-id`` in the normal case; ``None`` is the whole-directory fallback for a caller
-    that has no chip count to work with at all (e.g. a non-container launcher).
+    The caller supplies it from ``pick_free_devices`` or an explicit ``--device-id`` in the
+    normal case; ``None`` is the whole-directory fallback for a caller that has no chip
+    count to work with at all (e.g. a non-container launcher).
     """
     _require_container(m)
     port = profile.port or DEFAULT_PORT
@@ -949,23 +844,13 @@ def _run(argv: List[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(argv, **kw)
 
 
-def run_checked(argv: List[str], *, timeout: Optional[float] = None) -> str:
+def run_checked(argv: List[str]) -> str:
     """Run a docker command, raising ContainerError with its stderr on failure.
 
     docker's own messages are the useful diagnosis here (no such image, port in use,
     device busy), so they are surfaced verbatim rather than reworded.
-
-    ``timeout`` is for a caller holding a lock, where an unresponsive daemon would otherwise
-    pin it open; it raises ``DockerUnresponsive`` so that caller can tell "wedged" from
-    "failed". Unbounded by default, because most callers have nothing to hold.
     """
-    try:
-        r = _run(argv, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise DockerUnresponsive(
-            f"`{' '.join(argv[:2])}` did not return within {timeout:.0f}s — the docker "
-            f"daemon appears to be wedged"
-        ) from None
+    r = _run(argv, capture_output=True, text=True)
     if r.returncode != 0:
         detail = (r.stderr or r.stdout or "").strip()
         raise ContainerError(detail or f"`{' '.join(argv[:2])}` failed (exit {r.returncode})")
@@ -1029,7 +914,7 @@ def container_exists(name: str) -> bool:
     every retry.
     """
     return _run(["docker", "container", "inspect", name],
-               capture_output=True).returncode == 0
+                capture_output=True).returncode == 0
 
 
 def is_running(name: str) -> bool:
@@ -1081,12 +966,11 @@ def stop(name: str, image: Optional[str] = None) -> bool:
     chips instead of every chip on the board — which is what an unscoped `tt-smi -r all` does
     to every sibling container still running.
 
-    Deliberately takes no allocation lock. Serializing the teardown would close a narrow
-    window (a dirty kill, a serve landing between the removal and the reset, and that serve
-    picking this exact chip) at the cost of holding a host-wide lock across `docker stop`,
-    where neither the daemon call nor the reset container it spawns can actually be bounded
-    from here — a wedged daemon would then block every other serve and stop indefinitely.
-    Scoping alone already removes the damage this path used to do routinely.
+    Unsynchronized against a concurrent serve, like the picker itself (see
+    ``pick_free_devices``): a serve landing between the removal and the reset could pick one
+    of these chips and have its fresh mesh reset. Narrow, and the alternative — a host-wide
+    lock spanning `docker stop` and a reset container neither of which can be bounded from
+    here — fails worse. Scoping alone already removes the damage this path did routinely.
     """
     inspect = _run(
         ["docker", "inspect", "--format",

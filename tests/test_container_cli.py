@@ -319,6 +319,25 @@ def test_a_first_time_serve_checks_capacity_before_pulling_anything(tmp_path, mo
     assert order == ["capacity"], f"pulled before checking the board: {order}"
 
 
+def test_a_refresh_checks_capacity_before_downloading_the_new_image(tmp_path, monkeypatch):
+    """--refresh re-pulls the image before serve_container ever scans, so the check has to
+    sit ahead of that pull too, not just ahead of the first-time one."""
+    order = []
+    monkeypatch.setattr(container_cli, "resolve_target", lambda t: _manifest(tmp_path))
+    monkeypatch.setattr(Path, "is_file", lambda self: False)
+    monkeypatch.setattr(container_cli, "refresh_if_newer",
+                        lambda *a, **k: order.append("refresh"))
+
+    def busy(count, dev_root=None):
+        order.append("capacity")
+        raise container.ContainerError("only 0 of 4 tt device(s) are free")
+
+    monkeypatch.setattr(container, "pick_free_devices", busy)
+    res = runner.invoke(cli.app, ["serve", "org/m", "--refresh"])
+    assert res.exit_code != 0
+    assert order == ["capacity"], f"refreshed before checking the board: {order}"
+
+
 def test_an_invalid_device_id_is_rejected_before_the_auto_pull(tmp_path, monkeypatch):
     """A bad flag reported only inside serve_container would cost the whole download
     first -- the precheck validates it at the first point it runs."""
@@ -353,9 +372,9 @@ def test_the_capacity_precheck_never_refuses_on_a_host_it_cannot_read(tmp_path, 
 
 
 def test_a_full_board_is_refused_before_any_weights_are_downloaded(tmp_path, monkeypatch):
-    """The authoritative capacity check is under the allocation lock, on the far side of the
-    image repair and the weights prefetch -- so a full board would otherwise only be reported
-    after minutes (or, cold, hours) of downloading weights the serve could never use."""
+    """The authoritative capacity check sits immediately before `docker run`, on the far
+    side of the image repair and the weights prefetch -- so a full board would otherwise
+    only be reported after minutes (or, cold, hours) of downloading unusable weights."""
     _serving_ok(monkeypatch)
     monkeypatch.setattr(container_cli, "ensure_weights",
                         lambda *a, **k: pytest.fail("downloaded weights for a full board"))
@@ -389,8 +408,7 @@ def test_an_unavailable_scan_does_not_block_the_serve_early(tmp_path, monkeypatc
 
 def test_a_stale_leftover_is_removed_inside_the_start_critical_section(tmp_path, monkeypatch):
     """A container holding the name but not running is a failed previous start; the retry
-    has to clear it -- but only from inside the allocation lock, where "exists but not
-    running" cannot be another invocation's container mid-launch."""
+    has to clear it rather than dead-end on the name."""
     ran, removed = [], []
     _serving_ok(monkeypatch)
     monkeypatch.setattr(container, "container_exists", lambda n: not removed)
@@ -1116,51 +1134,6 @@ def test_a_failed_start_removes_the_half_created_container(tmp_path, monkeypatch
     with pytest.raises(container.ContainerError, match="bind host port"):
         container_cli.serve_container(_manifest(tmp_path))
     assert removed, "a failed start must not leave the name held"
-
-
-def test_the_launch_is_bounded_so_a_wedged_daemon_cannot_pin_the_allocation_lock(
-        tmp_path, monkeypatch):
-    """`docker run` is the last thing done under the host-wide lock. Unbounded, one
-    unresponsive daemon would block every other serve on the box indefinitely."""
-    seen, after = [], []
-    monkeypatch.setattr(container, "is_running",
-                        lambda n: bool(seen) and after.append(("is_running", n)))
-    monkeypatch.setattr(container, "container_exists",
-                        lambda n: bool(seen) and after.append(("exists", n)))
-    monkeypatch.setattr(container, "remove",
-                        lambda n, force=False: after.append(("remove", n)))
-    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
-
-    def wedged(argv, **kw):
-        seen.append(kw.get("timeout"))
-        raise container.DockerUnresponsive("docker run did not return")
-
-    monkeypatch.setattr(container, "run_checked", wedged)
-    with pytest.raises(container.ContainerError, match="did not return"):
-        container_cli.serve_container(_manifest(tmp_path))
-    assert seen == [container.RUN_TIMEOUT_S], "the launch must pass a bounded timeout"
-    # And no cleanup afterwards: those are more calls to the daemon that just stopped
-    # answering, which is how a bounded operation becomes unbounded again.
-    assert after == [], f"probed a wedged daemon while holding the lock: {after}"
-
-
-def test_a_wedged_docker_still_releases_the_allocation_lock(tmp_path, monkeypatch):
-    """The point of bounding the launch: the NEXT caller gets in rather than queueing
-    behind a hold that never ends."""
-    monkeypatch.setattr(container, "is_running", lambda n: False)
-    monkeypatch.setattr(container, "container_exists", lambda n: False)
-    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
-    monkeypatch.setattr(container, "run_checked", _wedged_run)
-    with pytest.raises(container.ContainerError):
-        container_cli.serve_container(_manifest(tmp_path))
-    # Not held: a second acquire would block until the timeout if the first leaked it.
-    with container.alloc_lock(timeout_s=0.5):
-        pass
-
-
-def _wedged_run(argv, **kw):
-    raise container.DockerUnresponsive("docker run did not return")
-
 
 def test_logs_points_at_a_usable_target(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "running", lambda name=None: [])

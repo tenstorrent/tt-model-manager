@@ -772,15 +772,14 @@ def precheck_capacity(manifest: Manifest, *, profile_name: Optional[str] = None,
                       device_id: Optional[str] = None) -> None:
     """Refuse a serve the board cannot fit, BEFORE anything slow happens.
 
-    The authoritative check runs under the allocation lock immediately before ``docker
-    run``, which is correct but late: a first-time ``tt-model serve org/name`` auto-pulls
+    The authoritative check runs immediately before ``docker run``, which is correct but
+    late: a first-time ``tt-model serve org/name`` auto-pulls
     the image AND the weights from ``cli.serve`` long before ``serve_container`` ever scans,
     so without this a full board costs a multi-GB (sometimes multi-hundred-GB) download for
     a serve that could never have started.
 
-    Non-reserving on purpose -- it takes no lock and holds nothing, so it can be wrong by
-    the time the real check runs. That is fine: it only ever turns a late failure into an
-    early one. Not being able to tell yet (no docker, no card) is not a refusal, but a bad
+    Non-reserving, like the real check -- it holds nothing, so it can be wrong by the time
+    the launch happens. That is fine: it only ever turns a late failure into an early one. Not being able to tell yet (no docker, no card) is not a refusal, but a bad
     ``--profile`` or ``--device-id`` is, for the same reason -- reporting a typo after the
     download is worse than reporting it now.
     """
@@ -1017,12 +1016,9 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         view.begin(f"starting {name}")
 
         def _start(ids: Optional[List[int]]) -> None:
-            # EVERYTHING that inspects or mutates this container name runs in here, under the
-            # allocation lock. Two concurrent serves of the same model+profile both pass the
-            # `is_running` check far above; outside the lock the loser would fail on docker's
-            # name conflict and then force-remove the winner's container -- and `docker run`
-            # creates a container before it starts it, so "exists but not running" is not
-            # evidence of a stale leftover either unless nobody else can be mid-launch.
+            # Re-checked immediately before the launch rather than trusting the check far
+            # above: the gap between them covers the image self-heal and the weights
+            # prefetch, which can take hours.
             if container.is_running(name):
                 raise ContainerCliError(
                     f"{name} is already running. Stop it first:  tt-model stop {what}"
@@ -1037,36 +1033,18 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                                              device_ids=ids,
                                              rootless=container.docker_is_rootless())
             try:
-                # Bounded: this is the last thing done under the allocation lock, and an
-                # unresponsive daemon here would pin a host-wide lock open.
-                container.run_checked(run_argv, timeout=container.RUN_TIMEOUT_S)
-            except container.DockerUnresponsive:
-                # No cleanup, deliberately: whatever got created is unknowable, and finding
-                # out means more calls to the daemon that just stopped answering -- which is
-                # how a bounded operation becomes unbounded again. Release the lock instead.
-                # Nothing leaks: the stale-container removal above clears a leftover on the
-                # next attempt, and a container that DID start is caught by `is_running`.
-                raise
+                container.run_checked(run_argv)
             except container.ContainerError:
-                # Leave no half-created container behind to block the next attempt. Safe to
-                # judge by name here only because we still hold the lock: nothing else can
-                # have created this name since the checks above.
+                # Leave no half-created container behind to block the next attempt.
                 if container.container_exists(name) and not container.is_running(name):
                     container.remove(name, force=True)
                 raise
 
         if requested_device_ids is not None:
-            # Same lock the auto-picker uses (container.device_allocation), held across the
-            # same "check free -> launch" window: an explicit pin still has to coordinate
-            # with a concurrent serve even though it skips the picker itself.
-            with container.alloc_lock():
-                container.ensure_devices_free(requested_device_ids)
-                _start(requested_device_ids)
+            container.ensure_devices_free(requested_device_ids)
+            _start(requested_device_ids)
         else:
-            # Held across "check what's free -> pick -> docker run" -- see
-            # container.device_allocation.
-            with container.device_allocation(chip_count) as picked_ids:
-                _start(picked_ids)
+            _start(container.pick_free_devices(chip_count))
         view.done("container started")
         if detach:
             view.close()

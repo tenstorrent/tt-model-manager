@@ -11,7 +11,6 @@ on any real docker daemon.
 """
 
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -218,22 +217,6 @@ def test_claimed_devices_returns_none_on_a_wrong_shaped_inspect_answer(monkeypat
     _fake_docker(monkeypatch, ps_ids=["a"], inspect_stdout=stdout)
     assert container._claimed_devices([0, 1, 2, 3]) is None
 
-
-def test_a_wedged_docker_fails_the_scan_instead_of_pinning_the_allocation_lock(monkeypatch):
-    """The scan runs inside the flock, so an unbounded docker CLI would hang the HOLDER.
-    Every call is bounded and a timeout reads as the same "could not be asked" as a
-    daemon error."""
-    seen = []
-
-    def wedged(argv, **kw):
-        seen.append(kw.get("timeout"))
-        raise subprocess.TimeoutExpired(argv, kw.get("timeout") or 0)
-
-    monkeypatch.setattr(container, "_run", wedged)
-    assert container._claimed_devices([0, 1, 2, 3]) is None
-    assert seen == [container.SCAN_TIMEOUT_S], "the scan must pass a bounded timeout"
-
-
 # ------------------------------------------------------------------------ pick_free_devices
 
 
@@ -288,82 +271,6 @@ def test_ensure_devices_free_refuses_a_chip_this_host_does_not_have(tmp_path, mo
     _fake_docker(monkeypatch, ps_ids=[])
     with pytest.raises(container.ContainerError, match="does not have"):
         container.ensure_devices_free([99], dev_root=_dev_root(tmp_path))
-
-
-# --------------------------------------------------------------------------- alloc_lock
-
-
-def test_the_lock_is_bypassed_only_for_a_genuinely_absent_device_root(tmp_path):
-    """No driver, no card, CI: nothing to arbitrate, so the section runs unlocked."""
-    absent = tmp_path / "nope"
-    # Proves this reaches the real open (conftest only redirects the DEFAULT root), so the
-    # bypass below is genuinely exercised rather than quietly opening a scratch file.
-    with pytest.raises(FileNotFoundError):
-        container._open_alloc_lock(absent)
-    with container.alloc_lock(dev_root=absent):
-        pass  # must not raise
-
-
-def test_a_contended_lock_is_waited_out_rather_than_refused(tmp_path):
-    """Every hold is short (scan, then docker run), so a caller that queues behind one WILL
-    get in -- refusing it would fail a serve that was always going to succeed."""
-    import threading
-
-    root = _dev_root(tmp_path)
-    held, release = threading.Event(), threading.Event()
-
-    def holder():
-        with container.alloc_lock(dev_root=root):
-            held.set()
-            release.set()  # nothing to wait for: prove the queued caller gets in, not that
-            # it blocks (that is the test below), without a sleep to make it flaky.
-
-    t = threading.Thread(target=holder)
-    t.start()
-    try:
-        assert held.wait(5), "the holder never took the lock"
-        with container.alloc_lock(dev_root=root, timeout_s=5):
-            pass  # got in after the holder let go, rather than raising
-    finally:
-        release.set()
-        t.join()
-
-
-def test_the_wait_is_still_bounded_when_nobody_ever_releases(tmp_path):
-    """Bounded because a lock nobody holds cannot block us -- flock is released by the
-    kernel on exit, crash included -- so exceeding it means something is genuinely wedged."""
-    import threading
-
-    root = _dev_root(tmp_path)
-    held, release = threading.Event(), threading.Event()
-
-    def holder():
-        with container.alloc_lock(dev_root=root):
-            held.set()
-            release.wait(10)
-
-    t = threading.Thread(target=holder)
-    t.start()
-    try:
-        assert held.wait(5), "the holder never took the lock"
-        with pytest.raises(container.ContainerError, match="wedged"):
-            with container.alloc_lock(dev_root=root, timeout_s=0.5):
-                pytest.fail("must not enter a lock held by someone else")
-    finally:
-        release.set()
-        t.join()
-
-
-def test_a_lock_we_cannot_open_is_surfaced_rather_than_silently_skipped(tmp_path, monkeypatch):
-    """A board that IS there but whose lock we cannot take means we cannot serialize --
-    running unlocked there is how two serves end up on the same chip."""
-    def denied(dev_root=None):
-        raise PermissionError(13, "Permission denied")
-
-    monkeypatch.setattr(container, "_open_alloc_lock", denied)
-    with pytest.raises(container.ContainerError, match="unsynchronized"):
-        with container.alloc_lock(dev_root=_dev_root(tmp_path)):
-            pytest.fail("the critical section must not run unlocked")
 
 
 # ------------------------------------------------ scan failures the preview must tolerate
@@ -464,3 +371,4 @@ def test_the_reset_container_is_scoped_to_the_same_ids():
         "/dev/tenstorrent/2:/dev/tenstorrent/2",
         "/dev/tenstorrent/3:/dev/tenstorrent/3",
     ]
+
