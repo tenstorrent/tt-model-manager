@@ -1769,7 +1769,23 @@ def push(
     except container_cli.ContainerCliError as e:
         raise _err(str(e))
 
-    if publish or was_listed:
+    # A catalog listing implies a PUBLIC repo — the same invariant the --publish/--private
+    # conflict and --publish-forces-public already enforce. So `--private` on an already-listed
+    # repo must NOT keep the listing (that would leave a private repo advertised in the public
+    # catalog): delist it. The card `push_container` just re-uploaded already dropped the tag;
+    # make it explicit and say so, rather than restoring it below. (--publish + --private is
+    # rejected earlier, so `publish` is never True here.)
+    if private is True and was_listed:
+        try:
+            hub.set_catalog_listing(target, listed=False)
+        except Exception as exc:  # noqa: BLE001
+            console.note(f"made {target} private, but could not remove its now-stale catalog "
+                         f"listing: {exc}", marker="!", style="warning")
+            console.note(f"delist it with: tt-model unpublish {target}", marker="→")
+        else:
+            console.note(f"made {target} private and removed it from the community catalog "
+                         f"(a private repo cannot be listed)", marker="•")
+    elif publish or was_listed:
         # AFTER the upload, so the tag lands on the model card `package` generated and
         # `push_container` just wrote (set_catalog_listing reloads and unions onto it,
         # rather than clobbering it the way tag_repo would). `--publish` lists it; a repo that

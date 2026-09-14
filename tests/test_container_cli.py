@@ -586,6 +586,23 @@ def test_a_plain_push_preserves_an_existing_catalog_listing(tmp_path, monkeypatc
     assert "kept" in res.output and "catalog" in res.output
 
 
+def test_push_private_on_a_listed_repo_delists_it_not_restores(tmp_path, monkeypatch):
+    """A catalog listing implies a PUBLIC repo. `push --private` on an already-listed repo must
+    make it private AND remove the listing — never restore the tag onto a now-private repo,
+    which would leave a private repo advertised in the public catalog (found in review of #97)."""
+    calls = []
+    monkeypatch.setattr(container_cli, "push_container", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: None)     # flips to private
+    monkeypatch.setattr(hub, "is_listed", lambda r: True)             # was listed (public)
+    monkeypatch.setattr(hub, "set_catalog_listing",
+                        lambda repo_id, listed: calls.append((repo_id, listed)))
+
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path)), "--private"])
+    assert res.exit_code == 0, res.output
+    assert calls == [("raahem/qwen", False)], calls   # DELISTED, not restored to listed=True
+    assert "made" in res.output and "private" in res.output and "catalog" in res.output
+
+
 def test_is_listed_reads_the_live_catalog_tag(monkeypatch):
     from tt_kernel import TT_MODEL_CATALOG_TAG
 
