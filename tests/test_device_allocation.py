@@ -74,6 +74,21 @@ def test_own_label_is_read_back_exactly_regardless_of_mounts():
     assert container._claimed_from_container(info, all_ids=[0, 1, 2, 3]) == {2, 3}
 
 
+def test_a_label_can_only_ever_add_to_the_real_grant_never_mask_it():
+    """Labels are user-controllable -- anything can `docker run --label
+    org.tenstorrent.tt-model.devices=0` while actually holding chip 1. Trusting one over the
+    grant would let metadata HIDE a held chip and hand it straight to the next serve."""
+    info = _container(labels={container.DEVICES_LABEL: "0"},
+                      devices=[{"PathOnHost": "/dev/tenstorrent/1"}])
+    assert container._claimed_from_container(info, all_ids=[0, 1, 2, 3]) == {0, 1}
+
+
+def test_a_lying_label_cannot_free_a_whole_directory_grant():
+    info = _container(labels={container.DEVICES_LABEL: "0"},
+                      devices=[{"PathOnHost": "/dev/tenstorrent"}])
+    assert container._claimed_from_container(info, all_ids=[0, 1, 2, 3]) == {0, 1, 2, 3}
+
+
 def test_a_foreign_container_with_specific_device_nodes_claims_just_those():
     info = _container(devices=[
         {"PathOnHost": "/dev/tenstorrent/1", "PathInContainer": "/dev/tenstorrent/1"},
@@ -261,7 +276,12 @@ def test_ensure_devices_free_allows_a_reachable_node_on_the_same_board(tmp_path,
 
 def test_the_lock_is_bypassed_only_for_a_genuinely_absent_device_root(tmp_path):
     """No driver, no card, CI: nothing to arbitrate, so the section runs unlocked."""
-    with container.alloc_lock(dev_root=tmp_path / "nope"):
+    absent = tmp_path / "nope"
+    # Proves this reaches the real open (conftest only redirects the DEFAULT root), so the
+    # bypass below is genuinely exercised rather than quietly opening a scratch file.
+    with pytest.raises(FileNotFoundError):
+        container._open_alloc_lock(absent)
+    with container.alloc_lock(dev_root=absent):
         pass  # must not raise
 
 

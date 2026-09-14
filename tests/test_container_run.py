@@ -481,7 +481,8 @@ def test_reset_mesh_runs_tt_smi_from_the_image_not_the_host():
 FAKE_ID = "c0ffee1234"
 
 
-def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="", cid=FAKE_ID):
+def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="", cid=FAKE_ID,
+                 inspect_rc=0):
     calls = []
 
     class R:
@@ -494,6 +495,8 @@ def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="", cid
         # stop() reads id + running + the devices label in ONE format string, so match by
         # substring rather than exact element equality and answer with all three fields.
         if "{{.State.Running}}" in joined:
+            if inspect_rc:
+                return R("", inspect_rc)   # `no such container`
             return R(f"{cid}\t{running_state}\t{devices_label}")
         if "{{.State.ExitCode}}" in joined:
             return R(exit_code)
@@ -505,7 +508,7 @@ def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="", cid
 
 def test_a_clean_sigterm_stop_does_not_reset_the_mesh(monkeypatch):
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="0")
-    assert container.stop("c", image="img") is True
+    assert container.stop("c", image="img").clean is True
     assert not any("--entrypoint" in c for c in calls)
     stop_cmd = next(c for c in calls if c[:2] == ["docker", "stop"])
     assert stop_cmd[stop_cmd.index("--timeout") + 1] == str(container.STOP_TIMEOUT_S)
@@ -515,7 +518,7 @@ def test_a_sigkilled_container_triggers_a_mesh_reset(monkeypatch):
     """137 means the grace period expired: the mesh was never closed, eth cores are
     dirty, and the NEXT boot fails unless it is reset now."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137")
-    assert container.stop("c", image="img") is False
+    assert container.stop("c", image="img").clean is False
     assert any("--entrypoint" in c for c in calls)
 
 
@@ -524,7 +527,7 @@ def test_a_dirty_stop_resets_only_the_chips_that_container_held(monkeypatch):
     reset a SIBLING container's live mesh. The ids come from the label stop() reads back."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
                          devices_label="0,1")
-    assert container.stop("c", image="img") is False
+    assert container.stop("c", image="img").clean is False
     reset = next(c for c in calls if "--entrypoint" in c)
     assert [reset[i + 1] for i, a in enumerate(reset) if a == "--device"] == [
         "/dev/tenstorrent/0:/dev/tenstorrent/0",
@@ -537,32 +540,36 @@ def test_a_dirty_stop_without_a_devices_label_falls_back_to_the_whole_directory(
     """A container from before the label existed (or one started by hand) still has to be
     recoverable -- there is no id to scope to, so the old behaviour is the fallback."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137")
-    assert container.stop("c", image="img") is False
+    assert container.stop("c", image="img").clean is False
     reset = next(c for c in calls if "--entrypoint" in c)
     assert reset[reset.index("--device") + 1] == "/dev/tenstorrent"
 
 
-def test_a_stop_never_touches_a_replacement_that_took_the_name(monkeypatch):
-    """stop() can wait on the allocation lock; if our container exits meanwhile, a
-    concurrent serve can remove it and start a replacement under the same name. Stopping
-    "the name" would then kill the winner and reset ITS chips."""
+def test_a_name_that_resolves_to_nothing_is_a_reported_no_op(monkeypatch):
+    """The caller decides to stop by NAME before this function has the lock, so by the time
+    the teardown runs there may be nothing there. Doing nothing is right; reporting it as a
+    clean shutdown (and counting it) would claim work that never happened."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
-                         devices_label="0", cid="replacement999")
-    assert container.stop("c", image="img", expect_id="theoneweasked") is True
+                         inspect_rc=1)
+    result = container.stop("c", image="img")
+    assert result.found is False
     assert not any(c[:2] == ["docker", "stop"] for c in calls)
     assert not any(c[:2] == ["docker", "rm"] for c in calls)
     assert not any("--entrypoint" in c for c in calls)
 
 
-def test_a_stop_proceeds_when_the_name_still_holds_the_expected_container(monkeypatch):
+def test_the_teardown_addresses_the_container_by_id_not_by_name(monkeypatch):
+    """A name is a label that can be reused; the id is the container. Resolving once under
+    the lock and using that id keeps the stop, the removal and the reset on one object."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="0", cid="samecid")
-    assert container.stop("c", image="img", expect_id="samecid") is True
+    assert container.stop("c", image="img").found is True
+    assert any(c[:3] == ["docker", "stop", "--timeout"] and c[-1] == "samecid" for c in calls)
     assert any(c[:3] == ["docker", "rm", "samecid"] for c in calls)
 
 
 def test_an_already_stopped_container_is_just_removed(monkeypatch):
     calls = _fake_docker(monkeypatch, running_state="false", exit_code="")
-    assert container.stop("c", image="img") is True
+    assert container.stop("c", image="img").clean is True
     assert any(c[:3] == ["docker", "rm", FAKE_ID] for c in calls)
     assert not any("--entrypoint" in c for c in calls)
 

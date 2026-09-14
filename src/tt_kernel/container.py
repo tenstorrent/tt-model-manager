@@ -292,7 +292,15 @@ def preflight(*, need_devices: bool, proc_mounts: Optional[Path] = None,
             present = [p.name for p in dev.iterdir() if p.name.isdigit()]
         except OSError:
             present = []
-        fatal = bool(unreachable) and (not present or len(unreachable) >= len(present))
+        # An unreachable ROOT is always fatal, and is reported as the directory rather than
+        # a node list. Counting it like one bad node would compare 1 against however many
+        # chips WE can still see (our supplementary groups let us iterdir even when the
+        # container's mapped identity cannot enter the directory at all) and wave the board
+        # through — the picker would then find nothing usable and blame capacity, burying the
+        # rootless-access diagnosis this check exists to give.
+        root_unreachable = unreachable == [str(dev)]
+        fatal = bool(unreachable) and (
+            root_unreachable or not present or len(unreachable) >= len(present))
         out.append(Requirement(
             "tt devices", not fatal,
             str(dev) if not unreachable else
@@ -375,16 +383,21 @@ def _claimed_from_container(info: dict, all_ids: Sequence[int], *,
     """Chip ids one ``docker inspect`` entry claims (every id, if it holds the whole
     directory) -- from any container, ours or not.
 
-    Our own containers carry ``DEVICES_LABEL`` (written by ``compose_run``), read back
-    exactly rather than re-derived. A foreign one is read from its actual device grant:
-    ``HostConfig.Devices`` covers ``--device``, ``Mounts`` covers a bind mount used instead
-    (some tools mount a node with ``--mount``/``--volume`` rather than ``--device``) -- but
-    only when it shares the HOST ipc namespace (``--ipc host``), which is the one thing that
-    actually exposes it to the UMD lock this whole scheme protects against. A container with
-    a private ipc namespace cannot contend for that lock no matter what it has mounted, so it
-    claims nothing here -- this is what keeps a device-management service (e.g. tt-studio's
-    backend, which mounts the whole directory for telemetry but runs with a private
-    namespace) from making every chip look permanently busy.
+    A claim is read from the container's ACTUAL grant: ``HostConfig.Devices`` covers
+    ``--device``, ``Mounts`` covers a bind mount used instead (some tools mount a node with
+    ``--mount``/``--volume``) -- but only when it shares the HOST ipc namespace
+    (``--ipc host``), which is the one thing that actually exposes it to the UMD lock this
+    scheme protects against. A container with a private ipc namespace cannot contend for that
+    lock no matter what it has mounted, so it claims nothing here -- this is what keeps a
+    device-management service (e.g. tt-studio's backend, which mounts the whole directory for
+    telemetry but runs with a private namespace) from making every chip look permanently busy.
+
+    ``DEVICES_LABEL`` (written by ``compose_run``) is UNIONED in, never substituted for the
+    grant. Labels are attacker- and accident-controllable — anything can `docker run --label
+    org.tenstorrent.tt-model.devices=0` while actually mounting chip 1 — so treating one as
+    authoritative would let metadata HIDE a held chip and hand it to the next serve. Folded in
+    this way it can only ever over-claim, which is the direction that fails safe. For our own
+    containers the two agree, so this changes nothing about them.
 
     A ``--privileged`` container is a separate case: it can reach every ``/dev/tenstorrent/*``
     node through the disabled device cgroup without any of it appearing in ``Devices`` or
@@ -392,17 +405,15 @@ def _claimed_from_container(info: dict, all_ids: Sequence[int], *,
     claiming everything rather than silently reading as free.
     """
     labels = (info.get("Config") or {}).get("Labels") or {}
-    own = labels.get(DEVICES_LABEL)
-    if own:
-        return {int(x) for x in own.split(",") if x.strip().isdigit()}
+    own = labels.get(DEVICES_LABEL) or ""
+    ids: Set[int] = {int(x) for x in own.split(",") if x.strip().isdigit()}
 
     host_config = info.get("HostConfig") or {}
     if not (host_config.get("IpcMode") == "host" if host_ipc is None else host_ipc):
-        return set()
+        return ids
     if host_config.get("Privileged"):
         return set(all_ids)
 
-    ids: Set[int] = set()
     for d in host_config.get("Devices") or []:
         path = (d.get("PathOnHost") or "").rstrip("/")
         if path == TT_DEVICE:
@@ -1078,23 +1089,19 @@ def image_present(ref: str) -> bool:
     return _run(["docker", "image", "inspect", ref], capture_output=True).returncode == 0
 
 
-def container_id(name: str) -> Optional[str]:
-    """The full id of the container currently holding this name, or None.
+@dataclass(frozen=True)
+class StopResult:
+    """Outcome of a teardown. ``found`` distinguishes "there was nothing under that name by
+    the time we held the lock" from "we stopped something", which a bare bool could not: the
+    caller would otherwise report a no-op as a clean shutdown and count it as stopped."""
 
-    The NAME is a label that can be reused; the id is the container. Anything that decides
-    "stop this one" outside the allocation lock has to carry the id forward, or it can end
-    up acting on a replacement that took the name in the meantime — see ``stop``.
-    """
-    r = _run(["docker", "inspect", "--format", "{{.Id}}", name],
-             capture_output=True, text=True)
-    out = r.stdout.strip() if r.returncode == 0 else ""
-    return out or None
+    found: bool
+    clean: bool
 
 
 def stop(name: str, image: Optional[str] = None, *,
-         expect_id: Optional[str] = None,
-         on_wait: Optional[Callable[[], None]] = None) -> bool:
-    """SIGTERM-first stop. Returns True when the shutdown was clean.
+         on_wait: Optional[Callable[[], None]] = None) -> StopResult:
+    """SIGTERM-first stop of whatever holds ``name`` when we get the allocation lock.
 
     ``docker stop`` sends SIGTERM and escalates to SIGKILL after the timeout. A kill means
     the server never closed the mesh — eth cores are left dirty — so in that case the mesh is
@@ -1107,11 +1114,13 @@ def stop(name: str, image: Optional[str] = None, *,
     ``DEVICES_LABEL`` set at launch — otherwise recovering one container's dirty mesh would
     grab the whole directory and reset chips a sibling container is still using.
 
-    ``expect_id`` is the container the CALLER decided to stop. Callers choose by name, often
-    before this function has the lock; if the old container exits while we wait, a concurrent
-    serve can remove it and start a replacement under the same name, and stopping "the name"
-    would then kill the replacement and reset ITS chips. Passing the id makes this a no-op in
-    that case instead.
+    Identity is resolved INSIDE the lock, and everything after is addressed by container id.
+    That is what makes the teardown and the reset scope refer to the same container: a name
+    is a label that can be reused, and a serve can only create a container while holding this
+    same lock, so resolving under it is atomic with respect to every other invocation. An id
+    snapshot taken by the caller BEFORE the lock cannot give that guarantee — the replacement
+    could arrive between the snapshot and the lock, and the pin would then authorise stopping
+    exactly the container it was meant to protect.
     """
     # Held across the WHOLE teardown, INCLUDING the state/label read: this container drops out
     # of the `docker ps` scan the moment it stops running, not when it is removed, so every
@@ -1132,17 +1141,19 @@ def stop(name: str, image: Optional[str] = None, *,
              name],
             capture_output=True, text=True,
         )
-        parts = inspect.stdout.strip().split("\t") if inspect.returncode == 0 else []
+        # strip("\n"), not strip(): the fields are positional, and a plain strip() would eat
+        # an empty LEADING field and shift every value one place left.
+        parts = inspect.stdout.strip("\n").split("\t") if inspect.returncode == 0 else []
         current_id = parts[0] if parts else ""
-        if expect_id and current_id and current_id != expect_id:
-            # The name now belongs to a different container than the one the caller chose:
-            # ours is already gone, and this replacement is someone else's live serve.
-            return True
+        if not current_id:
+            # Gone between the caller's check and this lock, or never there. Nothing to stop,
+            # and saying so beats reporting a clean shutdown that never happened.
+            return StopResult(found=False, clean=True)
         was_running = len(parts) > 1 and parts[1] == "true"
         device_ids = _parse_device_ids(parts[2]) if len(parts) > 2 else None
         # Address the container by id from here on, so nothing downstream can be redirected
         # by the name being reused.
-        target = current_id or name
+        target = current_id
 
         _run(["docker", "stop", "--timeout", str(STOP_TIMEOUT_S), target],
              capture_output=True, text=True)
@@ -1158,7 +1169,7 @@ def stop(name: str, image: Optional[str] = None, *,
 
         if not clean and image:
             reset_mesh(image, device_ids=device_ids)
-    return clean
+    return StopResult(found=True, clean=clean)
 
 
 def compose_reset_mesh(image: str, *, device_ids: Optional[Sequence[int]] = None) -> List[str]:

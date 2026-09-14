@@ -1268,6 +1268,15 @@ def serve(
         # Opt-in re-pull, only for a Hub target: a local manifest path has no revision to
         # compare against. Returns None (and warns) on any failure, leaving cmani as-is.
         if refresh and not local_only and not Path(repo_id).is_file():
+            if not print_only:
+                # Same reason as the pre-pull check above: a refresh downloads a new image
+                # before serve_container ever scans the board, so a full board would pay for
+                # that download first. Re-checked authoritatively under the lock later.
+                try:
+                    container_cli.precheck_capacity(cmani, profile_name=profile,
+                                                    device_id=device_id)
+                except (container_cli.ContainerCliError, container.ContainerError) as e:
+                    raise _err(str(e))
             refreshed = container_cli.refresh_if_newer(repo_id, print_only=print_only)
             if refreshed is not None:
                 cmani = refreshed

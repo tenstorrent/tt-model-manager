@@ -743,6 +743,36 @@ def resolve_target(target: str) -> Optional[Manifest]:
     return load_pulled(target)
 
 
+def parse_device_id(device_id: Optional[str], *, chip_count: int,
+                    profile_name: str) -> Optional[List[int]]:
+    """``--device-id`` as a validated chip list, or None when the flag was not given.
+
+    Shared by ``precheck_capacity`` and ``serve_container`` so the flag is rejected at the
+    FIRST point either runs: validating only in serve_container meant a bad flag on a
+    first-time ``serve org/name`` was reported after the image and weights had downloaded.
+    """
+    if not device_id:
+        return None
+    try:
+        ids = [int(x) for x in device_id.split(",")]
+    except ValueError:
+        raise ContainerCliError(
+            f"--device-id must be a comma-separated list of integers, got {device_id!r}"
+        ) from None
+    # A duplicate (e.g. "0,0" for a 2-chip profile) passes a bare length check while actually
+    # naming one physical chip twice, silently under-sizing the mesh the profile asked for.
+    if any(d < 0 for d in ids) or len(set(ids)) != len(ids):
+        raise ContainerCliError(
+            f"--device-id must be distinct, non-negative chip indices, got {device_id!r}"
+        )
+    if len(ids) != chip_count:
+        raise ContainerCliError(
+            f"--device-id gave {len(ids)} chip(s) but profile {profile_name!r} needs "
+            f"{chip_count}"
+        )
+    return ids
+
+
 def precheck_capacity(manifest: Manifest, *, profile_name: Optional[str] = None,
                       device_id: Optional[str] = None) -> None:
     """Refuse a serve the board cannot fit, BEFORE anything slow happens.
@@ -765,13 +795,9 @@ def precheck_capacity(manifest: Manifest, *, profile_name: Optional[str] = None,
     except ValueError:
         return  # an unknown profile is reported properly by the caller
     chip_count = hardware_chip_count(profile.hardware or "") or 1
-    try:
-        if device_id:
-            ids = [int(x) for x in device_id.split(",")]
-        else:
-            ids = None
-    except ValueError:
-        return  # malformed --device-id is reported properly by the caller
+    # Validated HERE too, not just in serve_container: this runs before the pull, so a bad
+    # flag caught only later would cost the image and weight download first.
+    ids = parse_device_id(device_id, chip_count=chip_count, profile_name=profile.name)
     try:
         if ids is not None:
             container.ensure_devices_free(ids)
@@ -843,26 +869,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     # `hardware` is validated against `mesh_device` at package time, so this is trustworthy
     # for any manifest that made it through `tt-model package`.
     chip_count = hardware_chip_count(profile.hardware or "") or 1
-    requested_device_ids: Optional[List[int]] = None
-    if device_id:
-        try:
-            requested_device_ids = [int(x) for x in device_id.split(",")]
-        except ValueError:
-            raise ContainerCliError(
-                f"--device-id must be a comma-separated list of integers, got {device_id!r}"
-            ) from None
-        # Caught here rather than left to the count check below: a duplicate (e.g. "0,0" for
-        # a 2-chip profile) passes a bare length check while actually naming one physical
-        # chip twice, silently under-sizing the mesh the profile asked for.
-        if any(d < 0 for d in requested_device_ids) or len(set(requested_device_ids)) != len(requested_device_ids):
-            raise ContainerCliError(
-                f"--device-id must be distinct, non-negative chip indices, got {device_id!r}"
-            )
-        if len(requested_device_ids) != chip_count:
-            raise ContainerCliError(
-                f"--device-id gave {len(requested_device_ids)} chip(s) but profile "
-                f"{profile.name!r} needs {chip_count}"
-            )
+    requested_device_ids = parse_device_id(device_id, chip_count=chip_count,
+                                           profile_name=profile.name)
 
     if not print_only:
         precheck_capacity(manifest, profile_name=profile_name, device_id=device_id)
@@ -1140,17 +1148,25 @@ def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) ->
     for name in names:
         if not container.running(name):
             continue
-        # Pin the identity to the container we just decided to stop: `stop` may wait on the
-        # allocation lock, and a name freed in the meantime can be taken by a replacement.
-        expect_id = container.container_id(name)
-        stopped += 1
         with console.step(f"stopping {name}") as st:
-            clean = container.stop(
-                name, image=container.image_ref(manifest), expect_id=expect_id,
+            # `stop` resolves the container under the allocation lock and reports whether it
+            # found anything: this check ran before that lock, so the container can be gone
+            # by the time the teardown actually runs, and counting that as a clean shutdown
+            # would claim work that never happened.
+            result = container.stop(
+                name, image=container.image_ref(manifest),
                 on_wait=lambda: st.detail("waiting for the device lock"),
             )
-            st.detail("clean shutdown" if clean else "killed — mesh reset attempted")
-        if not clean:
+            if not result.found:
+                st.detail("already gone")
+            elif result.clean:
+                st.detail("clean shutdown")
+            else:
+                st.detail("killed — mesh reset attempted")
+        if not result.found:
+            continue
+        stopped += 1
+        if not result.clean:
             # Deliberately not "the next boot is safe" (issue #107): on a force-killed
             # teardown `tt-smi -r` does NOT reliably recover the device — boots then wedge on
             # the first large host→device DMA (`could only pin N of M pages`) until the host
