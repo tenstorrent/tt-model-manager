@@ -342,7 +342,8 @@ run on a build host; a later `serve` starts the container. Around them:
   ~10 min).
 - `tt-model stop you/my-model` — a clean `SIGTERM` closes the mesh. A `SIGKILL` leaves it
   dirty: `stop` then attempts a `tt-smi -r` scoped to that container's own chips (read back
-  from the label `serve` set), but that
+  from the label `serve` set, and skipped if another container has taken one of them since),
+  but that
   is best-effort recovery, not a guarantee — a force-killed teardown can leave a device that
   only a host reboot restores (issue #107).
 - `tt-model rm you/my-model` — removes a *pulled* container package, including its HF

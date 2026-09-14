@@ -1002,6 +1002,18 @@ def stop(name: str, image: Optional[str] = None) -> bool:
     _run(["docker", "rm", name], capture_output=True, text=True)
 
     if not clean and image:
+        # Re-scan immediately before resetting. Removing the container released its chips,
+        # so a serve can have taken one in the interval and be mid-bring-up on it -- and a
+        # `tt-smi -r` aimed at that chip would wipe a LIVE mesh. Checked rather than locked,
+        # for the reason in ``pick_free_devices``: this shrinks the exposure from the whole
+        # reset (tens of seconds) to the few ms between the check and the reset starting,
+        # and turns the remaining failure from destructive into a skipped recovery.
+        # Only a POSITIVE "someone else has it" skips: a scan that cannot answer means
+        # docker is unwell, not that the chip is taken, and refusing to recover then would
+        # leave a dirty mesh for no reason.
+        taken = _claimed_devices(device_ids) if device_ids else None
+        if taken and set(device_ids) & taken:
+            return clean
         reset_mesh(image, device_ids=device_ids)
     return clean
 

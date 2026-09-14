@@ -477,7 +477,9 @@ def test_reset_mesh_runs_tt_smi_from_the_image_not_the_host():
 
 
 def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="",
-                 inspect_rc=0):
+                 inspect_rc=0, now_claimed=None):
+    """``now_claimed`` is what the pre-reset re-scan should report as taken by someone
+    else -- i.e. a serve that grabbed the chip in the gap after the container was removed."""
     calls = []
 
     class R:
@@ -487,6 +489,14 @@ def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="",
     def fake(argv, **kw):
         calls.append(argv)
         joined = " ".join(argv)
+        if argv[:3] == ["docker", "ps", "-q"]:
+            return R("someone-else\n" if now_claimed else "")
+        if argv[:2] == ["docker", "inspect"] and "--format" not in argv:
+            return R(json.dumps([{
+                "Id": "someone-else",
+                "HostConfig": {"IpcMode": "host", "Devices": [
+                    {"PathOnHost": f"/dev/tenstorrent/{d}"} for d in (now_claimed or ())]},
+            }]))
         # stop() reads running + the devices label in ONE format string, so match by
         # substring rather than exact element equality and answer with both fields.
         if "{{.State.Running}}" in joined:
@@ -529,6 +539,25 @@ def test_a_dirty_stop_resets_only_the_chips_that_container_held(monkeypatch):
         "/dev/tenstorrent/1:/dev/tenstorrent/1",
     ]
     assert "/dev/tenstorrent" not in reset  # never the whole directory
+
+
+def test_a_chip_taken_since_the_removal_is_not_reset_under_the_new_owner(monkeypatch):
+    """Removing the container releases its chips, so a serve can grab one before the reset
+    runs. Resetting then would wipe a LIVE mesh -- skipping is the recoverable failure."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
+                         devices_label="0,1", now_claimed=[1])
+    assert container.stop("c", image="img") is False
+    assert not any("--entrypoint" in c for c in calls), "reset a chip someone else now holds"
+
+
+def test_a_chip_still_free_at_teardown_is_reset_as_usual(monkeypatch):
+    """The skip must be narrow: an unrelated container holding a DIFFERENT chip is no
+    reason to leave our own dirty mesh unrecovered."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
+                         devices_label="0", now_claimed=[3])
+    assert container.stop("c", image="img") is False
+    reset = next(c for c in calls if "--entrypoint" in c)
+    assert reset[reset.index("--device") + 1] == "/dev/tenstorrent/0:/dev/tenstorrent/0"
 
 
 def test_a_malformed_devices_label_falls_back_instead_of_narrowing_the_reset(monkeypatch):
