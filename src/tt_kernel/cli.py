@@ -1269,18 +1269,12 @@ def serve(
         # Opt-in re-pull, only for a Hub target: a local manifest path has no revision to
         # compare against. Returns None (and warns) on any failure, leaving cmani as-is.
         if refresh and not local_only and not Path(repo_id).is_file():
-            if not print_only:
-                # Same reason as the pre-pull check above: --refresh pulls a new image
-                # before serve_container ever scans, so a full board would pay for that
-                # download first. This looks at the INSTALLED manifest (the refreshed one
-                # does not exist yet), so it can disagree with what actually gets served --
-                # harmless, because serve_container re-checks the refreshed manifest right
-                # before launching, and that check is the authoritative one.
-                try:
-                    container_cli.precheck_capacity(cmani, profile_name=profile,
-                                                    device_id=device_id)
-                except (container_cli.ContainerCliError, container.ContainerError) as e:
-                    raise _err(str(e))
+            # Deliberately NOT capacity-checked first, unlike the auto-pull above. The only
+            # manifest on hand here is the INSTALLED one; the candidate does not exist until
+            # refresh_if_newer fetches it. Checking the stale one rejects a --profile that
+            # exists only in the new revision, which is a worse outcome than the download it
+            # would save -- and the saving is small, since --refresh re-pulls layers over an
+            # image already present. serve_container checks the refreshed manifest.
             refreshed = container_cli.refresh_if_newer(repo_id, print_only=print_only)
             if refreshed is not None:
                 cmani = refreshed

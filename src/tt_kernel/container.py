@@ -320,10 +320,16 @@ def _grant_claims_everything(path: str) -> bool:
     node just as completely, while matching neither the directory nor the per-node pattern.
     Reading such a grant as "claims nothing" is the failure that matters here, so anything
     at or above the device root counts as the whole board.
+
+    Compared segment by segment rather than by string prefix: a prefix test has to special-
+    case the root (``/``) and still says yes to ``/dev/tenstorrent-foo``, which is a
+    different directory entirely.
     """
     if not path:
         return False
-    return path == TT_DEVICE or TT_DEVICE.startswith(path.rstrip("/") + "/")
+    want = TT_DEVICE.strip("/").split("/")        # ["dev", "tenstorrent"]
+    have = [seg for seg in path.split("/") if seg]  # "/" -> [], "/dev" -> ["dev"]
+    return len(have) <= len(want) and have == want[:len(have)]
 
 
 def _parse_device_ids(raw: str) -> Optional[List[int]]:

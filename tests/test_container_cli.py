@@ -318,24 +318,18 @@ def test_a_first_time_serve_checks_capacity_before_pulling_anything(tmp_path, mo
     assert res.exit_code != 0
     assert order == ["capacity"], f"pulled before checking the board: {order}"
 
-
-def test_a_refresh_checks_capacity_before_downloading_the_new_image(tmp_path, monkeypatch):
-    """--refresh re-pulls the image before serve_container ever scans, so the check has to
-    sit ahead of that pull too, not just ahead of the first-time one."""
+def test_a_refresh_is_not_blocked_by_a_profile_only_the_new_revision_has(tmp_path, monkeypatch):
+    """The installed manifest is the only one on hand before refresh_if_newer runs, so
+    capacity-checking against it would reject a --profile the new revision adds."""
     order = []
     monkeypatch.setattr(container_cli, "resolve_target", lambda t: _manifest(tmp_path))
     monkeypatch.setattr(Path, "is_file", lambda self: False)
     monkeypatch.setattr(container_cli, "refresh_if_newer",
                         lambda *a, **k: order.append("refresh"))
-
-    def busy(count, dev_root=None):
-        order.append("capacity")
-        raise container.ContainerError("only 0 of 4 tt device(s) are free")
-
-    monkeypatch.setattr(container, "pick_free_devices", busy)
-    res = runner.invoke(cli.app, ["serve", "org/m", "--refresh"])
-    assert res.exit_code != 0
-    assert order == ["capacity"], f"refreshed before checking the board: {order}"
+    monkeypatch.setattr(container, "pick_free_devices",
+                        lambda *a, **k: pytest.fail("scanned against the stale manifest"))
+    runner.invoke(cli.app, ["serve", "org/m", "--refresh", "--profile", "only-in-new"])
+    assert order == ["refresh"], f"never reached the refresh: {order}"
 
 
 def test_an_invalid_device_id_is_rejected_before_the_auto_pull(tmp_path, monkeypatch):

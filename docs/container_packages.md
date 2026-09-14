@@ -484,9 +484,12 @@ What the picker does:
   a label can only ever over-claim, never hide a held chip. A container that does not share
   the host ipc namespace claims nothing.
 - **Refuses instead of hanging.** Not enough free chips is an immediate error naming what is
-  busy, raised ahead of the expensive steps — the first-time auto-pull, the `--refresh`
-  pull, the image self-heal, the weights prefetch — and re-checked immediately before
-  `docker run`.
+  busy, raised ahead of the expensive steps — the first-time auto-pull, the image
+  self-heal, the weights prefetch — and re-checked immediately before `docker run`.
+  (`--refresh` is the exception: the candidate manifest does not exist yet, and checking
+  the installed one would reject a profile the new revision adds.)
+- **Validates `--device-id` against the real inventory** — `--device-id 99` on a four-chip
+  box is refused up front, not minutes later inside docker.
 
 The pick is advisory, not a reservation: nothing is held between the scan and the container
 starting (~100ms), so two `serve` commands launched within that window could choose the same
@@ -495,8 +498,6 @@ lock would close that sliver, at the cost of every docker call inside it being a
 lock that blocks *every* serve on the box; that is the worse failure, so it is not taken.
 Two serves of the same model and profile are excluded regardless, by docker's own container
 name uniqueness.
-- **Validates `--device-id` against the real inventory** — `--device-id 99` on a four-chip
-  box is refused up front, not minutes later inside docker.
 
 One wrinkle worth knowing: a single chip that is physically one ASIC of a fused multi-chip
 board (half a P300) reports the *board's* type to tt-metal, which cannot match "P300 board,
