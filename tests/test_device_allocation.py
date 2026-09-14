@@ -11,7 +11,6 @@ on any real docker daemon.
 """
 
 import json
-import time
 from pathlib import Path
 
 import pytest
@@ -250,27 +249,6 @@ def test_ensure_devices_free_refuses_a_chip_this_host_does_not_have(tmp_path, mo
         container.ensure_devices_free([99], dev_root=_dev_root(tmp_path))
 
 
-def test_ensure_devices_free_refuses_a_node_the_rootless_identity_cannot_open(
-        tmp_path, monkeypatch):
-    """preflight deliberately tolerates a partially inaccessible board now, so without this
-    an explicit pin on one of those nodes passes every check and fails inside docker."""
-    _fake_docker(monkeypatch, ps_ids=[])
-    root = _dev_root(tmp_path, ids=(0, 1))
-    (root / "0").chmod(0o660)
-    monkeypatch.setattr(container, "_reachable_in_userns",
-                        lambda p, mode: p.name != "0")
-    with pytest.raises(container.ContainerError, match="not accessible to your uid"):
-        container.ensure_devices_free([0], dev_root=root, rootless=True)
-
-
-def test_ensure_devices_free_allows_a_reachable_node_on_the_same_board(tmp_path, monkeypatch):
-    _fake_docker(monkeypatch, ps_ids=[])
-    root = _dev_root(tmp_path, ids=(0, 1))
-    monkeypatch.setattr(container, "_reachable_in_userns",
-                        lambda p, mode: p.name != "0")
-    container.ensure_devices_free([1], dev_root=root, rootless=True)  # must not raise
-
-
 # --------------------------------------------------------------------------- alloc_lock
 
 
@@ -286,29 +264,28 @@ def test_the_lock_is_bypassed_only_for_a_genuinely_absent_device_root(tmp_path):
 
 
 def test_a_contended_lock_is_waited_out_rather_than_refused(tmp_path):
-    """Every hold is bounded (a teardown is docker stop's grace period plus a bounded
-    reset), so a caller that queues behind one WILL get in -- refusing it would fail a serve
-    that was always going to succeed."""
+    """Every hold is short (scan, then docker run), so a caller that queues behind one WILL
+    get in -- refusing it would fail a serve that was always going to succeed."""
     import threading
 
     root = _dev_root(tmp_path)
-    released, waited = threading.Event(), []
+    held, release = threading.Event(), threading.Event()
 
     def holder():
         with container.alloc_lock(dev_root=root):
-            released.wait(5)
+            held.set()
+            release.set()  # nothing to wait for: prove the queued caller gets in, not that
+            # it blocks (that is the test below), without a sleep to make it flaky.
 
     t = threading.Thread(target=holder)
     t.start()
     try:
-        time.sleep(0.2)  # let the holder take it
-        with container.alloc_lock(dev_root=root, timeout_s=5,
-                                  on_wait=lambda: waited.append(True)):
+        assert held.wait(5), "the holder never took the lock"
+        with container.alloc_lock(dev_root=root, timeout_s=5):
             pass  # got in after the holder let go, rather than raising
     finally:
-        released.set()
+        release.set()
         t.join()
-    assert waited == [True], "the wait should have been announced exactly once"
 
 
 def test_the_wait_is_still_bounded_when_nobody_ever_releases(tmp_path):
@@ -317,29 +294,23 @@ def test_the_wait_is_still_bounded_when_nobody_ever_releases(tmp_path):
     import threading
 
     root = _dev_root(tmp_path)
-    release = threading.Event()
+    held, release = threading.Event(), threading.Event()
 
     def holder():
         with container.alloc_lock(dev_root=root):
+            held.set()
             release.wait(10)
 
     t = threading.Thread(target=holder)
     t.start()
     try:
-        time.sleep(0.2)
+        assert held.wait(5), "the holder never took the lock"
         with pytest.raises(container.ContainerError, match="wedged"):
             with container.alloc_lock(dev_root=root, timeout_s=0.5):
                 pytest.fail("must not enter a lock held by someone else")
     finally:
         release.set()
         t.join()
-
-
-def test_the_wait_budget_covers_the_worst_case_teardown():
-    """The number is derived, not picked: a serve must be able to outlast the longest a
-    teardown can legitimately hold the lock, or waiting is not actually a promise."""
-    assert container._DEVICE_ALLOC_LOCK_TIMEOUT_S >= (
-        container.STOP_TIMEOUT_S + container.RESET_TIMEOUT_S)
 
 
 def test_a_lock_we_cannot_open_is_surfaced_rather_than_silently_skipped(tmp_path, monkeypatch):

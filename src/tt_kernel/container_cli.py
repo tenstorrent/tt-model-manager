@@ -20,7 +20,7 @@ import shlex
 import shutil
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from . import MANIFEST_NAME, console, container, hub, localdb, oci
 from .boot_progress import BootTracker, diagnose_boot, summarize
@@ -745,13 +745,8 @@ def resolve_target(target: str) -> Optional[Manifest]:
 
 def parse_device_id(device_id: Optional[str], *, chip_count: int,
                     profile_name: str) -> Optional[List[int]]:
-    """``--device-id`` as a validated chip list, or None when the flag was not given.
-
-    Shared by ``precheck_capacity`` and ``serve_container`` so the flag is rejected at the
-    FIRST point either runs: validating only in serve_container meant a bad flag on a
-    first-time ``serve org/name`` was reported after the image and weights had downloaded.
-    """
-    if not device_id:
+    """``--device-id`` as a validated chip list, or None when the flag was not given."""
+    if device_id is None:
         return None
     try:
         ids = [int(x) for x in device_id.split(",")]
@@ -773,34 +768,18 @@ def parse_device_id(device_id: Optional[str], *, chip_count: int,
     return ids
 
 
-def precheck_capacity(manifest: Manifest, *, profile_name: Optional[str] = None,
-                      device_id: Optional[str] = None) -> None:
-    """Refuse a serve the board cannot fit, BEFORE anything slow happens.
+def precheck_capacity(chip_count: int, device_ids: Optional[Sequence[int]]) -> None:
+    """Refuse a serve the board cannot fit, BEFORE the weights are fetched.
 
     The authoritative check runs under the allocation lock immediately before ``docker run``,
-    which is correct but late: by then the image may have been pulled or repaired and the
-    weights fetched. On a first-time ``tt-model serve org/name`` the pull happens earlier
-    still, in ``cli.serve``, so this is called from there too — a full board should cost a
-    second, not a multi-GB download of weights the serve can never use.
-
-    Non-reserving on purpose: it takes no lock and holds nothing, so it can be wrong by the
-    time the real check runs. That is fine — it only ever turns a late failure into an early
-    one. Not being able to tell yet (no docker, no card) is not a refusal.
+    which is correct but late: by then a multi-GB weight download has happened for a serve
+    that could never have started. Non-reserving on purpose -- it takes no lock and holds
+    nothing, so it can only ever turn a late failure into an early one. Not being able to
+    tell yet (no docker, no card) is not a refusal.
     """
-    spec = manifest.container
-    if spec is None:
-        return
     try:
-        profile = spec.resolve_profile(profile_name)
-    except ValueError:
-        return  # an unknown profile is reported properly by the caller
-    chip_count = hardware_chip_count(profile.hardware or "") or 1
-    # Validated HERE too, not just in serve_container: this runs before the pull, so a bad
-    # flag caught only later would cost the image and weight download first.
-    ids = parse_device_id(device_id, chip_count=chip_count, profile_name=profile.name)
-    try:
-        if ids is not None:
-            container.ensure_devices_free(ids)
+        if device_ids is not None:
+            container.ensure_devices_free(device_ids)
         else:
             container.pick_free_devices(chip_count)
     except container.DeviceScanUnavailable:
@@ -871,9 +850,6 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     chip_count = hardware_chip_count(profile.hardware or "") or 1
     requested_device_ids = parse_device_id(device_id, chip_count=chip_count,
                                            profile_name=profile.name)
-
-    if not print_only:
-        precheck_capacity(manifest, profile_name=profile_name, device_id=device_id)
 
     if port is not None:
         # Override BEFORE composition, so --publish and the launcher's --port are both
@@ -986,6 +962,11 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         raise ContainerCliError(
             f"{name} is already running. Stop it first:  tt-model stop {what}"
         )
+    # After the is_running check, so an already-running model reports that rather than the
+    # "not enough free chips" its own container is the reason for. Before ensure_weights,
+    # which is the expensive step this exists to get ahead of.
+    precheck_capacity(chip_count, requested_device_ids)
+
     # As the host user, so the daemon does not create them as root: see
     # container.ensure_mount_sources.
     container.ensure_mount_sources(manifest)
@@ -1047,24 +1028,17 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     container.remove(name, force=True)
                 raise
 
-        # A teardown can legitimately hold the lock for a couple of minutes, and we wait it
-        # out rather than refusing -- but a silent wait looks exactly like the hang this all
-        # exists to prevent, so say what we are waiting for.
-        waiting = lambda: view.detail(  # noqa: E731 - one-liner, used twice below
-            "another serve/stop holds the device lock; waiting for it to finish")
-
         if requested_device_ids is not None:
             # Same lock the auto-picker uses (container.device_allocation), held across the
-            # same "check free -> launch" window -- an explicit pin still has to coordinate
-            # with a concurrent stop()'s teardown, or with another concurrent serve, even
-            # though it skips the picker itself.
-            with container.alloc_lock(on_wait=waiting):
+            # same "check free -> launch" window: an explicit pin still has to coordinate
+            # with a concurrent serve even though it skips the picker itself.
+            with container.alloc_lock():
                 container.ensure_devices_free(requested_device_ids)
                 _start(requested_device_ids)
         else:
             # Held across "check what's free -> pick -> docker run" -- see
             # container.device_allocation.
-            with container.device_allocation(chip_count, on_wait=waiting) as picked_ids:
+            with container.device_allocation(chip_count) as picked_ids:
                 _start(picked_ids)
         view.done("container started")
         if detach:
@@ -1148,25 +1122,11 @@ def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) ->
     for name in names:
         if not container.running(name):
             continue
-        with console.step(f"stopping {name}") as st:
-            # `stop` resolves the container under the allocation lock and reports whether it
-            # found anything: this check ran before that lock, so the container can be gone
-            # by the time the teardown actually runs, and counting that as a clean shutdown
-            # would claim work that never happened.
-            result = container.stop(
-                name, image=container.image_ref(manifest),
-                on_wait=lambda: st.detail("waiting for the device lock"),
-            )
-            if not result.found:
-                st.detail("already gone")
-            elif result.clean:
-                st.detail("clean shutdown")
-            else:
-                st.detail("killed — mesh reset attempted")
-        if not result.found:
-            continue
         stopped += 1
-        if not result.clean:
+        with console.step(f"stopping {name}") as st:
+            clean = container.stop(name, image=container.image_ref(manifest))
+            st.detail("clean shutdown" if clean else "killed — mesh reset attempted")
+        if not clean:
             # Deliberately not "the next boot is safe" (issue #107): on a force-killed
             # teardown `tt-smi -r` does NOT reliably recover the device — boots then wedge on
             # the first large host→device DMA (`could only pin N of M pages`) until the host

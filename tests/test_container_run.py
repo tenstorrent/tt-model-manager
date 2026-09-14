@@ -476,12 +476,7 @@ def test_reset_mesh_runs_tt_smi_from_the_image_not_the_host():
     assert argv[-3:] == ["tt-model/x:1", "-r", "all"]
 
 
-#: What the fake container's `docker inspect` reports as its id. stop() addresses the
-#: container by id once it has one, so assertions match on this rather than the name.
-FAKE_ID = "c0ffee1234"
-
-
-def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="", cid=FAKE_ID,
+def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="",
                  inspect_rc=0):
     calls = []
 
@@ -492,12 +487,12 @@ def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="", cid
     def fake(argv, **kw):
         calls.append(argv)
         joined = " ".join(argv)
-        # stop() reads id + running + the devices label in ONE format string, so match by
-        # substring rather than exact element equality and answer with all three fields.
+        # stop() reads running + the devices label in ONE format string, so match by
+        # substring rather than exact element equality and answer with both fields.
         if "{{.State.Running}}" in joined:
             if inspect_rc:
                 return R("", inspect_rc)   # `no such container`
-            return R(f"{cid}\t{running_state}\t{devices_label}")
+            return R(f"{running_state}\t{devices_label}")
         if "{{.State.ExitCode}}" in joined:
             return R(exit_code)
         return R()
@@ -508,7 +503,7 @@ def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="", cid
 
 def test_a_clean_sigterm_stop_does_not_reset_the_mesh(monkeypatch):
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="0")
-    assert container.stop("c", image="img").clean is True
+    assert container.stop("c", image="img") is True
     assert not any("--entrypoint" in c for c in calls)
     stop_cmd = next(c for c in calls if c[:2] == ["docker", "stop"])
     assert stop_cmd[stop_cmd.index("--timeout") + 1] == str(container.STOP_TIMEOUT_S)
@@ -518,7 +513,7 @@ def test_a_sigkilled_container_triggers_a_mesh_reset(monkeypatch):
     """137 means the grace period expired: the mesh was never closed, eth cores are
     dirty, and the NEXT boot fails unless it is reset now."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137")
-    assert container.stop("c", image="img").clean is False
+    assert container.stop("c", image="img") is False
     assert any("--entrypoint" in c for c in calls)
 
 
@@ -527,7 +522,7 @@ def test_a_dirty_stop_resets_only_the_chips_that_container_held(monkeypatch):
     reset a SIBLING container's live mesh. The ids come from the label stop() reads back."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
                          devices_label="0,1")
-    assert container.stop("c", image="img").clean is False
+    assert container.stop("c", image="img") is False
     reset = next(c for c in calls if "--entrypoint" in c)
     assert [reset[i + 1] for i, a in enumerate(reset) if a == "--device"] == [
         "/dev/tenstorrent/0:/dev/tenstorrent/0",
@@ -540,37 +535,25 @@ def test_a_dirty_stop_without_a_devices_label_falls_back_to_the_whole_directory(
     """A container from before the label existed (or one started by hand) still has to be
     recoverable -- there is no id to scope to, so the old behaviour is the fallback."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137")
-    assert container.stop("c", image="img").clean is False
+    assert container.stop("c", image="img") is False
     reset = next(c for c in calls if "--entrypoint" in c)
     assert reset[reset.index("--device") + 1] == "/dev/tenstorrent"
 
 
-def test_a_name_that_resolves_to_nothing_is_a_reported_no_op(monkeypatch):
-    """The caller decides to stop by NAME before this function has the lock, so by the time
-    the teardown runs there may be nothing there. Doing nothing is right; reporting it as a
-    clean shutdown (and counting it) would claim work that never happened."""
-    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
-                         inspect_rc=1)
-    result = container.stop("c", image="img")
-    assert result.found is False
-    assert not any(c[:2] == ["docker", "stop"] for c in calls)
-    assert not any(c[:2] == ["docker", "rm"] for c in calls)
+def test_an_uninspectable_container_is_still_stopped_and_removed(monkeypatch):
+    """A failed inspect means "we could not read its state", not "there is nothing there":
+    the stop and the removal still have to run, just without a scoped reset to aim."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137", inspect_rc=1)
+    assert container.stop("c", image="img") is True
+    assert any(c[:2] == ["docker", "stop"] for c in calls)
+    assert any(c[:2] == ["docker", "rm"] for c in calls)
     assert not any("--entrypoint" in c for c in calls)
-
-
-def test_the_teardown_addresses_the_container_by_id_not_by_name(monkeypatch):
-    """A name is a label that can be reused; the id is the container. Resolving once under
-    the lock and using that id keeps the stop, the removal and the reset on one object."""
-    calls = _fake_docker(monkeypatch, running_state="true", exit_code="0", cid="samecid")
-    assert container.stop("c", image="img").found is True
-    assert any(c[:3] == ["docker", "stop", "--timeout"] and c[-1] == "samecid" for c in calls)
-    assert any(c[:3] == ["docker", "rm", "samecid"] for c in calls)
 
 
 def test_an_already_stopped_container_is_just_removed(monkeypatch):
     calls = _fake_docker(monkeypatch, running_state="false", exit_code="")
-    assert container.stop("c", image="img").clean is True
-    assert any(c[:3] == ["docker", "rm", FAKE_ID] for c in calls)
+    assert container.stop("c", image="img") is True
+    assert any(c[:3] == ["docker", "rm", "c"] for c in calls)
     assert not any("--entrypoint" in c for c in calls)
 
 
@@ -828,11 +811,8 @@ def test_group_only_devices_still_pass_under_a_rootful_daemon(tmp_path, monkeypa
     assert _fail_names(_pf(tmp_path, monkeypatch, rootless=False, dev_mode=0o660)) == []
 
 
-def test_a_single_unreachable_board_is_named_but_no_longer_fatal(tmp_path, monkeypatch):
-    """It used to be fatal because every container opened every node. Now serve scopes a
-    container to the chip(s) it picks, and the picker skips nodes it cannot open — so one
-    locked-down board must not refuse a profile that only needs a different one. Still
-    NAMED, because a board silently dropping out of the pool is worth seeing."""
+def test_a_single_unreachable_board_fails_and_is_named(tmp_path, monkeypatch):
+    """umd opens every node, so one unreachable board is a failed boot, not a small mesh."""
     _as_stranger(monkeypatch)
     monkeypatch.setattr(container, "_docker_version", lambda: "29.5.3")
     mounts = tmp_path / "mounts"
@@ -843,25 +823,10 @@ def test_a_single_unreachable_board_is_named_but_no_longer_fatal(tmp_path, monke
         node = dev / name
         node.touch()
         node.chmod(mode)
-    reqs = container.preflight(need_devices=True, proc_mounts=mounts, dev_root=dev,
-                               rootless=True)
-    assert container.preflight_failures(reqs) == []
-    assert next(r for r in reqs if r.name == "tt devices").detail == \
-        "1 not accessible to your uid"
-
-
-def test_the_picker_skips_a_node_it_could_not_open_under_rootless(tmp_path, monkeypatch, real_picker):
-    """The other half of the same contract: a node preflight no longer rejects the board
-    for must not then be handed to a container that cannot open it."""
-    _as_stranger(monkeypatch)
-    dev = tmp_path / "tenstorrent"
-    dev.mkdir()
-    for name, mode in (("0", 0o660), ("1", 0o666)):
-        node = dev / name
-        node.touch()
-        node.chmod(mode)
-    monkeypatch.setattr(container, "_claimed_devices", lambda ids: set())
-    assert container.pick_free_devices(1, dev_root=dev, rootless=True) == [1]
+    bad = container.preflight_failures(container.preflight(
+        need_devices=True, proc_mounts=mounts, dev_root=dev, rootless=True))
+    assert [r.name for r in bad] == ["tt devices"]
+    assert bad[0].detail == "1 not accessible to your uid"
 
 
 def test_hugepages_unwritable_under_rootless_is_caught_with_the_mount_fix(

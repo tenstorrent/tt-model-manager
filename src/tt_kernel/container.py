@@ -45,7 +45,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .manifest import DEFAULT_PORT, Manifest, ServeProfile
 
@@ -65,9 +65,8 @@ STOP_TIMEOUT_S = 120
 # 128 + SIGKILL(9): docker's grace period expired and it hard-killed the server.
 SIGKILL_EXIT_CODE = "137"
 
-#: Cap on the dirty-mesh `tt-smi -r`, which runs while `stop` holds the allocation lock.
-#: Generous (a real reset is tens of seconds) but finite, so the worst-case hold stays a
-#: number other callers can wait out rather than an open question.
+#: Cap on the dirty-mesh `tt-smi -r` a dirty `stop` runs. Generous (a real reset is tens of
+#: seconds) but finite, so a wedged reset container cannot hang `tt-model stop` forever.
 RESET_TIMEOUT_S = 180
 
 
@@ -198,26 +197,11 @@ _ROOTLESS_HUGEPAGES_FIX = (
 )
 
 
-def _reachable_device_ids(dev_root: Path, ids: Sequence[int]) -> List[int]:
-    """Which of ``ids`` a rootless container could actually open read-write.
-
-    The picker uses this so ONE inaccessible node does not cost the whole board: a profile
-    that needs a chip it can open should get one, not be refused because an unrelated node
-    is locked down. See ``_reachable_in_userns`` for why this is not ``os.access``.
-    """
-    if not _reachable_in_userns(dev_root, mode=os.R_OK | os.X_OK):
-        return []
-    return [i for i in ids
-            if _reachable_in_userns(dev_root / str(i), mode=os.R_OK | os.W_OK)]
-
-
 def _unreachable_devices(dev_root: Path) -> List[str]:
     """Which /dev/tenstorrent nodes a rootless container could not open read-write.
 
-    Reported so a board dropping out of the usable pool is visible; no longer fatal on its
-    own, because a container is now scoped to the chip(s) it was given and the picker only
-    hands out nodes it can open (``_reachable_device_ids``). A board with NOTHING reachable
-    is still a failed preflight -- see ``preflight``.
+    The directory needs search, then every numbered node needs read-write: umd opens all
+    of them, so one unreachable board is a failed boot rather than a smaller mesh.
     """
     if not _reachable_in_userns(dev_root, mode=os.R_OK | os.X_OK):
         return [str(dev_root)]
@@ -284,28 +268,11 @@ def preflight(*, need_devices: bool, proc_mounts: Optional[Path] = None,
         ))
     else:
         unreachable = _unreachable_devices(dev) if rootless else []
-        # Partial inaccessibility is NOT fatal any more: serve scopes a container to the
-        # specific chip(s) it picks, and the picker only ever hands out a node it can
-        # actually open, so one locked-down node must not refuse a profile that needs a
-        # different one. Only a board with nothing usable left is a failed preflight.
-        try:
-            present = [p.name for p in dev.iterdir() if p.name.isdigit()]
-        except OSError:
-            present = []
-        # An unreachable ROOT is always fatal, and is reported as the directory rather than
-        # a node list. Counting it like one bad node would compare 1 against however many
-        # chips WE can still see (our supplementary groups let us iterdir even when the
-        # container's mapped identity cannot enter the directory at all) and wave the board
-        # through — the picker would then find nothing usable and blame capacity, burying the
-        # rootless-access diagnosis this check exists to give.
-        root_unreachable = unreachable == [str(dev)]
-        fatal = bool(unreachable) and (
-            root_unreachable or not present or len(unreachable) >= len(present))
         out.append(Requirement(
-            "tt devices", not fatal,
+            "tt devices", not unreachable,
             str(dev) if not unreachable else
             f"{', '.join(unreachable)} not accessible to your uid",
-            "" if not fatal else _ROOTLESS_DEVICE_FIX,
+            "" if not unreachable else _ROOTLESS_DEVICE_FIX,
         ))
 
     mounts = Path(proc_mounts) if proc_mounts is not None else Path("/proc/mounts")
@@ -458,6 +425,10 @@ def _claimed_devices(all_ids: Sequence[int]) -> Optional[Set[int]]:
         containers = json.loads(inspected.stdout)
     except (json.JSONDecodeError, ValueError, TypeError):
         return None
+    # Shape-check before indexing: a daemon that answers with anything but the documented
+    # list-of-objects is "could not be asked", not "nothing is claimed".
+    if not isinstance(containers, list) or not all(isinstance(c, dict) for c in containers):
+        return None
     by_id = {info["Id"]: info for info in containers if info.get("Id")}
     claimed: Set[int] = set()
     for info in containers:
@@ -480,8 +451,7 @@ def all_device_ids(dev_root: Optional[Path] = None) -> List[int]:
         raise DeviceScanUnavailable(f"could not list {root}: {e}") from e
 
 
-def pick_free_devices(count: int, *, dev_root: Optional[Path] = None,
-                      rootless: Optional[bool] = None) -> List[int]:
+def pick_free_devices(count: int, *, dev_root: Optional[Path] = None) -> List[int]:
     """The lowest ``count`` chip indices not already claimed by any running container.
 
     Ascending and deterministic: the common, uncontended case always lands on the same low
@@ -490,66 +460,40 @@ def pick_free_devices(count: int, *, dev_root: Optional[Path] = None,
     rather than silently. Raises rather than guesses when the host can't be read or doesn't
     have enough free chips; the alternative is the silent, indefinite UMD lock hang this
     replaces.
-
-    Under a rootless daemon a node the container's identity cannot open is skipped rather
-    than handed out: the permission failure would otherwise land minutes into a boot.
     """
-    root = dev_root or Path(TT_DEVICE)
-    all_ids = all_device_ids(root)
-    if rootless is None:
-        rootless = docker_is_rootless()
-    usable = _reachable_device_ids(root, all_ids) if rootless else list(all_ids)
+    all_ids = all_device_ids(dev_root or Path(TT_DEVICE))
     claimed = _claimed_devices(all_ids)
     if claimed is None:
         raise DeviceScanUnavailable(
             "could not determine which tt devices are already in use (docker ps/inspect "
             "failed) — refusing to guess"
         )
-    free = [i for i in usable if i not in claimed]
+    free = [i for i in all_ids if i not in claimed]
     if len(free) < count:
-        locked_out = sorted(set(all_ids) - set(usable))
         raise ContainerError(
             f"only {len(free)} of {len(all_ids)} tt device(s) are free "
-            f"(chip(s) {', '.join(map(str, sorted(claimed))) or 'none'} in use"
-            + (f"; chip(s) {', '.join(map(str, locked_out))} not accessible to your uid "
-               f"under rootless docker" if locked_out else "")
-            + f"); this profile needs {count}"
+            f"(chip(s) {', '.join(map(str, sorted(claimed))) or 'none'} in use); "
+            f"this profile needs {count}"
         )
     return free[:count]
 
 
 def ensure_devices_free(device_ids: Sequence[int], *,
-                        dev_root: Optional[Path] = None,
-                        rootless: Optional[bool] = None) -> None:
-    """Refuse an explicit ``--device-id`` pin that names a chip this host doesn't have, one
-    the container's identity could not open, or one already in use.
+                        dev_root: Optional[Path] = None) -> None:
+    """Refuse an explicit ``--device-id`` pin naming a chip this host doesn't have or one
+    already in use.
 
-    There is no picker to avoid any of those for an explicit pin, so this runs the same
-    inventory, reachability and host-wide scan ``pick_free_devices`` applies, surfaced so the
-    operator's choice gets checked rather than trusted blind. Each check exists because of a
-    late failure it replaces: without the inventory one ``--device-id 99`` reaches docker;
-    without the reachability one a node ``preflight`` now deliberately tolerates (it no longer
-    fails a partially inaccessible board) is handed to a rootless container that cannot open
-    it -- both landing after the image and weight work rather than up front.
+    There is no picker to avoid either for an explicit pin, so the same inventory and
+    host-wide scan ``pick_free_devices`` applies runs here too -- the operator's choice gets
+    checked rather than trusted blind, up front instead of after the image and weight work.
     """
-    root = dev_root or Path(TT_DEVICE)
-    inventory = all_device_ids(root)
+    inventory = all_device_ids(dev_root or Path(TT_DEVICE))
     unknown = sorted(set(device_ids) - set(inventory))
     if unknown:
         raise ContainerError(
             f"--device-id names chip(s) {', '.join(map(str, unknown))}, which this host does "
             f"not have (it has {', '.join(map(str, inventory)) or 'none'})"
         )
-    if rootless is None:
-        rootless = docker_is_rootless()
-    if rootless:
-        reachable = set(_reachable_device_ids(root, inventory))
-        locked_out = sorted(set(device_ids) - reachable)
-        if locked_out:
-            raise ContainerError(
-                f"--device-id names chip(s) {', '.join(map(str, locked_out))}, which are not "
-                f"accessible to your uid under rootless docker.\n  → {_ROOTLESS_DEVICE_FIX}"
-            )
     claimed = _claimed_devices(inventory)
     if claimed is None:
         raise DeviceScanUnavailable(
@@ -563,15 +507,11 @@ def ensure_devices_free(device_ids: Sequence[int], *,
 
 #: How long a caller waits to ENTER a device-allocation critical section.
 #:
-#: Derived from the worst case a holder can legitimately take rather than picked: the long
-#: hold is a teardown, and a teardown is `docker stop`'s grace period (which always ends --
-#: SIGKILL) plus a bounded dirty-mesh reset. Since both halves terminate, a serve queued
-#: behind one WILL get in, so making it wait is strictly better than refusing it: failing a
-#: serve after 5s that would have succeeded after 90 is a bad trade on an operation whose own
-#: boot takes ~10 minutes. Still finite, because a lock nobody is holding cannot block us --
-#: flock is released by the kernel when the holder exits, crash included -- so exceeding this
-#: means the daemon itself is wedged, and saying so beats waiting forever.
-_DEVICE_ALLOC_LOCK_TIMEOUT_S = float(STOP_TIMEOUT_S + RESET_TIMEOUT_S + 30)
+#: Only serve holds this lock, and only across "scan the host, then `docker run`" -- seconds,
+#: not minutes -- so a wait longer than this means the daemon itself is wedged, and saying so
+#: beats blocking a serve forever. Waited on rather than failed fast, because a queued serve
+#: will get in: flock is released by the kernel when the holder exits, crash included.
+_DEVICE_ALLOC_LOCK_TIMEOUT_S = 30.0
 
 
 def _open_alloc_lock(dev_root: Optional[Path] = None) -> int:
@@ -593,21 +533,11 @@ def _open_alloc_lock(dev_root: Optional[Path] = None) -> int:
 
 @contextlib.contextmanager
 def alloc_lock(timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S,
-               dev_root: Optional[Path] = None,
-               on_wait: Optional[Callable[[], None]] = None):
-    """The host-shared flock guarding every device-allocation-sensitive critical section.
+               dev_root: Optional[Path] = None):
+    """The host-shared flock guarding the device-allocation critical section.
 
-    Used both by ``device_allocation`` (check-free -> pick -> docker run) and by ``stop``
-    (stop -> remove -> dirty-mesh reset): a killed container's claimed chip(s) stop appearing
-    in the scan the moment it stops running, so without holding this same lock across the
-    whole teardown, a concurrent serve could pick one of those chips and start using it before
-    the reset (which targets it by id) actually runs -- and the reset would then wipe the new
-    container's live mesh.
-
-    A contended lock is WAITED on, not failed (see ``_DEVICE_ALLOC_LOCK_TIMEOUT_S``) -- every
-    hold is bounded, so the caller will get in. ``on_wait`` is called once, the first time the
-    lock is found busy, so the caller can say what it is waiting for: a silent multi-minute
-    block is indistinguishable from the hang this whole mechanism exists to prevent.
+    A contended lock is WAITED on, not failed (see ``_DEVICE_ALLOC_LOCK_TIMEOUT_S``): every
+    hold is short and bounded, so the caller will get in.
 
     A host with no device root AT ALL (no driver, no card, CI) has nothing to arbitrate, so
     the section runs unlocked there rather than failing: the callers that actually need a
@@ -627,7 +557,6 @@ def alloc_lock(timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S,
             f"{dev_root or TT_DEVICE}: {e} — refusing to allocate a device unsynchronized"
         ) from e
     deadline = time.monotonic() + timeout_s
-    announced = False
     while True:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -636,13 +565,10 @@ def alloc_lock(timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S,
             if time.monotonic() >= deadline:
                 os.close(fd)
                 raise ContainerError(
-                    f"waited {timeout_s:.0f}s for another `tt-model serve`/`stop` to release "
-                    f"the device allocation lock and it is still held — every hold is "
-                    f"bounded, so this usually means the docker daemon is wedged"
+                    f"waited {timeout_s:.0f}s for another `tt-model serve` to release the "
+                    f"device allocation lock and it is still held — every hold is short, so "
+                    f"this usually means the docker daemon is wedged"
                 )
-            if not announced and on_wait is not None:
-                announced = True
-                on_wait()
             time.sleep(0.1)
     try:
         yield
@@ -653,8 +579,7 @@ def alloc_lock(timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S,
 
 @contextlib.contextmanager
 def device_allocation(count: int, *, dev_root: Optional[Path] = None,
-                      timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S,
-                      on_wait: Optional[Callable[[], None]] = None):
+                      timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S):
     """Claim ``count`` free tt devices for one ``docker run``, race-free across processes.
 
     Held only across "check what's free -> pick -> docker run": the real, indefinite
@@ -662,7 +587,7 @@ def device_allocation(count: int, *, dev_root: Optional[Path] = None,
     devices. This just closes the window where two concurrent ``tt-model serve`` calls could
     both see the same chip as free before either container exists yet.
     """
-    with alloc_lock(timeout_s, dev_root=dev_root, on_wait=on_wait):
+    with alloc_lock(timeout_s, dev_root=dev_root):
         yield pick_free_devices(count, dev_root=dev_root)
 
 
@@ -1089,87 +1014,53 @@ def image_present(ref: str) -> bool:
     return _run(["docker", "image", "inspect", ref], capture_output=True).returncode == 0
 
 
-@dataclass(frozen=True)
-class StopResult:
-    """Outcome of a teardown. ``found`` distinguishes "there was nothing under that name by
-    the time we held the lock" from "we stopped something", which a bare bool could not: the
-    caller would otherwise report a no-op as a clean shutdown and count it as stopped."""
-
-    found: bool
-    clean: bool
-
-
-def stop(name: str, image: Optional[str] = None, *,
-         on_wait: Optional[Callable[[], None]] = None) -> StopResult:
-    """SIGTERM-first stop of whatever holds ``name`` when we get the allocation lock.
+def stop(name: str, image: Optional[str] = None) -> bool:
+    """SIGTERM-first stop. Returns True when the shutdown was clean.
 
     ``docker stop`` sends SIGTERM and escalates to SIGKILL after the timeout. A kill means
     the server never closed the mesh — eth cores are left dirty — so in that case the mesh is
     reset with ``tt-smi -r all`` in a throwaway container from the same image. That is why no
-    host tt-smi is needed: the image already has one. (The reset is best-effort recovery, not
-    a guarantee: see issue #107 — a force-killed teardown can leave a device that only a host
-    reboot restores.)
+    host tt-smi is needed: the image already has one. (Best-effort recovery, not a guarantee:
+    see issue #107 — a force-killed teardown can leave a device only a host reboot restores.)
 
-    The reset is scoped to the chip(s) THIS container actually held, read back from the
-    ``DEVICES_LABEL`` set at launch — otherwise recovering one container's dirty mesh would
-    grab the whole directory and reset chips a sibling container is still using.
+    The one thing this adds over resetting blind is SCOPE: the chips are read back from the
+    ``DEVICES_LABEL`` set at launch, so recovering one container's dirty mesh resets its own
+    chips instead of every chip on the board — which is what an unscoped `tt-smi -r all` does
+    to every sibling container still running.
 
-    Identity is resolved INSIDE the lock, and everything after is addressed by container id.
-    That is what makes the teardown and the reset scope refer to the same container: a name
-    is a label that can be reused, and a serve can only create a container while holding this
-    same lock, so resolving under it is atomic with respect to every other invocation. An id
-    snapshot taken by the caller BEFORE the lock cannot give that guarantee — the replacement
-    could arrive between the snapshot and the lock, and the pin would then authorise stopping
-    exactly the container it was meant to protect.
+    Deliberately takes no allocation lock. Serializing the teardown would close a narrow
+    window (a dirty kill, a serve landing between the removal and the reset, and that serve
+    picking this exact chip) at the cost of holding a host-wide lock across `docker stop`,
+    where neither the daemon call nor the reset container it spawns can actually be bounded
+    from here — a wedged daemon would then block every other serve and stop indefinitely.
+    Scoping alone already removes the damage this path used to do routinely.
     """
-    # Held across the WHOLE teardown, INCLUDING the state/label read: this container drops out
-    # of the `docker ps` scan the moment it stops running, not when it is removed, so every
-    # step after the stop is a window in which a concurrent serve could claim these chips --
-    # and if the shutdown turns out to have been dirty, the reset below (scoped to those same
-    # ids) would then wipe the new container's live mesh. Taking the lock only around
-    # remove+reset left exactly that gap. The cost is that a stop holds the lock for as long
-    # as the server takes to exit (up to STOP_TIMEOUT_S in the pathological case), so a serve
-    # racing a slow stop gets `alloc_lock`'s bounded timeout and a retry message rather than a
-    # corrupted mesh.
-    with alloc_lock(on_wait=on_wait):
-        # Read INSIDE the lock: taken outside it, a replacement container could be started
-        # under the same name while this call waits, and the teardown would then stop the
-        # REPLACEMENT while resetting the chips the old one held.
-        inspect = _run(
-            ["docker", "inspect", "--format",
-             '{{.Id}}\t{{.State.Running}}\t{{index .Config.Labels "' + DEVICES_LABEL + '"}}',
-             name],
+    inspect = _run(
+        ["docker", "inspect", "--format",
+         '{{.State.Running}}\t{{index .Config.Labels "' + DEVICES_LABEL + '"}}', name],
+        capture_output=True, text=True,
+    )
+    # strip("\n"), not strip(): the fields are positional, and a plain strip() would eat an
+    # empty LEADING field and shift every value one place left.
+    parts = inspect.stdout.strip("\n").split("\t") if inspect.returncode == 0 else []
+    was_running = bool(parts) and parts[0] == "true"
+    device_ids = _parse_device_ids(parts[1]) if len(parts) > 1 else None
+
+    _run(["docker", "stop", "--timeout", str(STOP_TIMEOUT_S), name],
+         capture_output=True, text=True)
+
+    clean = True
+    if was_running:
+        code = _run(
+            ["docker", "inspect", "--format", "{{.State.ExitCode}}", name],
             capture_output=True, text=True,
-        )
-        # strip("\n"), not strip(): the fields are positional, and a plain strip() would eat
-        # an empty LEADING field and shift every value one place left.
-        parts = inspect.stdout.strip("\n").split("\t") if inspect.returncode == 0 else []
-        current_id = parts[0] if parts else ""
-        if not current_id:
-            # Gone between the caller's check and this lock, or never there. Nothing to stop,
-            # and saying so beats reporting a clean shutdown that never happened.
-            return StopResult(found=False, clean=True)
-        was_running = len(parts) > 1 and parts[1] == "true"
-        device_ids = _parse_device_ids(parts[2]) if len(parts) > 2 else None
-        # Address the container by id from here on, so nothing downstream can be redirected
-        # by the name being reused.
-        target = current_id
+        ).stdout.strip()
+        clean = code not in (SIGKILL_EXIT_CODE, "")
+    _run(["docker", "rm", name], capture_output=True, text=True)
 
-        _run(["docker", "stop", "--timeout", str(STOP_TIMEOUT_S), target],
-             capture_output=True, text=True)
-
-        clean = True
-        if was_running:
-            code = _run(
-                ["docker", "inspect", "--format", "{{.State.ExitCode}}", target],
-                capture_output=True, text=True,
-            ).stdout.strip()
-            clean = code not in (SIGKILL_EXIT_CODE, "")
-        _run(["docker", "rm", target], capture_output=True, text=True)
-
-        if not clean and image:
-            reset_mesh(image, device_ids=device_ids)
-    return StopResult(found=True, clean=clean)
+    if not clean and image:
+        reset_mesh(image, device_ids=device_ids)
+    return clean
 
 
 def compose_reset_mesh(image: str, *, device_ids: Optional[Sequence[int]] = None) -> List[str]:

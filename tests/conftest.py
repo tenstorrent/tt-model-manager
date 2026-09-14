@@ -34,7 +34,7 @@ def _no_real_device_scan(monkeypatch):
     exercises the picker itself re-patches this within its own body.
     """
     monkeypatch.setattr(container, "pick_free_devices",
-                        lambda count, dev_root=None, rootless=None: list(range(count)))
+                        lambda count, dev_root=None: list(range(count)))
 
 
 @pytest.fixture(autouse=True)

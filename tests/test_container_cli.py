@@ -283,72 +283,23 @@ def test_serve_picks_the_named_profile(tmp_path, monkeypatch):
     container_cli.serve_container(m, profile_name="p150x2")
     assert "tt-model-my-model-p150x2" in ran[0]
 
-
-def test_a_refresh_checks_capacity_before_downloading_the_new_image(tmp_path, monkeypatch):
-    """--refresh re-pulls the image before serve_container ever scans, so the check has to
-    sit ahead of that pull too, not just ahead of the first-time one."""
-    order = []
-    monkeypatch.setattr(container_cli, "resolve_target", lambda t: _manifest(tmp_path))
-    monkeypatch.setattr(Path, "is_file", lambda self: False)
-    monkeypatch.setattr(container_cli, "refresh_if_newer",
-                        lambda *a, **k: order.append("refresh"))
-
-    def busy(count, dev_root=None, rootless=None):
-        order.append("capacity")
-        raise container.ContainerError("only 0 of 4 tt device(s) are free")
-
-    monkeypatch.setattr(container, "pick_free_devices", busy)
-    res = runner.invoke(cli.app, ["serve", "org/m", "--refresh"])
-    assert res.exit_code != 0
-    assert order == ["capacity"], f"refreshed before checking the board: {order}"
-
-
-def test_an_invalid_device_id_is_rejected_before_any_download(tmp_path, monkeypatch):
-    """The flag was only validated inside serve_container, which on a first-time serve runs
-    after the pull -- so `--device-id 0,0` cost an image and weights before the complaint."""
-    order = []
-    remote = _manifest(tmp_path)
-    monkeypatch.setattr(container_cli, "resolve_target", lambda t: None)
-    monkeypatch.setattr(hub, "fetch_manifest", lambda r, rev: remote)
-    monkeypatch.setattr(hub, "latest_revision", lambda *a, **k: "cafe1234")
-    monkeypatch.setattr(container_cli, "pull_container",
-                        lambda *a, **k: order.append("pull"))
-    res = runner.invoke(cli.app, ["serve", "org/m", "--device-id", "0,0"])
-    assert res.exit_code != 0
-    assert "distinct" in res.output
-    assert order == [], f"pulled before rejecting the flag: {order}"
-
-
-def test_a_first_time_serve_checks_capacity_before_pulling_anything(tmp_path, monkeypatch):
-    """On `tt-model serve org/name` the auto-pull in cli.serve fetches the image and (unless
-    --no-weights) the weights BEFORE serve_container runs, so the capacity check has to sit
-    ahead of the pull or a full board costs a multi-GB download first."""
-    order = []
-    remote = _manifest(tmp_path)
-    monkeypatch.setattr(container_cli, "resolve_target", lambda t: None)
-    monkeypatch.setattr(hub, "fetch_manifest", lambda r, rev: remote)
-    monkeypatch.setattr(hub, "latest_revision", lambda *a, **k: "cafe1234")
-    monkeypatch.setattr(container_cli, "pull_container",
-                        lambda *a, **k: order.append("pull"))
-
-    def busy(count, dev_root=None, rootless=None):
-        order.append("capacity")
-        raise container.ContainerError("only 0 of 4 tt device(s) are free")
-
-    monkeypatch.setattr(container, "pick_free_devices", busy)
-    res = runner.invoke(cli.app, ["serve", "org/m"])
-    assert res.exit_code != 0
-    assert order == ["capacity"], f"pulled before checking the board: {order}"
-
+def test_an_invalid_device_id_is_rejected_before_any_weights_are_downloaded(tmp_path, monkeypatch):
+    """A duplicate passes a bare length check while naming one physical chip twice, which
+    would silently under-size the mesh -- and the complaint has to come before the weights."""
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "ensure_weights",
+                        lambda *a, **k: pytest.fail("downloaded weights for a bad flag"))
+    with pytest.raises(container_cli.ContainerCliError, match="distinct"):
+        container_cli.serve_container(_manifest(tmp_path), target="org/m", device_id="0,0")
 
 def test_the_capacity_precheck_never_refuses_on_a_host_it_cannot_read(tmp_path, monkeypatch):
     """Non-reserving and advisory: not knowing yet (no docker, no card) must not block a
     serve that the authoritative check under the lock would have allowed."""
-    def unavailable(count, dev_root=None, rootless=None):
+    def unavailable(count, dev_root=None):
         raise container.DeviceScanUnavailable("no docker")
 
     monkeypatch.setattr(container, "pick_free_devices", unavailable)
-    container_cli.precheck_capacity(_manifest(tmp_path))  # must not raise
+    container_cli.precheck_capacity(4, None)  # must not raise
 
 
 def test_a_full_board_is_refused_before_any_weights_are_downloaded(tmp_path, monkeypatch):
@@ -359,7 +310,7 @@ def test_a_full_board_is_refused_before_any_weights_are_downloaded(tmp_path, mon
     monkeypatch.setattr(container_cli, "ensure_weights",
                         lambda *a, **k: pytest.fail("downloaded weights for a full board"))
 
-    def busy(count, dev_root=None, rootless=None):
+    def busy(count, dev_root=None):
         raise container.ContainerError("only 0 of 4 tt device(s) are free")
 
     monkeypatch.setattr(container, "pick_free_devices", busy)
@@ -375,7 +326,7 @@ def test_an_unavailable_scan_does_not_block_the_serve_early(tmp_path, monkeypatc
     monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
     calls = {"n": 0}
 
-    def sometimes(count, dev_root=None, rootless=None):
+    def sometimes(count, dev_root=None):
         calls["n"] += 1
         if calls["n"] == 1:  # the early, non-reserving look
             raise container.DeviceScanUnavailable("no docker")
@@ -642,7 +593,7 @@ def test_serve_walks_the_boot_landmarks_and_ends_on_a_ready_card(tmp_path, monke
 def test_stop_reports_a_clean_shutdown(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(container, "running", lambda name=None: [{"name": name}])
     monkeypatch.setattr(container, "stop",
-                        lambda name, image=None, on_wait=None: container.StopResult(found=True, clean=True))
+                        lambda name, image=None: True)
     container_cli.stop_container(_manifest(tmp_path))
     out = capsys.readouterr().out
     assert "stopped 1" in out
@@ -652,7 +603,7 @@ def test_stop_reports_a_clean_shutdown(tmp_path, monkeypatch, capsys):
 def test_stop_warns_loudly_when_a_kill_forced_a_mesh_reset(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(container, "running", lambda name=None: [{"name": name}])
     monkeypatch.setattr(container, "stop",
-                        lambda name, image=None, on_wait=None: container.StopResult(found=True, clean=False))
+                        lambda name, image=None: False)
     container_cli.stop_container(_manifest(tmp_path))
     assert "mesh was left dirty" in capsys.readouterr().out
 

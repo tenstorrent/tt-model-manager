@@ -341,7 +341,8 @@ run on a build host; a later `serve` starts the container. Around them:
 - `tt-model logs you/my-model -f` — follow the boot (a cold first boot JIT-compiles kernels,
   ~10 min).
 - `tt-model stop you/my-model` — a clean `SIGTERM` closes the mesh. A `SIGKILL` leaves it
-  dirty: `stop` then attempts a `tt-smi -r` scoped to that container's own chips, but that
+  dirty: `stop` then attempts a `tt-smi -r` scoped to that container's own chips (read back
+  from the label `serve` set), but that
   is best-effort recovery, not a guarantee — a force-killed teardown can leave a device that
   only a host reboot restores (issue #107).
 - `tt-model rm you/my-model` — removes a *pulled* container package, including its HF
@@ -477,19 +478,18 @@ What the picker does:
 
 - **Counts what's in use host-wide**, not just tt-model's own containers: the lock is shared
   through `--ipc host` regardless of who launched the other container, so a tt-studio or
-  tt-inference-server container counts too. Our own containers carry a
-  `org.tenstorrent.tt-model.devices` label read back exactly; anything else is read from its
-  actual grant (`--device`, a bind mount, or `--privileged`, which reaches every node without
-  listing any). A container that cannot reach the host ipc namespace claims nothing.
+  tt-inference-server container counts too. A claim is read from a container's actual grant
+  (`--device`, a bind mount, or `--privileged`, which reaches every node without listing
+  any), unioned with the `org.tenstorrent.tt-model.devices` label our own containers carry —
+  a label can only ever over-claim, never hide a held chip. A container that does not share
+  the host ipc namespace claims nothing.
 - **Refuses instead of hanging.** Not enough free chips is an immediate error naming what is
-  busy, raised before the slow work (image load, weights prefetch), not after it.
+  busy, raised before the weights prefetch rather than after it.
 - **Serializes with a host-wide `flock`** on `/dev/tenstorrent` itself, held across
-  "check what's free → pick → `docker run`" and across a `stop`'s whole teardown, so two
-  concurrent invocations cannot choose the same chip and a dirty-mesh reset cannot land on a
-  chip that has since been handed to someone else.
-- **Skips a chip it could not open** under a rootless daemon rather than handing it over, and
-  `--device-id` is validated against the real inventory (`--device-id 99` on a four-chip box
-  is refused up front, not minutes later inside docker).
+  "check what's free → pick → `docker run`", so two concurrent `serve` invocations cannot
+  choose the same chip.
+- **Validates `--device-id` against the real inventory** — `--device-id 99` on a four-chip
+  box is refused up front, not minutes later inside docker.
 
 One wrinkle worth knowing: a single chip that is physically one ASIC of a fused multi-chip
 board (half a P300) reports the *board's* type to tt-metal, which cannot match "P300 board,
