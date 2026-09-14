@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from tt_kernel.boot_progress import (BootTracker, TQDM_RE, TT_DIT_PHASES, VLLM_PHASES,
-                                     diagnose_boot, summarize)
+                                     diagnose_boot, inner_log_path, summarize)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "boot_logs"
 READY = "Application startup complete"
@@ -165,3 +165,49 @@ class TestShapes:
     def test_phase_tables_have_unique_keys(self, phases):
         keys = [p.key for p in phases]
         assert len(keys) == len(set(keys))
+
+
+# ------------------------------------- the engine's own log lives inside the container
+#
+# DEVSTACK-290: tt-metal's readiness runner writes the engine log to a file and prints
+# only its tail. The container's stdout was ~30 lines of `VLLM::EngineCore(+0x…)` frames,
+# so `tt-model logs` could not show why the engine died. The runner names the file in its
+# own error, so the diagnosis can hand over a command that copies it out.
+
+RUNNER_TAIL = [
+    "Waiting up to 3600s for server to become ready...",
+    "RuntimeError: Fatal marker 'EngineCore failed to start' found in "
+    "/tt-metal/models/autoports/ornith/readiness_vllm/server.log. Server cannot start.",
+    "  VLLM::EngineCore(+0x1a2b3c)",
+    "  VLLM::EngineCore(+0x1a2b40)",
+]
+
+
+def test_an_in_container_log_path_is_read_out_of_the_log():
+    assert inner_log_path(RUNNER_TAIL) == (
+        "/tt-metal/models/autoports/ornith/readiness_vllm/server.log"
+    )
+
+
+def test_no_in_container_log_path_when_the_log_names_none():
+    assert inner_log_path(["something broke", "  frame(+0x1)"]) is None
+
+
+def test_a_crash_offers_to_copy_the_engine_log_out_of_the_container():
+    diag = diagnose_boot(
+        RUNNER_TAIL, exited=True, target="org/x",
+        container_name="tt-model-ornith-p150x4",
+    )
+    actions = " ".join(diag["actions"])
+    assert "docker cp tt-model-ornith-p150x4:" in actions
+    assert "readiness_vllm/server.log ." in actions
+    assert "copy the file out" in diag["detail"]
+
+
+def test_a_crash_without_an_inner_log_keeps_the_plain_advice():
+    diag = diagnose_boot(
+        ["Killed", "exit code 137"], exited=True, target="org/x",
+        container_name="tt-model-x",
+    )
+    assert diag["actions"] == ["full log:  tt-model logs org/x"]
+    assert "docker cp" not in " ".join(diag["actions"])

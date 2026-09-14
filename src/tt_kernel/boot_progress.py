@@ -256,6 +256,23 @@ def _clean(line: str) -> str:
     return _LOG_PREFIX_RE.sub("", line).strip()
 
 
+# A launcher may write the engine's real log to a FILE inside the container and print
+# only a tail of it on the way out — tt-metal's readiness runner does exactly that, so a
+# long C++ backtrace is all that reaches the container's stdout and the cause is not
+# readable with `tt-model logs` alone. That runner names the file in its own error, so the
+# path is read out of the log rather than guessed from the image layout (DEVSTACK-290).
+_INNER_LOG_RE = re.compile(r"(?:Inspect|found in)\s+(/[^\s,]+\.log)")
+
+
+def inner_log_path(tail: Sequence[str]) -> Optional[str]:
+    """An in-container log file named by the log itself, or None."""
+    for ln in reversed([_clean(x) for x in tail]):
+        m = _INNER_LOG_RE.search(ln)
+        if m:
+            return m.group(1).rstrip(".")
+    return None
+
+
 def _evidence(tail: Sequence[str], pattern: Optional[str] = None) -> str:
     """The one line worth quoting: the one matching ``pattern`` if given, else the last
     error-shaped line, else the last line."""
@@ -274,7 +291,8 @@ def _evidence(tail: Sequence[str], pattern: Optional[str] = None) -> str:
 
 def diagnose_boot(tail: Sequence[str], *, exited: bool, target: str,
                   extra_args: Optional[Sequence[str]] = None,
-                  timeout_s: int = 1800) -> dict:
+                  timeout_s: int = 1800,
+                  container_name: Optional[str] = None) -> dict:
     """Classify why a boot did not reach ready — text in, dict out.
 
     ``cause`` is the card title; ``detail`` one sentence of explanation; ``evidence`` one
@@ -331,12 +349,24 @@ def diagnose_boot(tail: Sequence[str], *, exited: bool, target: str,
             "actions": [f"lsof -i :{port}", f"tt-model serve --port <other> {target}"],
         }
 
+    actions = [f"full log:  tt-model logs {target}"]
+    detail = ("The engine stopped during boot. The reason is in what it printed on the "
+              "way out.")
+    inner = inner_log_path(tail)
+    if inner:
+        # The container is exited, not removed, so `docker cp` still reaches its
+        # filesystem. This is the only copy of the engine's full log.
+        actions.append(
+            f"engine log:  docker cp {container_name or '<container>'}:{inner} ."
+        )
+        detail = ("The engine stopped during boot. Its own log is a file inside the "
+                  "container; the container printed only the tail of it, so copy the "
+                  "file out to read the cause.")
     return {
         "cause": "the container exited before the server was ready",
-        "detail": "The engine stopped during boot. The reason is in what it printed on the "
-                  "way out.",
+        "detail": detail,
         "evidence": _evidence(tail),
-        "actions": [f"full log:  tt-model logs {target}"],
+        "actions": actions,
     }
 
 

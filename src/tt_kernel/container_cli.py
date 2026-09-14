@@ -703,7 +703,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     assert result is not None
     if not result.ready:
         diag = diagnose_boot(tracker.evidence() or result.tail, exited=result.exited,
-                             target=what_p, extra_args=extra_args)
+                             target=what_p, extra_args=extra_args,
+                             container_name=name)
         raise ContainerCliError(summarize(diag, result.tail), diagnosis=diag)
 
     console.milestone(f"{what} ready  {console.fmt_duration(view.elapsed)}")

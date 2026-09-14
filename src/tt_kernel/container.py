@@ -705,6 +705,13 @@ def logs(name: str, follow: bool = False) -> int:
     return _run(argv).returncode
 
 
+# How many trailing log lines a failure carries. A C++ backtrace from a dying engine runs
+# to dozens of frames, and at 20 lines those frames pushed the one line that named the
+# cause out of the window entirely (DEVSTACK-290). The whole log is already in memory
+# here, so keeping more costs nothing.
+FAILURE_TAIL_LINES = 60
+
+
 @dataclass(frozen=True)
 class ReadyResult:
     """Why the wait ended. ``ready`` alone cannot say WHY it failed, and "the server did
@@ -758,7 +765,7 @@ def wait_ready(name: str, probe: str, timeout_s: int = 1800, on_line=None) -> Re
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return ReadyResult(False, False, tail[-20:], time.monotonic() - started)
+                return ReadyResult(False, False, tail[-FAILURE_TAIL_LINES:], time.monotonic() - started)
             try:
                 line = lines.get(timeout=min(remaining, 5.0))
             except queue.Empty:
@@ -767,12 +774,12 @@ def wait_ready(name: str, probe: str, timeout_s: int = 1800, on_line=None) -> Re
                 # EOF: the container exited before the probe appeared. The reason is in
                 # what it printed on the way out, so hand that back rather than a bare
                 # "not ready".
-                return ReadyResult(False, True, tail[-20:], time.monotonic() - started)
+                return ReadyResult(False, True, tail[-FAILURE_TAIL_LINES:], time.monotonic() - started)
             stripped = line.rstrip("\n")
             tail.append(stripped)
             if on_line is not None:
                 on_line(stripped)
             if probe in line:
-                return ReadyResult(True, False, tail[-20:], time.monotonic() - started)
+                return ReadyResult(True, False, tail[-FAILURE_TAIL_LINES:], time.monotonic() - started)
     finally:
         proc.terminate()
