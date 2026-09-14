@@ -476,7 +476,10 @@ def test_reset_mesh_runs_tt_smi_from_the_image_not_the_host():
     assert argv[-3:] == ["tt-model/x:1", "-r", "all"]
 
 
-def _fake_docker(monkeypatch, *, running_state, exit_code):
+def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="",
+                 inspect_rc=0, now_claimed=None):
+    """``now_claimed`` is what the pre-reset re-scan should report as taken by someone
+    else -- i.e. a serve that grabbed the chip in the gap after the container was removed."""
     calls = []
 
     class R:
@@ -485,9 +488,22 @@ def _fake_docker(monkeypatch, *, running_state, exit_code):
 
     def fake(argv, **kw):
         calls.append(argv)
-        if "{{.State.Running}}" in argv:
-            return R(running_state)
-        if "{{.State.ExitCode}}" in argv:
+        joined = " ".join(argv)
+        if argv[:3] == ["docker", "ps", "-q"]:
+            return R("someone-else\n" if now_claimed else "")
+        if argv[:2] == ["docker", "inspect"] and "--format" not in argv:
+            return R(json.dumps([{
+                "Id": "someone-else",
+                "HostConfig": {"IpcMode": "host", "Devices": [
+                    {"PathOnHost": f"/dev/tenstorrent/{d}"} for d in (now_claimed or ())]},
+            }]))
+        # stop() reads running + the devices label in ONE format string, so match by
+        # substring rather than exact element equality and answer with both fields.
+        if "{{.State.Running}}" in joined:
+            if inspect_rc:
+                return R("", inspect_rc)   # `no such container`
+            return R(f"{running_state}\t{devices_label}")
+        if "{{.State.ExitCode}}" in joined:
             return R(exit_code)
         return R()
 
@@ -509,6 +525,68 @@ def test_a_sigkilled_container_triggers_a_mesh_reset(monkeypatch):
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137")
     assert container.stop("c", image="img") is False
     assert any("--entrypoint" in c for c in calls)
+
+
+def test_a_dirty_stop_resets_only_the_chips_that_container_held(monkeypatch):
+    """The reset is a `tt-smi -r all` in a throwaway container, so an unscoped one would
+    reset a SIBLING container's live mesh. The ids come from the label stop() reads back."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
+                         devices_label="0,1")
+    assert container.stop("c", image="img") is False
+    reset = next(c for c in calls if "--entrypoint" in c)
+    assert [reset[i + 1] for i, a in enumerate(reset) if a == "--device"] == [
+        "/dev/tenstorrent/0:/dev/tenstorrent/0",
+        "/dev/tenstorrent/1:/dev/tenstorrent/1",
+    ]
+    assert "/dev/tenstorrent" not in reset  # never the whole directory
+
+
+def test_a_chip_taken_since_the_removal_is_not_reset_under_the_new_owner(monkeypatch):
+    """Removing the container releases its chips, so a serve can grab one before the reset
+    runs. Resetting then would wipe a LIVE mesh -- skipping is the recoverable failure."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
+                         devices_label="0,1", now_claimed=[1])
+    assert container.stop("c", image="img") is False
+    assert not any("--entrypoint" in c for c in calls), "reset a chip someone else now holds"
+
+
+def test_a_chip_still_free_at_teardown_is_reset_as_usual(monkeypatch):
+    """The skip must be narrow: an unrelated container holding a DIFFERENT chip is no
+    reason to leave our own dirty mesh unrecovered."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
+                         devices_label="0", now_claimed=[3])
+    assert container.stop("c", image="img") is False
+    reset = next(c for c in calls if "--entrypoint" in c)
+    assert reset[reset.index("--device") + 1] == "/dev/tenstorrent/0:/dev/tenstorrent/0"
+
+
+def test_a_malformed_devices_label_falls_back_instead_of_narrowing_the_reset(monkeypatch):
+    """Dropping the unparsable tokens would reset chip 0 and leave chip 1 dirty. The
+    whole-directory fallback is over-broad but never leaves a chip unrecovered."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
+                         devices_label="0,garbage")
+    assert container.stop("c", image="img") is False
+    reset = next(c for c in calls if "--entrypoint" in c)
+    assert reset[reset.index("--device") + 1] == "/dev/tenstorrent"
+
+
+def test_a_dirty_stop_without_a_devices_label_falls_back_to_the_whole_directory(monkeypatch):
+    """A container from before the label existed (or one started by hand) still has to be
+    recoverable -- there is no id to scope to, so the old behaviour is the fallback."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137")
+    assert container.stop("c", image="img") is False
+    reset = next(c for c in calls if "--entrypoint" in c)
+    assert reset[reset.index("--device") + 1] == "/dev/tenstorrent"
+
+
+def test_an_uninspectable_container_is_still_stopped_and_removed(monkeypatch):
+    """A failed inspect means "we could not read its state", not "there is nothing there":
+    the stop and the removal still have to run, just without a scoped reset to aim."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137", inspect_rc=1)
+    assert container.stop("c", image="img") is True
+    assert any(c[:2] == ["docker", "stop"] for c in calls)
+    assert any(c[:2] == ["docker", "rm"] for c in calls)
+    assert not any("--entrypoint" in c for c in calls)
 
 
 def test_an_already_stopped_container_is_just_removed(monkeypatch):

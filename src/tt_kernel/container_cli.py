@@ -25,7 +25,7 @@ from typing import List, Optional
 from . import MANIFEST_NAME, console, container, hub, localdb, oci
 from .boot_progress import BootTracker, diagnose_boot, summarize
 from .build import BuildError, build_log_path, finalize, run_build, stage
-from .container_manifest import ContainerManifestError
+from .container_manifest import ContainerManifestError, hardware_chip_count
 from .launchers import launcher_for
 from .manifest import DEFAULT_PORT, Manifest
 
@@ -743,6 +743,64 @@ def resolve_target(target: str) -> Optional[Manifest]:
     return load_pulled(target)
 
 
+def parse_device_id(device_id: Optional[str], *, chip_count: int,
+                    profile_name: str) -> Optional[List[int]]:
+    """``--device-id`` as a validated chip list, or None when the flag was not given."""
+    if device_id is None:
+        return None
+    try:
+        ids = [int(x) for x in device_id.split(",")]
+    except ValueError:
+        raise ContainerCliError(
+            f"--device-id must be a comma-separated list of integers, got {device_id!r}"
+        ) from None
+    # A duplicate (e.g. "0,0" for a 2-chip profile) passes a bare length check while actually
+    # naming one physical chip twice, silently under-sizing the mesh the profile asked for.
+    if any(d < 0 for d in ids) or len(set(ids)) != len(ids):
+        raise ContainerCliError(
+            f"--device-id must be distinct, non-negative chip indices, got {device_id!r}"
+        )
+    if len(ids) != chip_count:
+        raise ContainerCliError(
+            f"--device-id gave {len(ids)} chip(s) but profile {profile_name!r} needs "
+            f"{chip_count}"
+        )
+    return ids
+
+
+def precheck_capacity(manifest: Manifest, *, profile_name: Optional[str] = None,
+                      device_id: Optional[str] = None) -> None:
+    """Refuse a serve the board cannot fit, BEFORE anything slow happens.
+
+    The authoritative check runs immediately before ``docker run``, which is correct but
+    late: a first-time ``tt-model serve org/name`` auto-pulls
+    the image AND the weights from ``cli.serve`` long before ``serve_container`` ever scans,
+    so without this a full board costs a multi-GB (sometimes multi-hundred-GB) download for
+    a serve that could never have started.
+
+    Non-reserving, like the real check -- it holds nothing, so it can be wrong by the time
+    the launch happens. That is fine: it only ever turns a late failure into an early one. Not being able to tell yet (no docker, no card) is not a refusal, but a bad
+    ``--profile`` or ``--device-id`` is, for the same reason -- reporting a typo after the
+    download is worse than reporting it now.
+    """
+    spec = manifest.container
+    if spec is None:
+        return
+    try:
+        profile = spec.resolve_profile(profile_name)
+    except ValueError as e:
+        raise ContainerCliError(str(e)) from None
+    chip_count = hardware_chip_count(profile.hardware or "") or 1
+    ids = parse_device_id(device_id, chip_count=chip_count, profile_name=profile.name)
+    try:
+        if ids is not None:
+            container.ensure_devices_free(ids)
+        else:
+            container.pick_free_devices(chip_count)
+    except container.DeviceScanUnavailable:
+        pass
+
+
 def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     print_only: bool = False, follow: bool = False,
                     extra_args: Optional[List[str]] = None,
@@ -751,7 +809,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     target: Optional[str] = None,
                     local_only: bool = False,
                     no_weights: bool = False,
-                    detach: bool = False) -> None:
+                    detach: bool = False,
+                    device_id: Optional[str] = None) -> None:
     """Run one serve profile, and (unless ``detach``) watch it boot.
 
     The boot is shown as a checklist of its landmarks -- device opened, weights loaded, KV
@@ -765,6 +824,12 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     circle. ``no_weights`` keeps the pre-flight from fetching missing weights, leaving that
     to the model inside the container. ``follow`` is accepted for compatibility; waiting is
     the default now.
+
+    By default the container is scoped to exactly as many free chips as the profile needs
+    (picked automatically, and reserved for the duration of the ``docker run`` so two
+    concurrent serves cannot pick the same one) rather than the whole board — the whole
+    board is what let one model's container hang a second, unrelated model forever. Pass
+    ``device_id`` (comma-separated chip indices) to pin specific ones instead of auto-picking.
     """
     del follow  # the old opt-in; kept so callers written against it still work
     spec = manifest.container
@@ -792,6 +857,15 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         profile = spec.resolve_profile(profile_name)
     except ValueError as e:
         raise ContainerCliError(str(e)) from None
+
+    # How many chips this profile needs, and which specific ones to use -- either the
+    # operator's own pin, or (the default) auto-picked from what's actually free right now.
+    # `hardware` is validated against `mesh_device` at package time, so this is trustworthy
+    # for any manifest that made it through `tt-model package`.
+    chip_count = hardware_chip_count(profile.hardware or "") or 1
+    requested_device_ids = parse_device_id(device_id, chip_count=chip_count,
+                                           profile_name=profile.name)
+
     if port is not None:
         # Override BEFORE composition, so --publish and the launcher's --port are both
         # derived from the same value and cannot diverge. Explicit means exact: a busy
@@ -817,6 +891,19 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
             f"others: {', '.join(n for n in spec.profile_names() if n != profile.name)})",
             marker="•",
         )
+
+    name = container.container_name(manifest, profile)
+    what = target or manifest.name
+    if not print_only:
+        # Both checks sit ahead of every expensive step below (the image self-heal can
+        # re-pull a multi-GB image; ensure_weights can fetch hundreds of GB). is_running
+        # first, so an already-running model reports THAT rather than the "not enough free
+        # chips" its own container is the reason for.
+        if container.is_running(name):
+            raise ContainerCliError(
+                f"{name} is already running. Stop it first:  tt-model stop {what}"
+            )
+        precheck_capacity(manifest, profile_name=profile_name, device_id=device_id)
 
     # An image can go missing between package and serve — `docker image prune`, or a
     # manifest edit that moved the tag. Without this, docker tries to PULL
@@ -872,13 +959,23 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     launcher = launcher_for(spec.kind)
     argv = launcher.serve_argv(manifest, profile) + list(extra_args or [])
     env = launcher.serve_env(manifest, profile)
-    # Probed here, not in compose_run, so composition stays pure. Safe on a host with
-    # no docker at all (returns False), which --print has to keep working on.
-    run_argv = container.compose_run(manifest, profile, argv, env,
-                                     detach=not print_only,
-                                     rootless=container.docker_is_rootless())
 
     if print_only:
+        # Best-effort device pick for display: nothing is actually launched, so there is no
+        # race to protect against. A host that can't even be inspected (no docker at all,
+        # which --print must keep working on) falls back to the whole-directory form -- but
+        # a genuine "not enough free chips" refusal is real information about what a real
+        # serve would do right now, so that one is allowed to propagate rather than be
+        # papered over with a preview that doesn't reflect reality.
+        preview_ids = requested_device_ids
+        if preview_ids is None:
+            try:
+                preview_ids = container.pick_free_devices(chip_count)
+            except container.DeviceScanUnavailable:
+                preview_ids = None
+        run_argv = container.compose_run(manifest, profile, argv, env, detach=False,
+                                         device_ids=preview_ids,
+                                         rootless=container.docker_is_rootless())
         # shlex.join, not " ".join: the argv carries tokens a shell would take apart --
         # chiefly the JSON of --additional-config / --tt-config and anything the author put
         # in serve.args, e.g. --override-generation-config '{"temperature": 0.6}'. Joined
@@ -888,12 +985,6 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         console.raw(shlex.join(run_argv))
         return
 
-    name = container.container_name(manifest, profile)
-    what = target or manifest.name
-    if container.is_running(name):
-        raise ContainerCliError(
-            f"{name} is already running. Stop it first:  tt-model stop {what}"
-        )
     # As the host user, so the daemon does not create them as root: see
     # container.ensure_mount_sources.
     container.ensure_mount_sources(manifest)
@@ -923,21 +1014,38 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     with console.checklist() as view:
         view.instant("host ready", _host_summary(host_reqs))
         view.instant(f"image {container.image_ref(manifest)}")
-        if container.container_exists(name):
-            # Not running, but holding the name — `docker run` creates the container before
-            # it binds ports, so a failed start (a busy port, usually) leaves one in
-            # "Created". Refusing here would make the obvious retry impossible.
-            view.begin(f"removing a stopped {name}")
-            container.remove(name, force=True)
-            view.done()
         view.begin(f"starting {name}")
-        try:
-            container.run_checked(run_argv)
-        except container.ContainerError:
-            # Leave no half-created container behind to block the next attempt.
+
+        def _start(ids: Optional[List[int]]) -> None:
+            # Re-checked immediately before the launch rather than trusting the check far
+            # above: the gap between them covers the image self-heal and the weights
+            # prefetch, which can take hours.
+            if container.is_running(name):
+                raise ContainerCliError(
+                    f"{name} is already running. Stop it first:  tt-model stop {what}"
+                )
             if container.container_exists(name):
+                # Holding the name but not running: a previous start failed (a busy port,
+                # usually) and left one in "Created". Refusing would make the obvious retry
+                # impossible.
+                view.detail(f"removed a stopped {name}")
                 container.remove(name, force=True)
-            raise
+            run_argv = container.compose_run(manifest, profile, argv, env, detach=True,
+                                             device_ids=ids,
+                                             rootless=container.docker_is_rootless())
+            try:
+                container.run_checked(run_argv)
+            except container.ContainerError:
+                # Leave no half-created container behind to block the next attempt.
+                if container.container_exists(name) and not container.is_running(name):
+                    container.remove(name, force=True)
+                raise
+
+        if requested_device_ids is not None:
+            container.ensure_devices_free(requested_device_ids)
+            _start(requested_device_ids)
+        else:
+            _start(container.pick_free_devices(chip_count))
         view.done("container started")
         if detach:
             view.close()
@@ -1035,11 +1143,18 @@ def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) ->
         stopped += 1
         with console.step(f"stopping {name}") as st:
             clean = container.stop(name, image=container.image_ref(manifest))
-            st.detail("clean shutdown" if clean else "killed — mesh reset")
+            st.detail("clean shutdown" if clean else "killed — mesh reset attempted")
         if not clean:
+            # Deliberately not "the next boot is safe" (issue #107): on a force-killed
+            # teardown `tt-smi -r` does NOT reliably recover the device — boots then wedge on
+            # the first large host→device DMA (`could only pin N of M pages`) until the host
+            # is rebooted. Promising a repair that may not have happened sends people
+            # debugging the model instead of the device.
             console.note(
-                "the server did not exit on SIGTERM, so the mesh was left dirty and has "
-                "been reset with tt-smi; the next boot is safe",
+                "the server did not exit on SIGTERM, so the mesh was left dirty. A reset was "
+                "attempted with tt-smi, but a force-killed teardown can leave the device "
+                "unusable until the HOST is rebooted (see issue #107) — if the next boot "
+                "hangs early, reboot rather than retrying",
                 marker="⚠", style="warning",
             )
     if not stopped:

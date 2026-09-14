@@ -1203,6 +1203,11 @@ def serve(
         "it must be a flag, not a passthrough argument); for a v5/v6 bundle it is "
         "appended to the launch command, where argparse last-wins."
     ),
+    device_id: Optional[str] = typer.Option(
+        None, "--device-id", help="For a container package: pin specific chip indices "
+        "(comma-separated, e.g. '0,1') instead of auto-picking free ones. The count must "
+        "match what the profile needs."
+    ),
     refresh: bool = typer.Option(
         False, "--refresh", help="Before serving an already-installed package, re-pull it if "
         "the Hub has a newer revision (so a republished source isn't served with stale launch "
@@ -1245,6 +1250,13 @@ def serve(
         if remote is not None and remote.is_container:
             resolved = hub.latest_revision(repo_id, revision, timeout=None)
             try:
+                if not print_only:
+                    # BEFORE the pull, not just before the run: this auto-pull fetches the
+                    # image and (unless --no-weights) the weights, so a full board would
+                    # otherwise be reported only after that whole download. `remote` is the
+                    # manifest this pull will install, so the check is against the right one.
+                    container_cli.precheck_capacity(remote, profile_name=profile,
+                                                    device_id=device_id)
                 # Forward --no-weights: on a first-time `serve org/name` this auto-pull is
                 # what would fetch the weights, so without it the flag was a no-op — the
                 # download happened here before serve_container ever saw the flag.
@@ -1257,6 +1269,12 @@ def serve(
         # Opt-in re-pull, only for a Hub target: a local manifest path has no revision to
         # compare against. Returns None (and warns) on any failure, leaving cmani as-is.
         if refresh and not local_only and not Path(repo_id).is_file():
+            # Deliberately NOT capacity-checked first, unlike the auto-pull above. The only
+            # manifest on hand here is the INSTALLED one; the candidate does not exist until
+            # refresh_if_newer fetches it. Checking the stale one rejects a --profile that
+            # exists only in the new revision, which is a worse outcome than the download it
+            # would save -- and the saving is small, since --refresh re-pulls layers over an
+            # image already present. serve_container checks the refreshed manifest.
             refreshed = container_cli.refresh_if_newer(repo_id, print_only=print_only)
             if refreshed is not None:
                 cmani = refreshed
@@ -1267,6 +1285,7 @@ def serve(
                 cmani, profile_name=profile, print_only=print_only, follow=follow,
                 extra_args=extra_args, source=src, port=port, target=repo_id,
                 local_only=local_only, no_weights=no_weights, detach=detach,
+                device_id=device_id,
             )
         except container_cli.ContainerCliError as e:
             if e.diagnosis is not None:

@@ -340,8 +340,12 @@ run on a build host; a later `serve` starts the container. Around them:
   run` argv without running it (the test surface for every flag).
 - `tt-model logs you/my-model -f` — follow the boot (a cold first boot JIT-compiles kernels,
   ~10 min).
-- `tt-model stop you/my-model` — a clean `SIGTERM` closes the mesh; a `SIGKILL` would leave
-  the devices needing `tt-smi -r`.
+- `tt-model stop you/my-model` — a clean `SIGTERM` closes the mesh. A `SIGKILL` leaves it
+  dirty: `stop` then attempts a `tt-smi -r` scoped to that container's own chips (read back
+  from the label `serve` set, and skipped if another container has taken one of them since),
+  but that
+  is best-effort recovery, not a guarantee — a force-killed teardown can leave a device that
+  only a host reboot restores (issue #107).
 - `tt-model rm you/my-model` — removes a *pulled* container package, including its HF
   snapshot. `--keep-cache` keeps the JIT/weight caches for a fast re-pull;
   `--include-weights` also deletes the weights from the HF cache (off by default — they
@@ -428,7 +432,8 @@ checklist above; `--detach` skips the wait).
 `container.compose_run()` builds the `docker run` argv (pure — its only environment inputs
 are `HF_HOME`/`HF_TOKEN`, both overridable, so `--print` and tests are deterministic):
 
-- `--device /dev/tenstorrent` — the boards.
+- `--device /dev/tenstorrent/<n>` — one flag per chip the profile needs, and **only** those
+  chips. See [Which chips a serve gets](#which-chips-a-serve-gets) below.
 - `--mount type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G` — **verbatim** src and dst,
   because umd regex-matches that exact line in `/proc/mounts`; a subdirectory or 2M
   hugepages fails the match and surfaces as a device-open error.
@@ -451,6 +456,56 @@ while writing it against 80 s reading it. It is a tradeoff, not a free win — i
 roughly equal to the weights (105 GB for FLUX.2, on top of what the HF cache already holds),
 and nothing reports it, because `tt_dit` silently reconverts when `TT_DIT_CACHE_DIR` is unset
 rather than failing. `tt-model rm` removes the whole parent; `--keep-cache` keeps it.
+
+### Which chips a serve gets
+
+A container is scoped to exactly as many chips as its profile needs — the count comes from
+the resolved profile's `hardware` (cross-checked against `mesh_device` at package time), and
+the specific chips are picked from whatever is free on the box at launch:
+
+```
+tt-model serve org/model                 # auto-picks free chip(s)
+tt-model serve org/model --device-id 0,1 # pins specific ones instead
+```
+
+This matters because it is not just bookkeeping. tt-metal/UMD takes a host-wide lock on every
+chip it can *see* during cluster bring-up — not only the one it computes on — and holds it for
+the container's whole life. A container handed the whole `/dev/tenstorrent` directory therefore
+locks the entire board, and the next serve (even one wanting a different chip) blocks forever
+on that lock with no error and no timeout. Scoping the mount is what makes several models
+coexist on one board at all.
+
+What the picker does:
+
+- **Counts what's in use host-wide**, not just tt-model's own containers: the lock is shared
+  through `--ipc host` regardless of who launched the other container, so a tt-studio or
+  tt-inference-server container counts too. A claim is read from a container's actual grant
+  (`--device`, a bind mount, or `--privileged`, which reaches every node without listing
+  any), unioned with the `org.tenstorrent.tt-model.devices` label our own containers carry —
+  a label can only ever over-claim, never hide a held chip. A container that does not share
+  the host ipc namespace claims nothing.
+- **Refuses instead of hanging.** Not enough free chips is an immediate error naming what is
+  busy, raised ahead of the expensive steps — the first-time auto-pull, the image
+  self-heal, the weights prefetch — and re-checked immediately before `docker run`.
+  (`--refresh` is the exception: the candidate manifest does not exist yet, and checking
+  the installed one would reject a profile the new revision adds.)
+- **Validates `--device-id` against the real inventory** — `--device-id 99` on a four-chip
+  box is refused up front, not minutes later inside docker.
+
+The pick is advisory, not a reservation: nothing is held between the scan and the container
+starting (~100ms), so two `serve` commands launched within that window could choose the same
+chip — the second then hangs on the UMD lock, recoverable with `tt-model stop`. A host-wide
+lock would close that sliver, at the cost of every docker call inside it being able to pin a
+lock that blocks *every* serve on the box; that is the worse failure, so it is not taken.
+Two serves of the same model and profile are excluded regardless, by docker's own container
+name uniqueness.
+
+One wrinkle worth knowing: a single chip that is physically one ASIC of a fused multi-chip
+board (half a P300) reports the *board's* type to tt-metal, which cannot match "P300 board,
+one chip visible" to any built-in preset and refuses to open a mesh at all. For a single-chip
+scope, `compose_run` therefore also sets `TT_MESH_GRAPH_DESC_PATH` to tt-metal's own generic
+1×1 descriptor (never overriding one the author set). Multi-chip profiles keep their real
+fabric topology.
 
 ### Inside the image
 

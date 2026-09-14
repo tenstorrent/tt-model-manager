@@ -9,8 +9,14 @@ reads a manifest file, or touches the Hub.
 
 The docker flags are not folklore; each one is load-bearing:
 
-- ``--device /dev/tenstorrent`` — the boards.
-- ``--ipc host`` — shared memory with the host.
+- ``--device`` — scoped to the specific chip(s) a profile needs (picked by
+  ``pick_free_devices``, or pinned with ``--device-id``), not the whole
+  ``/dev/tenstorrent`` directory. tt-metal/UMD takes a host-wide lock on every chip it can SEE
+  during cluster bring-up, not just the one it computes on, and holds it for the container's
+  whole life — so handing over the whole directory means a second container, even one that
+  wants a different chip, hangs forever the moment it opens its own cluster.
+- ``--ipc host`` — shared memory with the host. This is also why the device scoping above
+  matters: it is what makes that UMD lock visible across containers in the first place.
 - the hugepages mount, **verbatim**: umd matches ``/proc/mounts`` against
   ``^(nodev|hugetlbfs) (/dev/hugepages-1G) hugetlbfs …$``, so binding a subdirectory or
   a different dst silently fails that regex and device-open fails minutes later.
@@ -29,18 +35,25 @@ The docker flags are not folklore; each one is load-bearing:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .manifest import DEFAULT_PORT, Manifest, ServeProfile
 
 #: Docker label applied to every container and used to find ours again.
 LABEL = "org.tenstorrent.tt-model"
+
+#: Which specific chip indices a container was launched with (absent => the whole
+#: directory). Read back by ``stop`` to scope a dirty-mesh reset, and by ``pick_free_devices``
+#: to know exactly what one of our own containers holds without re-parsing its device mounts.
+DEVICES_LABEL = f"{LABEL}.devices"
 
 # SIGTERM lets the server close the mesh on its way out; SIGKILL does not, and leaves the
 # devices needing a reset before anything can open them again. Boot alone is ~10 minutes,
@@ -50,9 +63,22 @@ STOP_TIMEOUT_S = 120
 # 128 + SIGKILL(9): docker's grace period expired and it hard-killed the server.
 SIGKILL_EXIT_CODE = "137"
 
+#: Cap on the dirty-mesh `tt-smi -r` a dirty `stop` runs. Generous (a real reset is tens of
+#: seconds) but finite, so a wedged reset container cannot hang `tt-model stop` forever.
+RESET_TIMEOUT_S = 180
+
 
 class ContainerError(RuntimeError):
     """A docker operation that must not proceed. The message is user-facing."""
+
+
+class DeviceScanUnavailable(ContainerError):
+    """The host couldn't be inspected to see which tt devices are free (docker
+    unreachable, unparsable output) -- distinct from a successful scan finding too few
+    free chips, so a caller that can tolerate not knowing (``serve --print``'s best-effort
+    preview) can fall back for THIS reason without also swallowing a genuine "board's too
+    busy" refusal, which must still surface as an error.
+    """
 
 
 # --------------------------------------------------------------------------- preflight
@@ -280,6 +306,235 @@ def preflight_failures(reqs: List[Requirement]) -> List[Requirement]:
     return [r for r in reqs if not r.ok]
 
 
+# Device Allocation
+# Matches one numbered chip node, however a container's device access is granted --
+# either `--device` (HostConfig.Devices) or a bind mount (Mounts) point at it directly.
+_TT_NODE_RE = re.compile(r"^/dev/tenstorrent/(\d+)$")
+
+
+def _grant_claims_everything(path: str) -> bool:
+    """Does this host path hand over the WHOLE board rather than one node?
+
+    ``/dev/tenstorrent`` itself obviously does, but so does any ANCESTOR of it -- a
+    ``--volume /dev:/dev`` or a bare ``--device /dev`` exposes every ``/dev/tenstorrent/*``
+    node just as completely, while matching neither the directory nor the per-node pattern.
+    Reading such a grant as "claims nothing" is the failure that matters here, so anything
+    at or above the device root counts as the whole board.
+
+    Compared segment by segment rather than by string prefix: a prefix test has to special-
+    case the root (``/``) and still says yes to ``/dev/tenstorrent-foo``, which is a
+    different directory entirely.
+    """
+    if not path:
+        return False
+    want = TT_DEVICE.strip("/").split("/")        # ["dev", "tenstorrent"]
+    have = [seg for seg in path.split("/") if seg]  # "/" -> [], "/dev" -> ["dev"]
+    return len(have) <= len(want) and have == want[:len(have)]
+
+
+def _parse_device_ids(raw: str) -> Optional[List[int]]:
+    """A comma list of ints from a docker label value, or None if it is absent or malformed.
+
+    All-or-nothing on purpose. Dropping the tokens that fail to parse would silently NARROW
+    the scope -- ``0,garbage`` would reset chip 0 and leave chip 1 dirty -- whereas None
+    falls back to the whole-directory reset, which is over-broad but never leaves a chip
+    unrecovered. The label is the only scope metadata left once the container is gone.
+    """
+    fields = [x.strip() for x in raw.split(",") if x.strip()]
+    if not fields or not all(f.isdigit() for f in fields):
+        return None
+    return [int(f) for f in fields]
+
+
+def _shares_host_ipc(info: dict, by_id: Dict[str, dict]) -> bool:
+    """Does this container end up in the HOST ipc namespace, directly or by joining?
+
+    ``IpcMode`` is ``host``, ``private``, ``shareable``, or ``container:<id>`` -- and that
+    last one is why this is not a string compare: a container that joins a ``--ipc host``
+    container's namespace is just as exposed to the UMD lock as if it had asked for the host
+    namespace itself. The chain is followed through the containers we inspected, and anything
+    that cannot be resolved (a target we cannot see, a cycle) is treated as shared, because
+    the safe answer when we cannot tell is "it might be contending".
+    """
+    mode = ((info.get("HostConfig") or {}).get("IpcMode") or "")
+    seen: Set[str] = set()
+    while mode.startswith("container:"):
+        ref = mode.split(":", 1)[1]
+        if ref in seen:
+            return True
+        seen.add(ref)
+        target = by_id.get(ref) or next(
+            (v for k, v in by_id.items() if k.startswith(ref)), None)
+        if target is None:
+            return True
+        mode = ((target.get("HostConfig") or {}).get("IpcMode") or "")
+    return mode == "host"
+
+
+def _claimed_from_container(info: dict, all_ids: Sequence[int], *,
+                            host_ipc: Optional[bool] = None) -> Set[int]:
+    """Chip ids one ``docker inspect`` entry claims (every id, if it holds the whole
+    directory) -- from any container, ours or not.
+
+    A claim is read from the container's ACTUAL grant: ``HostConfig.Devices`` covers
+    ``--device``, ``Mounts`` covers a bind mount used instead (some tools mount a node with
+    ``--mount``/``--volume``) -- but only when it shares the HOST ipc namespace
+    (``--ipc host``), which is the one thing that actually exposes it to the UMD lock this
+    scheme protects against. A container with a private ipc namespace cannot contend for that
+    lock no matter what it has mounted, so it claims nothing here -- this is what keeps a
+    device-management service (e.g. tt-studio's backend, which mounts the whole directory for
+    telemetry but runs with a private namespace) from making every chip look permanently busy.
+
+    ``DEVICES_LABEL`` (written by ``compose_run``) is UNIONED in, never substituted for the
+    grant. Labels are attacker- and accident-controllable — anything can `docker run --label
+    org.tenstorrent.tt-model.devices=0` while actually mounting chip 1 — so treating one as
+    authoritative would let metadata HIDE a held chip and hand it to the next serve. Folded in
+    this way it can only ever over-claim, which is the direction that fails safe. For our own
+    containers the two agree, so this changes nothing about them.
+
+    A ``--privileged`` container is a separate case: it can reach every ``/dev/tenstorrent/*``
+    node through the disabled device cgroup without any of it appearing in ``Devices`` or
+    ``Mounts`` at all, so (combined with ``--ipc host``) it is conservatively treated as
+    claiming everything rather than silently reading as free.
+    """
+    labels = (info.get("Config") or {}).get("Labels") or {}
+    own = labels.get(DEVICES_LABEL) or ""
+    ids: Set[int] = {int(x) for x in own.split(",") if x.strip().isdigit()}
+
+    host_config = info.get("HostConfig") or {}
+    if not (host_config.get("IpcMode") == "host" if host_ipc is None else host_ipc):
+        return ids
+    if host_config.get("Privileged"):
+        return set(all_ids)
+
+    granted = [(d.get("PathOnHost") or "") for d in host_config.get("Devices") or []]
+    granted += [(mnt.get("Source") or "") for mnt in info.get("Mounts") or []]
+    for path in granted:
+        path = path.rstrip("/") or "/"
+        if _grant_claims_everything(path):
+            return set(all_ids)
+        m = _TT_NODE_RE.match(path)
+        if m:
+            ids.add(int(m.group(1)))
+    return ids
+
+
+def _claimed_devices(all_ids: Sequence[int]) -> Optional[Set[int]]:
+    """Chip ids already claimed by ANY running container, or None on a scan failure.
+
+    Host-wide by design, not scoped to ``label={LABEL}``: the UMD lock this whole scheme
+    protects against is shared through ``--ipc host`` regardless of who launched the other
+    container, so a tt-studio or tt-inference-server container has to count too. None means
+    docker itself could not be asked (not installed, daemon unreachable, unparsable output)
+    -- callers must refuse to guess then, not silently proceed as if nothing were claimed.
+    ``OSError`` is normalised into that same None: with no docker binary at all ``_run``
+    raises rather than returning non-zero, and ``serve --print`` has to keep working there.
+    """
+    try:
+        ps = _run(["docker", "ps", "-q"], capture_output=True, text=True)
+        if ps.returncode != 0:
+            return None
+        ids = ps.stdout.split()
+        if not ids:
+            return set()
+        inspected = _run(["docker", "inspect", *ids], capture_output=True, text=True)
+        if inspected.returncode != 0:
+            return None
+    except OSError:
+        return None
+    try:
+        containers = json.loads(inspected.stdout)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    # Shape-check before indexing: a daemon that answers with anything but the documented
+    # list-of-objects is "could not be asked", not "nothing is claimed".
+    if not isinstance(containers, list) or not all(isinstance(c, dict) for c in containers):
+        return None
+    by_id = {info["Id"]: info for info in containers if info.get("Id")}
+    claimed: Set[int] = set()
+    for info in containers:
+        claimed |= _claimed_from_container(
+            info, all_ids, host_ipc=_shares_host_ipc(info, by_id))
+    return claimed
+
+
+def all_device_ids(dev_root: Optional[Path] = None) -> List[int]:
+    """Every numbered chip node under ``/dev/tenstorrent``, sorted.
+
+    An unreadable/absent root is ``DeviceScanUnavailable``, not a plain ``ContainerError``:
+    "this machine has no tt devices to inventory" is the same class of not-knowing as "docker
+    could not be asked", and ``serve --print`` has to stay usable on a machine with no card.
+    """
+    root = dev_root or Path(TT_DEVICE)
+    try:
+        return sorted(int(p.name) for p in root.iterdir() if p.name.isdigit())
+    except OSError as e:
+        raise DeviceScanUnavailable(f"could not list {root}: {e}") from e
+
+
+def pick_free_devices(count: int, *, dev_root: Optional[Path] = None) -> List[int]:
+    """The lowest ``count`` chip indices not already claimed by any running container.
+
+    Ascending and deterministic: the common, uncontended case always lands on the same low
+    indices, which matches what a model's own hardcoded env (if any) is likely to assume --
+    a mismatch then only surfaces under actual contention, and fails fast at device-open
+    rather than silently. Raises rather than guesses when the host can't be read or doesn't
+    have enough free chips; the alternative is the silent, indefinite UMD lock hang this
+    replaces.
+
+    Advisory, not a reservation: nothing is held between this returning and the container
+    actually starting (~100ms later), so two serves launched within that window could pick
+    the same chip. Deliberately not locked. A host-wide lock around "scan then docker run"
+    closes that sliver, but only by making every docker call inside it able to pin a lock
+    that blocks EVERY serve on the box -- a worse failure than the one it prevents, which
+    is one container hung on the UMD lock and recoverable with `tt-model stop`. Races
+    between two serves of the same model+profile are already excluded by docker's own
+    container-name uniqueness.
+    """
+    all_ids = all_device_ids(dev_root or Path(TT_DEVICE))
+    claimed = _claimed_devices(all_ids)
+    if claimed is None:
+        raise DeviceScanUnavailable(
+            "could not determine which tt devices are already in use (docker ps/inspect "
+            "failed) — refusing to guess"
+        )
+    free = [i for i in all_ids if i not in claimed]
+    if len(free) < count:
+        raise ContainerError(
+            f"only {len(free)} of {len(all_ids)} tt device(s) are free "
+            f"(chip(s) {', '.join(map(str, sorted(claimed))) or 'none'} in use); "
+            f"this profile needs {count}"
+        )
+    return free[:count]
+
+
+def ensure_devices_free(device_ids: Sequence[int], *,
+                        dev_root: Optional[Path] = None) -> None:
+    """Refuse an explicit ``--device-id`` pin naming a chip this host doesn't have or one
+    already in use.
+
+    There is no picker to avoid either for an explicit pin, so the same inventory and
+    host-wide scan ``pick_free_devices`` applies runs here too -- the operator's choice gets
+    checked rather than trusted blind, up front instead of after the image and weight work.
+    """
+    inventory = all_device_ids(dev_root or Path(TT_DEVICE))
+    unknown = sorted(set(device_ids) - set(inventory))
+    if unknown:
+        raise ContainerError(
+            f"--device-id names chip(s) {', '.join(map(str, unknown))}, which this host does "
+            f"not have (it has {', '.join(map(str, inventory)) or 'none'})"
+        )
+    claimed = _claimed_devices(inventory)
+    if claimed is None:
+        raise DeviceScanUnavailable(
+            "could not determine which tt devices are already in use (docker ps/inspect "
+            "failed) — refusing to guess"
+        )
+    busy = sorted(set(device_ids) & claimed)
+    if busy:
+        raise ContainerError(f"chip(s) {', '.join(map(str, busy))} already in use by another container")
+
+
 def _require_container(m: Manifest):
     if m.container is None:
         raise ContainerError(
@@ -403,6 +658,7 @@ def compose_run(
     env: Dict[str, str],
     *,
     detach: bool = True,
+    device_ids: Optional[Sequence[int]] = None,
     hf_home_dir: Optional[Path] = None,
     cache_dir: Optional[Path] = None,
     weight_cache_dir: Optional[Path] = None,
@@ -417,6 +673,12 @@ def compose_run(
     all can be overridden by the caller so tests never depend on the developer's shell.
     ``rootless`` is passed in rather than probed here for the same reason — the caller
     resolves it with ``docker_is_rootless()``; the safe default matches a rootful daemon.
+
+    ``device_ids``, when given, scopes the container to exactly those ``/dev/tenstorrent/<N>``
+    nodes instead of the whole directory -- see the module docstring for why that matters.
+    The caller supplies it from ``pick_free_devices`` or an explicit ``--device-id`` in the
+    normal case; ``None`` is the whole-directory fallback for a caller that has no chip
+    count to work with at all (e.g. a non-container launcher).
     """
     _require_container(m)
     port = profile.port or DEFAULT_PORT
@@ -447,7 +709,14 @@ def compose_run(
         "--user", container_user(rootless=rootless),
         "--label", f"{LABEL}={m.name}",
         "--label", f"{LABEL}.profile={profile.name}",
-        "--device", "/dev/tenstorrent",
+    ]
+    if device_ids is not None:
+        cmd += ["--label", f"{DEVICES_LABEL}={','.join(str(d) for d in device_ids)}"]
+        for d in device_ids:
+            cmd += ["--device", f"{TT_DEVICE}/{d}:{TT_DEVICE}/{d}"]
+    else:
+        cmd += ["--device", TT_DEVICE]
+    cmd += [
         "--ipc", "host",
         # verbatim src AND dst — umd regex-matches this line in /proc/mounts
         "--mount", "type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G",
@@ -482,7 +751,23 @@ def compose_run(
         # name only: the value is inherited from the caller's environment rather than
         # being written into an argv that `--print` would display and `ps` would leak.
         cmd += ["--env", "HF_TOKEN"]
-    for k, v in sorted(env.items()):
+    merged_env = dict(env)
+    if device_ids is not None and len(device_ids) == 1:
+        # A lone chip that is physically one ASIC of a multi-chip board (e.g. one half of a
+        # P300) reports its real board type (P300, not P150) to tt-metal's Cluster bring-up,
+        # which can't match "P300 board, 1 chip visible" to any built-in preset and refuses
+        # with "CUSTOM cluster type ... must specify a fabric mesh graph descriptor" --
+        # confirmed live: this is the exact fatal a bare single-chip scope hits. The fix
+        # (verified against a running tt-inference-server deployment on this same class of
+        # hardware) is this generic, tt-metal-shipped single-chip descriptor, which sidesteps
+        # board-shape auto-detection entirely. Never overrides an author-set value, and is a
+        # no-op on genuine standalone single-chip hardware (which never reaches the CUSTOM
+        # branch in the first place).
+        merged_env.setdefault(
+            "TT_MESH_GRAPH_DESC_PATH",
+            "/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto",
+        )
+    for k, v in sorted(merged_env.items()):
         cmd += ["--env", f"{k}={v}"]
     cmd += [image_ref(m)]
     cmd += argv
@@ -635,7 +920,7 @@ def container_exists(name: str) -> bool:
     every retry.
     """
     return _run(["docker", "container", "inspect", name],
-               capture_output=True).returncode == 0
+                capture_output=True).returncode == 0
 
 
 def is_running(name: str) -> bool:
@@ -677,15 +962,32 @@ def stop(name: str, image: Optional[str] = None) -> bool:
     """SIGTERM-first stop. Returns True when the shutdown was clean.
 
     ``docker stop`` sends SIGTERM and escalates to SIGKILL after the timeout. A kill means
-    the server never closed the mesh — eth cores are left dirty and the NEXT boot fails —
-    so in that case the mesh is reset with ``tt-smi -r all`` in a throwaway container from
-    the same image. That is why no host tt-smi is needed: the image already has one.
+    the server never closed the mesh — eth cores are left dirty — so in that case the mesh is
+    reset with ``tt-smi -r all`` in a throwaway container from the same image. That is why no
+    host tt-smi is needed: the image already has one. (Best-effort recovery, not a guarantee:
+    see issue #107 — a force-killed teardown can leave a device only a host reboot restores.)
+
+    The one thing this adds over resetting blind is SCOPE: the chips are read back from the
+    ``DEVICES_LABEL`` set at launch, so recovering one container's dirty mesh resets its own
+    chips instead of every chip on the board — which is what an unscoped `tt-smi -r all` does
+    to every sibling container still running.
+
+    Unsynchronized against a concurrent serve, like the picker itself (see
+    ``pick_free_devices``): a serve landing between the removal and the reset could pick one
+    of these chips and have its fresh mesh reset. Narrow, and the alternative — a host-wide
+    lock spanning `docker stop` and a reset container neither of which can be bounded from
+    here — fails worse. Scoping alone already removes the damage this path did routinely.
     """
     inspect = _run(
-        ["docker", "inspect", "--format", "{{.State.Running}}", name],
+        ["docker", "inspect", "--format",
+         '{{.State.Running}}\t{{index .Config.Labels "' + DEVICES_LABEL + '"}}', name],
         capture_output=True, text=True,
     )
-    was_running = inspect.returncode == 0 and inspect.stdout.strip() == "true"
+    # strip("\n"), not strip(): the fields are positional, and a plain strip() would eat an
+    # empty LEADING field and shift every value one place left.
+    parts = inspect.stdout.strip("\n").split("\t") if inspect.returncode == 0 else []
+    was_running = bool(parts) and parts[0] == "true"
+    device_ids = _parse_device_ids(parts[1]) if len(parts) > 1 else None
 
     _run(["docker", "stop", "--timeout", str(STOP_TIMEOUT_S), name],
          capture_output=True, text=True)
@@ -700,22 +1002,51 @@ def stop(name: str, image: Optional[str] = None) -> bool:
     _run(["docker", "rm", name], capture_output=True, text=True)
 
     if not clean and image:
-        reset_mesh(image)
+        # Re-scan immediately before resetting. Removing the container released its chips,
+        # so a serve can have taken one in the interval and be mid-bring-up on it -- and a
+        # `tt-smi -r` aimed at that chip would wipe a LIVE mesh. Checked rather than locked,
+        # for the reason in ``pick_free_devices``: this shrinks the exposure from the whole
+        # reset (tens of seconds) to the few ms between the check and the reset starting,
+        # and turns the remaining failure from destructive into a skipped recovery.
+        # Only a POSITIVE "someone else has it" skips: a scan that cannot answer means
+        # docker is unwell, not that the chip is taken, and refusing to recover then would
+        # leave a dirty mesh for no reason.
+        taken = _claimed_devices(device_ids) if device_ids else None
+        if taken and set(device_ids) & taken:
+            return clean
+        reset_mesh(image, device_ids=device_ids)
     return clean
 
 
-def compose_reset_mesh(image: str) -> List[str]:
-    return [
-        "docker", "run", "--rm",
-        "--device", "/dev/tenstorrent",
+def compose_reset_mesh(image: str, *, device_ids: Optional[Sequence[int]] = None) -> List[str]:
+    cmd = ["docker", "run", "--rm"]
+    if device_ids is not None:
+        for d in device_ids:
+            cmd += ["--device", f"{TT_DEVICE}/{d}:{TT_DEVICE}/{d}"]
+    else:
+        cmd += ["--device", TT_DEVICE]
+    cmd += [
         "--mount", "type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G",
         "--entrypoint", "tt-smi", image, "-r", "all",
     ]
+    return cmd
 
 
-def reset_mesh(image: str) -> bool:
-    """Run ``tt-smi -r all`` inside a throwaway container from the given image."""
-    return _run(compose_reset_mesh(image), capture_output=True, text=True).returncode == 0
+def reset_mesh(image: str, *, device_ids: Optional[Sequence[int]] = None) -> bool:
+    """Run ``tt-smi -r all`` inside a throwaway container from the given image.
+
+    Bounded by ``RESET_TIMEOUT_S`` -- the subprocess timeout is the only bound here, since
+    ``stop`` deliberately takes no lock. A real reset takes tens of seconds; one still going
+    after that is wedged, and waiting longer would not have recovered the device either
+    (issue #107). Note the timeout kills the local docker CLI, not the reset container it
+    started, so this reports failure rather than guaranteeing the reset has stopped.
+    """
+    try:
+        return _run(compose_reset_mesh(image, device_ids=device_ids),
+                    capture_output=True, text=True,
+                    timeout=RESET_TIMEOUT_S).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def logs(name: str, follow: bool = False) -> int:
