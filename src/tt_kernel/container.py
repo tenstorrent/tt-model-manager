@@ -45,7 +45,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .manifest import DEFAULT_PORT, Manifest, ServeProfile
 
@@ -64,6 +64,11 @@ STOP_TIMEOUT_S = 120
 
 # 128 + SIGKILL(9): docker's grace period expired and it hard-killed the server.
 SIGKILL_EXIT_CODE = "137"
+
+#: Cap on the dirty-mesh `tt-smi -r`, which runs while `stop` holds the allocation lock.
+#: Generous (a real reset is tens of seconds) but finite, so the worst-case hold stays a
+#: number other callers can wait out rather than an open question.
+RESET_TIMEOUT_S = 180
 
 
 class ContainerError(RuntimeError):
@@ -545,7 +550,17 @@ def ensure_devices_free(device_ids: Sequence[int], *,
         raise ContainerError(f"chip(s) {', '.join(map(str, busy))} already in use by another container")
 
 
-_DEVICE_ALLOC_LOCK_TIMEOUT_S = 5.0
+#: How long a caller waits to ENTER a device-allocation critical section.
+#:
+#: Derived from the worst case a holder can legitimately take rather than picked: the long
+#: hold is a teardown, and a teardown is `docker stop`'s grace period (which always ends --
+#: SIGKILL) plus a bounded dirty-mesh reset. Since both halves terminate, a serve queued
+#: behind one WILL get in, so making it wait is strictly better than refusing it: failing a
+#: serve after 5s that would have succeeded after 90 is a bad trade on an operation whose own
+#: boot takes ~10 minutes. Still finite, because a lock nobody is holding cannot block us --
+#: flock is released by the kernel when the holder exits, crash included -- so exceeding this
+#: means the daemon itself is wedged, and saying so beats waiting forever.
+_DEVICE_ALLOC_LOCK_TIMEOUT_S = float(STOP_TIMEOUT_S + RESET_TIMEOUT_S + 30)
 
 
 def _open_alloc_lock(dev_root: Optional[Path] = None) -> int:
@@ -567,7 +582,8 @@ def _open_alloc_lock(dev_root: Optional[Path] = None) -> int:
 
 @contextlib.contextmanager
 def alloc_lock(timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S,
-               dev_root: Optional[Path] = None):
+               dev_root: Optional[Path] = None,
+               on_wait: Optional[Callable[[], None]] = None):
     """The host-shared flock guarding every device-allocation-sensitive critical section.
 
     Used both by ``device_allocation`` (check-free -> pick -> docker run) and by ``stop``
@@ -575,9 +591,12 @@ def alloc_lock(timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S,
     in the scan the moment it stops running, so without holding this same lock across the
     whole teardown, a concurrent serve could pick one of those chips and start using it before
     the reset (which targets it by id) actually runs -- and the reset would then wipe the new
-    container's live mesh. Bounded on purpose for the callers that ACQUIRE it: one that cannot
-    get in within ``timeout_s`` fails fast with a retry message rather than risking a second,
-    quieter version of the hang this whole mechanism exists to prevent.
+    container's live mesh.
+
+    A contended lock is WAITED on, not failed (see ``_DEVICE_ALLOC_LOCK_TIMEOUT_S``) -- every
+    hold is bounded, so the caller will get in. ``on_wait`` is called once, the first time the
+    lock is found busy, so the caller can say what it is waiting for: a silent multi-minute
+    block is indistinguishable from the hang this whole mechanism exists to prevent.
 
     A host with no device root AT ALL (no driver, no card, CI) has nothing to arbitrate, so
     the section runs unlocked there rather than failing: the callers that actually need a
@@ -597,6 +616,7 @@ def alloc_lock(timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S,
             f"{dev_root or TT_DEVICE}: {e} — refusing to allocate a device unsynchronized"
         ) from e
     deadline = time.monotonic() + timeout_s
+    announced = False
     while True:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -605,9 +625,13 @@ def alloc_lock(timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S,
             if time.monotonic() >= deadline:
                 os.close(fd)
                 raise ContainerError(
-                    "timed out waiting for another `tt-model serve`/`stop` to finish with "
-                    "the device allocation lock; retry in a moment"
+                    f"waited {timeout_s:.0f}s for another `tt-model serve`/`stop` to release "
+                    f"the device allocation lock and it is still held — every hold is "
+                    f"bounded, so this usually means the docker daemon is wedged"
                 )
+            if not announced and on_wait is not None:
+                announced = True
+                on_wait()
             time.sleep(0.1)
     try:
         yield
@@ -618,7 +642,8 @@ def alloc_lock(timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S,
 
 @contextlib.contextmanager
 def device_allocation(count: int, *, dev_root: Optional[Path] = None,
-                      timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S):
+                      timeout_s: float = _DEVICE_ALLOC_LOCK_TIMEOUT_S,
+                      on_wait: Optional[Callable[[], None]] = None):
     """Claim ``count`` free tt devices for one ``docker run``, race-free across processes.
 
     Held only across "check what's free -> pick -> docker run": the real, indefinite
@@ -626,7 +651,7 @@ def device_allocation(count: int, *, dev_root: Optional[Path] = None,
     devices. This just closes the window where two concurrent ``tt-model serve`` calls could
     both see the same chip as free before either container exists yet.
     """
-    with alloc_lock(timeout_s, dev_root=dev_root):
+    with alloc_lock(timeout_s, dev_root=dev_root, on_wait=on_wait):
         yield pick_free_devices(count, dev_root=dev_root)
 
 
@@ -1067,7 +1092,8 @@ def container_id(name: str) -> Optional[str]:
 
 
 def stop(name: str, image: Optional[str] = None, *,
-         expect_id: Optional[str] = None) -> bool:
+         expect_id: Optional[str] = None,
+         on_wait: Optional[Callable[[], None]] = None) -> bool:
     """SIGTERM-first stop. Returns True when the shutdown was clean.
 
     ``docker stop`` sends SIGTERM and escalates to SIGKILL after the timeout. A kill means
@@ -1096,7 +1122,7 @@ def stop(name: str, image: Optional[str] = None, *,
     # as the server takes to exit (up to STOP_TIMEOUT_S in the pathological case), so a serve
     # racing a slow stop gets `alloc_lock`'s bounded timeout and a retry message rather than a
     # corrupted mesh.
-    with alloc_lock():
+    with alloc_lock(on_wait=on_wait):
         # Read INSIDE the lock: taken outside it, a replacement container could be started
         # under the same name while this call waits, and the teardown would then stop the
         # REPLACEMENT while resetting the chips the old one held.
@@ -1150,9 +1176,19 @@ def compose_reset_mesh(image: str, *, device_ids: Optional[Sequence[int]] = None
 
 
 def reset_mesh(image: str, *, device_ids: Optional[Sequence[int]] = None) -> bool:
-    """Run ``tt-smi -r all`` inside a throwaway container from the given image."""
-    return _run(compose_reset_mesh(image, device_ids=device_ids),
-               capture_output=True, text=True).returncode == 0
+    """Run ``tt-smi -r all`` inside a throwaway container from the given image.
+
+    Bounded, because this runs while ``stop`` holds the allocation lock: an unbounded reset
+    is an unbounded hold, and then "wait for the teardown" stops being a promise anyone can
+    keep. A real reset takes tens of seconds; one still going after ``RESET_TIMEOUT_S`` is
+    wedged, and waiting longer would not have recovered the device either (issue #107).
+    """
+    try:
+        return _run(compose_reset_mesh(image, device_ids=device_ids),
+                    capture_output=True, text=True,
+                    timeout=RESET_TIMEOUT_S).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def logs(name: str, follow: bool = False) -> int:

@@ -607,7 +607,7 @@ def test_serve_walks_the_boot_landmarks_and_ends_on_a_ready_card(tmp_path, monke
 def test_stop_reports_a_clean_shutdown(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(container, "running", lambda name=None: [{"name": name}])
     monkeypatch.setattr(container, "stop",
-                        lambda name, image=None, expect_id=None: True)
+                        lambda name, image=None, expect_id=None, on_wait=None: True)
     container_cli.stop_container(_manifest(tmp_path))
     out = capsys.readouterr().out
     assert "stopped 1" in out
@@ -617,7 +617,7 @@ def test_stop_reports_a_clean_shutdown(tmp_path, monkeypatch, capsys):
 def test_stop_warns_loudly_when_a_kill_forced_a_mesh_reset(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(container, "running", lambda name=None: [{"name": name}])
     monkeypatch.setattr(container, "stop",
-                        lambda name, image=None, expect_id=None: False)
+                        lambda name, image=None, expect_id=None, on_wait=None: False)
     container_cli.stop_container(_manifest(tmp_path))
     assert "mesh was left dirty" in capsys.readouterr().out
 

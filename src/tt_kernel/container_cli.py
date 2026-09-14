@@ -1039,18 +1039,24 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     container.remove(name, force=True)
                 raise
 
+        # A teardown can legitimately hold the lock for a couple of minutes, and we wait it
+        # out rather than refusing -- but a silent wait looks exactly like the hang this all
+        # exists to prevent, so say what we are waiting for.
+        waiting = lambda: view.detail(  # noqa: E731 - one-liner, used twice below
+            "another serve/stop holds the device lock; waiting for it to finish")
+
         if requested_device_ids is not None:
             # Same lock the auto-picker uses (container.device_allocation), held across the
             # same "check free -> launch" window -- an explicit pin still has to coordinate
             # with a concurrent stop()'s teardown, or with another concurrent serve, even
             # though it skips the picker itself.
-            with container.alloc_lock():
+            with container.alloc_lock(on_wait=waiting):
                 container.ensure_devices_free(requested_device_ids)
                 _start(requested_device_ids)
         else:
             # Held across "check what's free -> pick -> docker run" -- see
             # container.device_allocation.
-            with container.device_allocation(chip_count) as picked_ids:
+            with container.device_allocation(chip_count, on_wait=waiting) as picked_ids:
                 _start(picked_ids)
         view.done("container started")
         if detach:
@@ -1139,8 +1145,10 @@ def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) ->
         expect_id = container.container_id(name)
         stopped += 1
         with console.step(f"stopping {name}") as st:
-            clean = container.stop(name, image=container.image_ref(manifest),
-                                   expect_id=expect_id)
+            clean = container.stop(
+                name, image=container.image_ref(manifest), expect_id=expect_id,
+                on_wait=lambda: st.detail("waiting for the device lock"),
+            )
             st.detail("clean shutdown" if clean else "killed — mesh reset attempted")
         if not clean:
             # Deliberately not "the next boot is safe" (issue #107): on a force-killed

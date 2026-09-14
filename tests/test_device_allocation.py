@@ -11,6 +11,7 @@ on any real docker daemon.
 """
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from tt_kernel.container_manifest import ContainerManifest
 from tt_kernel.launchers import launcher_for
 
 from test_container_manifest import BASE
+
 
 class _R:
     def __init__(self, stdout="", rc=0):
@@ -261,6 +263,63 @@ def test_the_lock_is_bypassed_only_for_a_genuinely_absent_device_root(tmp_path):
     """No driver, no card, CI: nothing to arbitrate, so the section runs unlocked."""
     with container.alloc_lock(dev_root=tmp_path / "nope"):
         pass  # must not raise
+
+
+def test_a_contended_lock_is_waited_out_rather_than_refused(tmp_path):
+    """Every hold is bounded (a teardown is docker stop's grace period plus a bounded
+    reset), so a caller that queues behind one WILL get in -- refusing it would fail a serve
+    that was always going to succeed."""
+    import threading
+
+    root = _dev_root(tmp_path)
+    released, waited = threading.Event(), []
+
+    def holder():
+        with container.alloc_lock(dev_root=root):
+            released.wait(5)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    try:
+        time.sleep(0.2)  # let the holder take it
+        with container.alloc_lock(dev_root=root, timeout_s=5,
+                                  on_wait=lambda: waited.append(True)):
+            pass  # got in after the holder let go, rather than raising
+    finally:
+        released.set()
+        t.join()
+    assert waited == [True], "the wait should have been announced exactly once"
+
+
+def test_the_wait_is_still_bounded_when_nobody_ever_releases(tmp_path):
+    """Bounded because a lock nobody holds cannot block us -- flock is released by the
+    kernel on exit, crash included -- so exceeding it means something is genuinely wedged."""
+    import threading
+
+    root = _dev_root(tmp_path)
+    release = threading.Event()
+
+    def holder():
+        with container.alloc_lock(dev_root=root):
+            release.wait(10)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    try:
+        time.sleep(0.2)
+        with pytest.raises(container.ContainerError, match="wedged"):
+            with container.alloc_lock(dev_root=root, timeout_s=0.5):
+                pytest.fail("must not enter a lock held by someone else")
+    finally:
+        release.set()
+        t.join()
+
+
+def test_the_wait_budget_covers_the_worst_case_teardown():
+    """The number is derived, not picked: a serve must be able to outlast the longest a
+    teardown can legitimately hold the lock, or waiting is not actually a promise."""
+    assert container._DEVICE_ALLOC_LOCK_TIMEOUT_S >= (
+        container.STOP_TIMEOUT_S + container.RESET_TIMEOUT_S)
 
 
 def test_a_lock_we_cannot_open_is_surfaced_rather_than_silently_skipped(tmp_path, monkeypatch):
