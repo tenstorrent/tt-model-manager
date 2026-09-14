@@ -487,6 +487,21 @@ def resolve_target(target: str) -> Optional[Manifest]:
     return load_pulled(target)
 
 
+def _advice_target(spec, profile, what: str) -> str:
+    """``what`` for the default profile; ``what --profile X`` for any other.
+
+    Everything a failure card or a ready card tells the operator to run next has to work
+    as printed. `serve --profile p150` followed by the card's `tt-model logs <repo>`
+    addresses the DEFAULT profile's container, which is a different container — so the
+    advice silently pointed at the wrong place and the crash could not be read
+    (DEVSTACK-290). The flag is appended only when it changes the meaning, so the common
+    single-profile output stays short.
+    """
+    if profile.name == spec.resolved_default():
+        return what
+    return f"{what} --profile {profile.name}"
+
+
 def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     print_only: bool = False, follow: bool = False,
                     extra_args: Optional[List[str]] = None,
@@ -630,9 +645,11 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
 
     name = container.container_name(manifest, profile)
     what = target or manifest.name
+    # Every "run this next" string below must name the profile actually being served.
+    what_p = _advice_target(spec, profile, what)
     if container.is_running(name):
         raise ContainerCliError(
-            f"{name} is already running. Stop it first:  tt-model stop {what}"
+            f"{name} is already running. Stop it first:  tt-model stop {what_p}"
         )
     # As the host user, so the daemon does not create them as root: see
     # container.ensure_mount_sources.
@@ -680,17 +697,17 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
 
     if detach:
         console.note(f"endpoint (once ready):  {endpoint}", marker="→")
-        console.note(f"follow the boot:        tt-model logs {what} -f", marker="→")
+        console.note(f"follow the boot:        tt-model logs {what_p} -f", marker="→")
         return
 
     assert result is not None
     if not result.ready:
         diag = diagnose_boot(tracker.evidence() or result.tail, exited=result.exited,
-                             target=what, extra_args=extra_args)
+                             target=what_p, extra_args=extra_args)
         raise ContainerCliError(summarize(diag, result.tail), diagnosis=diag)
 
     console.milestone(f"{what} ready  {console.fmt_duration(view.elapsed)}")
-    console.console.print(_ready_card(name, endpoint, what))
+    console.console.print(_ready_card(name, endpoint, what, what_p))
 
 
 def _host_summary(reqs) -> Optional[str]:
@@ -721,8 +738,13 @@ def _feed(tracker: BootTracker, view):
     return on_line
 
 
-def _ready_card(name: str, endpoint: str, target: str):
-    """The end-of-boot card: where the server is and what to do next."""
+def _ready_card(name: str, endpoint: str, target: str, advice: Optional[str] = None):
+    """The end-of-boot card: where the server is and what to do next.
+
+    ``advice`` is ``target`` plus ``--profile`` when a non-default profile is being
+    served, so the footer commands address the container that just started.
+    """
+    advice = advice or target
     return console.ready_panel(
         name,
         [
@@ -730,24 +752,48 @@ def _ready_card(name: str, endpoint: str, target: str):
             ("models", f"curl {endpoint}/v1/models"),
             ("try", f'tt-model curl {target} "hello"'),
         ],
-        footer_lines=[f"[muted]tt-model logs {target} -f   ·   tt-model stop {target}[/muted]"],
+        footer_lines=[f"[muted]tt-model logs {advice} -f   ·   tt-model stop {advice}[/muted]"],
     )
 
 
 # ------------------------------------------------------------------------ stop / logs
 
 
+def _candidate_names(manifest: Manifest, spec, profile_name: Optional[str]) -> List[str]:
+    """Container names for `stop`/`logs` to act on, the default profile FIRST.
+
+    With no ``--profile``, the profile the operator means is the one `serve` would have
+    launched, which is the default one. Walking ``profile_names()`` in declaration order
+    instead reached an unrelated profile first, so `logs` reported on a container the
+    operator never started (DEVSTACK-290).
+
+    Names are de-duplicated: two profiles that differ only in fields outside the name
+    would otherwise be visited — and counted — twice.
+    """
+    if profile_name:
+        wanted = [profile_name]
+    else:
+        default = spec.resolved_default()
+        wanted = [default] + [n for n in spec.profile_names() if n != default]
+    names: List[str] = []
+    for n in wanted:
+        name = container.container_name(manifest, spec.resolve_profile(n))
+        if name not in names:
+            names.append(name)
+    return names
+
+
 def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) -> None:
     spec = manifest.container
     assert spec is not None
-    names = ([container.container_name(manifest, spec.resolve_profile(profile_name))]
-             if profile_name else
-             [container.container_name(manifest, spec.resolve_profile(n))
-              for n in spec.profile_names()])
+    names = _candidate_names(manifest, spec, profile_name)
 
     stopped = 0
     for name in names:
-        if not container.running(name):
+        # Exact existence, in any state: `docker run` creates the container before it
+        # binds ports, so a failed start leaves one in "Created" that still needs
+        # clearing. Asked per name so one container is never counted twice.
+        if not container.container_exists(name):
             continue
         stopped += 1
         with console.step(f"stopping {name}") as st:
@@ -767,15 +813,25 @@ def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) ->
 
 def logs_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                    follow: bool = False, target: Optional[str] = None) -> int:
+    """Print one container's log. Reads a CRASHED container too.
+
+    A boot that fails leaves an exited container behind, and its output is the only
+    record of why the engine died — which is exactly the moment someone runs `logs`.
+    ``docker logs`` reads an exited container, so a live container is preferred and an
+    exited one is still served rather than refused (DEVSTACK-290).
+    """
     spec = manifest.container
     assert spec is not None
-    for n in ([profile_name] if profile_name else spec.profile_names()):
-        name = container.container_name(manifest, spec.resolve_profile(n))
-        if container.running(name):
-            return container.logs(name, follow=follow)
+    names = _candidate_names(manifest, spec, profile_name)
+    for present in (container.is_running, container.container_exists):
+        for name in names:
+            if present(name):
+                return container.logs(name, follow=follow)
     what = target or manifest.name
+    hint = f"{what} --profile {profile_name}" if profile_name else what
     raise ContainerCliError(
-        f"no running container for {manifest.name}. Start it:  tt-model serve {what}"
+        f"no container for {manifest.name} — not running, and none exited that still "
+        f"holds its log. Start it:  tt-model serve {hint}"
     )
 
 

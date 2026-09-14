@@ -367,8 +367,69 @@ def test_serve_walks_the_boot_landmarks_and_ends_on_a_ready_card(tmp_path, monke
 # ------------------------------------------------------------------ stop
 
 
+def _fake_docker(monkeypatch, present, running=None):
+    """A docker stand-in driven by container names, not by tt-model's own predicates.
+
+    ``present`` are the container names that exist in any state; ``running`` those whose
+    ``State.Running`` is true (default: all of them). Returns the list that every
+    ``docker logs`` target is appended to.
+
+    Stubbing at this level rather than at ``container.running`` / ``container.is_running``
+    keeps these tests honest about WHICH container was read: a test that stubs the
+    predicate cannot see the predicate pick the wrong name.
+    """
+    import subprocess
+
+    running = present if running is None else running
+    seen: list = []
+
+    def fake(cmd, **kw):
+        def ok(out=""):
+            return subprocess.CompletedProcess(cmd, 0, out, "")
+
+        def missing():
+            return subprocess.CompletedProcess(
+                cmd, 1, "", f"Error: No such container: {cmd[-1]}"
+            )
+
+        if cmd[:2] == ["docker", "ps"]:
+            return ok("".join(f"{n}\timage:tag\tUp 1 second\t\n" for n in present))
+        if cmd[:3] == ["docker", "container", "inspect"]:
+            return ok("[]") if cmd[-1] in present else missing()
+        if cmd[:2] == ["docker", "inspect"]:
+            if cmd[-1] not in present:
+                return missing()
+            if "{{.State.Running}}" in cmd:
+                return ok("true\n" if cmd[-1] in running else "false\n")
+            if "{{.State.ExitCode}}" in cmd:
+                return ok("0\n")
+            return ok("\n")
+        if cmd[:2] == ["docker", "logs"]:
+            seen.append(cmd[-1])
+            return ok()
+        return ok()
+
+    monkeypatch.setattr(container, "_run", fake)
+    return seen
+
+
+def _prefix_manifest(tmp_path) -> Manifest:
+    """Two profiles where one name is a prefix of the other, short one declared first.
+
+    This is the shape that broke in DEVSTACK-290: the published package declares ``p150``
+    and ``p150x4``, so the container names are ``tt-model-my-model-p150`` and
+    ``tt-model-my-model-p150x4`` — the first is a prefix of the second.
+    """
+    profiles = [
+        {"name": "p150", "hardware": "p150", "mesh_device": "P150", "max_num_seqs": 8},
+        {"name": "p150x4", "hardware": "p150x4", "mesh_device": "P150x4",
+         "max_num_seqs": 32, "max_model_len": 131072},
+    ]
+    return _manifest(tmp_path, serve_profiles=profiles, default_profile="p150x4")
+
+
 def test_stop_reports_a_clean_shutdown(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(container, "running", lambda name=None: [{"name": name}])
+    monkeypatch.setattr(container, "container_exists", lambda name: True)
     monkeypatch.setattr(container, "stop", lambda name, image=None: True)
     container_cli.stop_container(_manifest(tmp_path))
     out = capsys.readouterr().out
@@ -377,25 +438,78 @@ def test_stop_reports_a_clean_shutdown(tmp_path, monkeypatch, capsys):
 
 
 def test_stop_warns_loudly_when_a_kill_forced_a_mesh_reset(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(container, "running", lambda name=None: [{"name": name}])
+    monkeypatch.setattr(container, "container_exists", lambda name: True)
     monkeypatch.setattr(container, "stop", lambda name, image=None: False)
     container_cli.stop_container(_manifest(tmp_path))
     assert "mesh was left dirty" in capsys.readouterr().out
 
 
 def test_stopping_nothing_says_so_rather_than_failing(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "container_exists", lambda name: False)
     container_cli.stop_container(_manifest(tmp_path))
     assert "nothing running" in capsys.readouterr().out
+
+
+def test_stop_counts_each_container_once(tmp_path, monkeypatch, capsys):
+    """DEVSTACK-290: one container existed and `stop` reported two.
+
+    The name test was a substring test, so the ``p150`` profile's name matched the
+    ``p150x4`` container as well and the single container was counted twice.
+    """
+    _fake_docker(monkeypatch, present=["tt-model-my-model-p150x4"])
+    container_cli.stop_container(_prefix_manifest(tmp_path))
+    assert "stopped 1 container(s)" in capsys.readouterr().out
 
 
 # ------------------------------------------------------------------ logs / profiles
 
 
 def test_logs_without_a_running_container_says_how_to_start_one(tmp_path, monkeypatch):
-    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "container_exists", lambda name: False)
+    monkeypatch.setattr(container, "is_running", lambda name: False)
     with pytest.raises(container_cli.ContainerCliError, match="tt-model serve"):
         container_cli.logs_container(_manifest(tmp_path))
+
+
+def test_logs_reads_the_profile_serve_launched_not_the_first_declared(tmp_path, monkeypatch):
+    """DEVSTACK-290: `serve` ran the default profile ``p150x4``; `logs` with no --profile
+    walked the profiles in declaration order, matched ``p150`` by substring, and asked
+    docker for ``tt-model-my-model-p150`` — a container that does not exist. docker
+    answered "No such container" and the operator never saw the crash.
+    """
+    seen = _fake_docker(monkeypatch, present=["tt-model-my-model-p150x4"])
+    assert container_cli.logs_container(_prefix_manifest(tmp_path)) == 0
+    assert seen == ["tt-model-my-model-p150x4"]
+
+
+def test_logs_reads_a_crashed_container(tmp_path, monkeypatch):
+    """The reason to run `logs` after a failed boot is that the container has EXITED and
+    its output is the only record of why. `docker logs` reads an exited container fine.
+    """
+    seen = _fake_docker(monkeypatch, present=["tt-model-my-model-p150x4"], running=[])
+    assert container_cli.logs_container(_prefix_manifest(tmp_path)) == 0
+    assert seen == ["tt-model-my-model-p150x4"]
+
+
+def test_logs_prefers_a_live_container_over_a_crashed_one(tmp_path, monkeypatch):
+    """Both profiles left a container behind; only one is still up. Read the live one."""
+    seen = _fake_docker(
+        monkeypatch,
+        present=["tt-model-my-model-p150", "tt-model-my-model-p150x4"],
+        running=["tt-model-my-model-p150"],
+    )
+    assert container_cli.logs_container(_prefix_manifest(tmp_path)) == 0
+    assert seen == ["tt-model-my-model-p150"]
+
+
+def test_logs_honours_an_explicit_profile(tmp_path, monkeypatch):
+    seen = _fake_docker(
+        monkeypatch,
+        present=["tt-model-my-model-p150", "tt-model-my-model-p150x4"],
+    )
+    assert container_cli.logs_container(_prefix_manifest(tmp_path),
+                                       profile_name="p150") == 0
+    assert seen == ["tt-model-my-model-p150"]
 
 
 def test_profiles_marks_the_default(tmp_path, monkeypatch, capsys):
@@ -1568,3 +1682,60 @@ def test_a_weights_404_is_not_dressed_up_as_a_gate(capsys):
     out = capsys.readouterr().out
     assert "accept the terms" not in out
 
+
+
+# ------------------------------------------------- advice must name the profile served
+#
+# DEVSTACK-290: `serve` on a non-default profile failed, and the card said
+# `tt-model logs <repo>`. That command addresses the DEFAULT profile's container, which is
+# a different container, so it answered "No such container" and the crash was unreadable.
+
+
+def _serve_failing(tmp_path, monkeypatch, **kw):
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "is_running", lambda name: False)
+    monkeypatch.setattr(container, "container_exists", lambda name: False)
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "port_is_free", lambda p: True)
+    monkeypatch.setattr(container, "wait_ready",
+                        lambda *a, **k: container.ReadyResult(False, True, ["boom"]))
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_prefix_manifest(tmp_path), target="org/x", **kw)
+    return e.value
+
+
+def test_a_failed_boot_names_the_non_default_profile_in_its_advice(tmp_path, monkeypatch):
+    err = _serve_failing(tmp_path, monkeypatch, profile_name="p150")
+    actions = " ".join(err.diagnosis["actions"])
+    assert "tt-model logs org/x --profile p150" in actions
+
+
+def test_a_failed_boot_on_the_default_profile_keeps_the_advice_short(tmp_path, monkeypatch):
+    """The flag is added only when it changes which container is addressed."""
+    err = _serve_failing(tmp_path, monkeypatch)
+    actions = " ".join(err.diagnosis["actions"])
+    assert "tt-model logs org/x" in actions and "--profile" not in actions
+
+
+def test_detach_advice_names_the_non_default_profile(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "is_running", lambda name: False)
+    monkeypatch.setattr(container, "container_exists", lambda name: False)
+    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "port_is_free", lambda p: True)
+    container_cli.serve_container(_prefix_manifest(tmp_path), target="org/x",
+                                  profile_name="p150", detach=True)
+    assert "tt-model logs org/x --profile p150 -f" in capsys.readouterr().out
+
+
+def test_an_already_running_server_is_stopped_with_the_right_profile(tmp_path, monkeypatch):
+    name = "tt-model-my-model-p150"
+    monkeypatch.setattr(container, "is_running", lambda n: n == name)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "port_is_free", lambda p: True)
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        container_cli.serve_container(_prefix_manifest(tmp_path), target="org/x",
+                                      profile_name="p150")
+    assert "tt-model stop org/x --profile p150" in str(e.value)

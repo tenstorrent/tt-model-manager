@@ -554,8 +554,17 @@ def run_checked(argv: List[str]) -> str:
     return r.stdout
 
 
-def running(name_filter: Optional[str] = None) -> List[Dict[str, str]]:
-    """tt-model containers present on this host (running or exited)."""
+def running(name: Optional[str] = None) -> List[Dict[str, str]]:
+    """tt-model containers present on this host (running or exited).
+
+    ``name`` selects one container by its EXACT name. It used to be a substring test,
+    which silently selected the wrong container whenever one profile's name was a prefix
+    of another's: a package declaring both ``p150`` and ``p150x4`` yields
+    ``tt-model-<m>-p150`` and ``tt-model-<m>-p150x4``, and the first is a prefix of the
+    second. `logs` then read a container that does not exist and `stop` counted the one
+    live container twice (DEVSTACK-290). Profile names are exact identifiers, so the
+    match on them has to be exact too.
+    """
     fmt = "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
     out = _run(
         ["docker", "ps", "--all", "--filter", f"label={LABEL}", "--format", fmt],
@@ -564,7 +573,7 @@ def running(name_filter: Optional[str] = None) -> List[Dict[str, str]]:
     rows = []
     for line in out.splitlines():
         parts = line.split("\t")
-        if len(parts) >= 3 and (not name_filter or name_filter in parts[0]):
+        if len(parts) >= 3 and (name is None or parts[0] == name):
             rows.append({
                 "name": parts[0], "image": parts[1], "status": parts[2],
                 "ports": parts[3] if len(parts) > 3 else "",

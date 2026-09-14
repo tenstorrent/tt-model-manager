@@ -789,3 +789,39 @@ def test_a_missing_device_node_is_not_reachable(tmp_path):
     import os
 
     assert container._reachable_in_userns(tmp_path / "nope", mode=os.R_OK) is False
+
+
+# ------------------------------------------------- a container name is matched exactly
+#
+# DEVSTACK-290: `running()` filtered with `name_filter in parts[0]`, a substring test. A
+# package that declares both `p150` and `p150x4` produces container names where one is a
+# prefix of the other, so the short profile matched the long profile's container. `logs`
+# then read a container that does not exist ("No such container") and `stop` counted the
+# one live container twice.
+
+
+def _ps_returning(monkeypatch, *names):
+    import subprocess
+
+    def fake(cmd, **kw):
+        assert cmd[:2] == ["docker", "ps"]
+        rows = "".join(f"{n}\timage:tag\tUp 1 second\t\n" for n in names)
+        return subprocess.CompletedProcess(cmd, 0, rows, "")
+
+    monkeypatch.setattr(container, "_run", fake)
+
+
+def test_running_does_not_match_a_name_that_is_only_a_prefix(monkeypatch):
+    _ps_returning(monkeypatch, "tt-model-my-model-p150x4")
+    assert container.running("tt-model-my-model-p150") == []
+
+
+def test_running_matches_the_exact_name(monkeypatch):
+    _ps_returning(monkeypatch, "tt-model-my-model-p150x4")
+    rows = container.running("tt-model-my-model-p150x4")
+    assert [r["name"] for r in rows] == ["tt-model-my-model-p150x4"]
+
+
+def test_running_unfiltered_lists_every_tt_model_container(monkeypatch):
+    _ps_returning(monkeypatch, "tt-model-a-p150", "tt-model-b-p300")
+    assert len(container.running()) == 2
