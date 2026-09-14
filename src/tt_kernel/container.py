@@ -65,6 +65,11 @@ STOP_TIMEOUT_S = 120
 # 128 + SIGKILL(9): docker's grace period expired and it hard-killed the server.
 SIGKILL_EXIT_CODE = "137"
 
+# Cap on the `docker run` that launches a container. It is the last operation inside the
+# allocation lock, and `docker run --detach` only creates and starts (the boot itself
+# happens afterwards, unlocked), so seconds is normal and this is already very generous.
+RUN_TIMEOUT_S = 120
+
 #: Cap on each docker call in the free-chip scan. The scan runs while the allocation lock
 #: is held, so a wedged docker CLI must fail it rather than pin the lock open.
 SCAN_TIMEOUT_S = 30
@@ -76,6 +81,16 @@ RESET_TIMEOUT_S = 180
 
 class ContainerError(RuntimeError):
     """A docker operation that must not proceed. The message is user-facing."""
+
+
+class DockerUnresponsive(ContainerError):
+    """A docker command exceeded its timeout, so the daemon is presumed wedged.
+
+    Distinct from a docker command that FAILED: a failure leaves a knowable state worth
+    cleaning up, whereas this leaves an unknowable one -- and the cleanup would be more
+    calls to the same unresponsive daemon, which is how a bounded operation becomes an
+    unbounded one again.
+    """
 
 
 class DeviceScanUnavailable(ContainerError):
@@ -934,13 +949,23 @@ def _run(argv: List[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(argv, **kw)
 
 
-def run_checked(argv: List[str]) -> str:
+def run_checked(argv: List[str], *, timeout: Optional[float] = None) -> str:
     """Run a docker command, raising ContainerError with its stderr on failure.
 
     docker's own messages are the useful diagnosis here (no such image, port in use,
     device busy), so they are surfaced verbatim rather than reworded.
+
+    ``timeout`` is for a caller holding a lock, where an unresponsive daemon would otherwise
+    pin it open; it raises ``DockerUnresponsive`` so that caller can tell "wedged" from
+    "failed". Unbounded by default, because most callers have nothing to hold.
     """
-    r = _run(argv, capture_output=True, text=True)
+    try:
+        r = _run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise DockerUnresponsive(
+            f"`{' '.join(argv[:2])}` did not return within {timeout:.0f}s — the docker "
+            f"daemon appears to be wedged"
+        ) from None
     if r.returncode != 0:
         detail = (r.stderr or r.stdout or "").strip()
         raise ContainerError(detail or f"`{' '.join(argv[:2])}` failed (exit {r.returncode})")

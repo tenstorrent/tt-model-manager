@@ -1037,7 +1037,16 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                                              device_ids=ids,
                                              rootless=container.docker_is_rootless())
             try:
-                container.run_checked(run_argv)
+                # Bounded: this is the last thing done under the allocation lock, and an
+                # unresponsive daemon here would pin a host-wide lock open.
+                container.run_checked(run_argv, timeout=container.RUN_TIMEOUT_S)
+            except container.DockerUnresponsive:
+                # No cleanup, deliberately: whatever got created is unknowable, and finding
+                # out means more calls to the daemon that just stopped answering -- which is
+                # how a bounded operation becomes unbounded again. Release the lock instead.
+                # Nothing leaks: the stale-container removal above clears a leftover on the
+                # next attempt, and a container that DID start is caught by `is_running`.
+                raise
             except container.ContainerError:
                 # Leave no half-created container behind to block the next attempt. Safe to
                 # judge by name here only because we still hold the lock: nothing else can

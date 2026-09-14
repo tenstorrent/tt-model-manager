@@ -154,7 +154,7 @@ def _manifest(tmp_path, **over) -> Manifest:
 
 def test_serve_print_emits_the_docker_run_without_running_it(tmp_path, monkeypatch, capsys):
     ran = []
-    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: ran.append(argv))
     container_cli.serve_container(_manifest(tmp_path), print_only=True)
     out = capsys.readouterr().out
     assert "docker run" in out
@@ -183,7 +183,7 @@ JSON_SERVE = {
 
 
 def _printed(tmp_path, monkeypatch, capsys, **over) -> str:
-    monkeypatch.setattr(container, "run_checked", lambda argv: pytest.fail("--print ran it"))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: pytest.fail("--print ran it"))
     container_cli.serve_container(_manifest(tmp_path, **over), print_only=True)
     return capsys.readouterr().out.strip()
 
@@ -273,7 +273,7 @@ def test_serve_refuses_when_the_container_is_already_running(tmp_path, monkeypat
 def test_serve_starts_the_container(tmp_path, monkeypatch):
     ran = []
     monkeypatch.setattr(container, "running", lambda name=None: [])
-    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: ran.append(argv))
     container_cli.serve_container(_manifest(tmp_path))
     assert ran and ran[0][:2] == ["docker", "run"]
     assert "tt-model-my-model-p150x4" in ran[0]
@@ -282,7 +282,7 @@ def test_serve_starts_the_container(tmp_path, monkeypatch):
 def test_serve_picks_the_named_profile(tmp_path, monkeypatch):
     ran = []
     monkeypatch.setattr(container, "running", lambda name=None: [])
-    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: ran.append(argv))
     two = json.loads(json.dumps(BASE))["serve_profiles"] + [
         {"name": "p150x2", "hardware": "p150x2", "mesh_device": "P150x2", "max_num_seqs": 8}]
     m = _manifest(tmp_path, serve_profiles=two, default_profile="p150x4")
@@ -373,7 +373,7 @@ def test_an_unavailable_scan_does_not_block_the_serve_early(tmp_path, monkeypatc
     under the lock decides."""
     ran = []
     _serving_ok(monkeypatch)
-    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: ran.append(argv))
     calls = {"n": 0}
 
     def sometimes(count, dev_root=None):
@@ -395,7 +395,7 @@ def test_a_stale_leftover_is_removed_inside_the_start_critical_section(tmp_path,
     _serving_ok(monkeypatch)
     monkeypatch.setattr(container, "container_exists", lambda n: not removed)
     monkeypatch.setattr(container, "remove", lambda n, force=False: removed.append(n))
-    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: ran.append(argv))
     container_cli.serve_container(_manifest(tmp_path), target="org/m")
     assert removed == ["tt-model-my-model-p150x4"]
     assert ran
@@ -406,7 +406,7 @@ def test_the_picked_devices_reach_the_docker_run(tmp_path, monkeypatch):
     device grant, not just be computed and dropped."""
     ran = []
     _serving_ok(monkeypatch)
-    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: ran.append(argv))
     monkeypatch.setattr(container, "pick_free_devices", lambda count, dev_root=None: [2, 3, 4, 5])
     container_cli.serve_container(_manifest(tmp_path), target="org/m")
     argv = ran[0]
@@ -422,7 +422,7 @@ def test_the_picked_devices_reach_the_docker_run(tmp_path, monkeypatch):
 def test_an_explicit_pin_reaches_the_docker_run(tmp_path, monkeypatch):
     ran = []
     _serving_ok(monkeypatch)
-    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: ran.append(argv))
     monkeypatch.setattr(container, "ensure_devices_free", lambda ids, **kw: None)
     container_cli.serve_container(_manifest(tmp_path), target="org/m", device_id="4,5,6,7")
     assert f"{container.DEVICES_LABEL}=4,5,6,7" in ran[0]
@@ -444,7 +444,7 @@ def test_a_concurrent_start_of_the_same_profile_is_refused_under_the_lock(tmp_pa
     monkeypatch.setattr(container, "container_exists", lambda n: True)
     monkeypatch.setattr(container, "remove", lambda n, force=False: removed.append(n))
     monkeypatch.setattr(container, "run_checked",
-                        lambda argv: pytest.fail("started over a running container"))
+                        lambda argv, **kw: pytest.fail("started over a running container"))
     with pytest.raises(container_cli.ContainerCliError, match="already running"):
         container_cli.serve_container(_manifest(tmp_path), target="org/m")
     assert removed == []  # never force-removes the winner
@@ -461,7 +461,7 @@ def test_a_failed_start_leaves_a_running_container_alone(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "is_running", lambda n: running["v"])
     monkeypatch.setattr(container, "remove", lambda n, force=False: removed.append(n))
 
-    def boom(argv):
+    def boom(argv, **kw):
         running["v"] = True  # another invocation's container appeared, and is live
         at_failure["n"] = len(removed)
         raise container.ContainerError("name already in use")
@@ -522,7 +522,7 @@ def test_an_unknown_profile_is_refused_with_the_available_ones(tmp_path, monkeyp
 
 def test_serve_reports_when_the_server_never_became_ready(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "running", lambda name=None: [])
-    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)
     monkeypatch.setattr(container, "wait_ready",
                         lambda *a, **k: container.ReadyResult(False, False, ["slow..."]))
     with pytest.raises(container_cli.ContainerCliError, match="did not report ready"):
@@ -533,7 +533,7 @@ def test_serve_says_the_container_EXITED_when_it_did(tmp_path, monkeypatch):
     """"did not report ready" is useless when the container crashed — the reason is in
     what it printed on the way out."""
     monkeypatch.setattr(container, "running", lambda name=None: [])
-    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
     monkeypatch.setattr(container, "wait_ready",
                         lambda *a, **k: container.ReadyResult(
@@ -550,7 +550,7 @@ def test_a_rejected_passthrough_flag_is_blamed_by_name(tmp_path, monkeypatch):
     vLLM (serve declares ignore_unknown_options), the container started, and vLLM died on
     argparse — while the message said only "did not report ready"."""
     monkeypatch.setattr(container, "running", lambda name=None: [])
-    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
     monkeypatch.setattr(container, "wait_ready",
                         lambda *a, **k: container.ReadyResult(
@@ -565,7 +565,7 @@ def test_a_rejected_passthrough_flag_is_blamed_by_name(tmp_path, monkeypatch):
 
 def test_a_still_running_container_is_not_reported_as_exited(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "running", lambda name=None: [])
-    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
     monkeypatch.setattr(container, "wait_ready",
                         lambda *a, **k: container.ReadyResult(False, False, ["still booting"]))
@@ -579,7 +579,7 @@ def test_a_boot_failure_carries_a_diagnosis_for_the_card(tmp_path, monkeypatch):
     """The CLI renders a diagnosis card, not a red dump; the classifier's dict rides on
     the exception so cli.py never re-derives it."""
     monkeypatch.setattr(container, "running", lambda name=None: [])
-    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
     monkeypatch.setattr(container, "wait_ready",
                         lambda *a, **k: container.ReadyResult(False, True, ["x"]))
@@ -590,7 +590,7 @@ def test_a_boot_failure_carries_a_diagnosis_for_the_card(tmp_path, monkeypatch):
 
 def test_detach_returns_without_watching_the_boot(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(container, "running", lambda name=None: [])
-    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
 
     def boom(*a, **k):
@@ -607,7 +607,7 @@ def test_serve_walks_the_boot_landmarks_and_ends_on_a_ready_card(tmp_path, monke
     """The log lines a real boot prints (see tests/fixtures/boot_logs) become named rows,
     and the ready line ends in the endpoint card -- never the raw log."""
     monkeypatch.setattr(container, "running", lambda name=None: [])
-    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
     lines = [
         "INFO 09-01 13:11:14 [__init__.py:237] Platform plugin tt is activated",
@@ -883,7 +883,7 @@ def test_serve_reloads_the_image_from_the_staged_layout_when_docker_lost_it(
     monkeypatch.setattr(container, "preflight", lambda **k: [])
     monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
     monkeypatch.setattr(container, "running", lambda name=None: [])
-    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: ran.append(argv))
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
     monkeypatch.setattr(oci, "load", lambda src, expect_tag=None: loaded.append(src))
 
@@ -919,7 +919,7 @@ def test_print_does_not_require_the_image_to_be_loaded(tmp_path, monkeypatch):
 def _argv_of(monkeypatch, **kw):
     ran = []
     monkeypatch.setattr(container, "running", lambda name=None: [])
-    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: ran.append(argv))
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
     return ran, kw
 
@@ -1080,7 +1080,7 @@ def test_a_stopped_leftover_is_cleared_so_the_retry_works(tmp_path, monkeypatch)
     monkeypatch.setattr(container, "is_running", lambda n: False)
     monkeypatch.setattr(container, "container_exists", lambda n: not removed)
     monkeypatch.setattr(container, "remove", lambda n, force=False: removed.append(n))
-    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: ran.append(argv))
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
     container_cli.serve_container(_manifest(tmp_path))
     assert removed and ran
@@ -1109,13 +1109,57 @@ def test_a_failed_start_removes_the_half_created_container(tmp_path, monkeypatch
     monkeypatch.setattr(container, "remove", lambda n, force=False: removed.append(n))
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
 
-    def boom(argv):
+    def boom(argv, **kw):
         raise container.ContainerError("failed to bind host port 0.0.0.0:7000/tcp")
 
     monkeypatch.setattr(container, "run_checked", boom)
     with pytest.raises(container.ContainerError, match="bind host port"):
         container_cli.serve_container(_manifest(tmp_path))
     assert removed, "a failed start must not leave the name held"
+
+
+def test_the_launch_is_bounded_so_a_wedged_daemon_cannot_pin_the_allocation_lock(
+        tmp_path, monkeypatch):
+    """`docker run` is the last thing done under the host-wide lock. Unbounded, one
+    unresponsive daemon would block every other serve on the box indefinitely."""
+    seen, after = [], []
+    monkeypatch.setattr(container, "is_running",
+                        lambda n: bool(seen) and after.append(("is_running", n)))
+    monkeypatch.setattr(container, "container_exists",
+                        lambda n: bool(seen) and after.append(("exists", n)))
+    monkeypatch.setattr(container, "remove",
+                        lambda n, force=False: after.append(("remove", n)))
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+
+    def wedged(argv, **kw):
+        seen.append(kw.get("timeout"))
+        raise container.DockerUnresponsive("docker run did not return")
+
+    monkeypatch.setattr(container, "run_checked", wedged)
+    with pytest.raises(container.ContainerError, match="did not return"):
+        container_cli.serve_container(_manifest(tmp_path))
+    assert seen == [container.RUN_TIMEOUT_S], "the launch must pass a bounded timeout"
+    # And no cleanup afterwards: those are more calls to the daemon that just stopped
+    # answering, which is how a bounded operation becomes unbounded again.
+    assert after == [], f"probed a wedged daemon while holding the lock: {after}"
+
+
+def test_a_wedged_docker_still_releases_the_allocation_lock(tmp_path, monkeypatch):
+    """The point of bounding the launch: the NEXT caller gets in rather than queueing
+    behind a hold that never ends."""
+    monkeypatch.setattr(container, "is_running", lambda n: False)
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "run_checked", _wedged_run)
+    with pytest.raises(container.ContainerError):
+        container_cli.serve_container(_manifest(tmp_path))
+    # Not held: a second acquire would block until the timeout if the first leaked it.
+    with container.alloc_lock(timeout_s=0.5):
+        pass
+
+
+def _wedged_run(argv, **kw):
+    raise container.DockerUnresponsive("docker run did not return")
 
 
 def test_logs_points_at_a_usable_target(tmp_path, monkeypatch):
@@ -1626,7 +1670,7 @@ def _image_gone(monkeypatch):
     monkeypatch.setattr(container, "running", lambda name=None: [])
     monkeypatch.setattr(container, "container_exists", lambda n: False)
     monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
-    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
     monkeypatch.setattr(container, "wait_ready",
                         lambda *a, **k: container.ReadyResult(True, False, [], 1.0))
@@ -1695,7 +1739,7 @@ def _serving_ok(monkeypatch):
     monkeypatch.setattr(container, "running", lambda name=None: [])
     monkeypatch.setattr(container, "container_exists", lambda n: False)
     monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "a" * 64)
-    monkeypatch.setattr(container, "run_checked", lambda argv: None)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
     monkeypatch.setattr(container, "wait_ready",
                         lambda *a, **k: container.ReadyResult(True, False, [], 1.0))
@@ -1876,7 +1920,7 @@ def test_serve_fetches_missing_weights_before_starting_the_container(tmp_path, m
     unexplained multi-minute boot behind the readiness probe."""
     order = []
     _serving_ok(monkeypatch)
-    monkeypatch.setattr(container, "run_checked", lambda argv: order.append("docker run"))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: order.append("docker run"))
     monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
     monkeypatch.setattr(container_cli, "_download_weights",
                         lambda ref, **kw: order.append("download") or Path("/hf/x"))
@@ -1892,7 +1936,7 @@ def test_serve_refuses_when_the_disk_cannot_hold_the_weights(tmp_path, monkeypat
     complete."""
     started = []
     _serving_ok(monkeypatch)
-    monkeypatch.setattr(container, "run_checked", lambda argv: started.append(argv))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: started.append(argv))
     monkeypatch.setattr(container_cli, "_revision_size", lambda ref: 360_000_000_000)
     monkeypatch.setattr(container_cli, "_bytes_on_disk", lambda ref: 63_000_000_000)
     monkeypatch.setattr(shutil, "disk_usage", lambda p: _Usage(24_000_000_000))
@@ -1947,7 +1991,7 @@ def test_a_failed_weights_fetch_still_serves(tmp_path, monkeypatch, capsys):
     help. But say what happened."""
     ran = []
     _serving_ok(monkeypatch)
-    monkeypatch.setattr(container, "run_checked", lambda argv: ran.append(argv))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: ran.append(argv))
     monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
 
     def boom(ref, **kw):
@@ -2086,7 +2130,7 @@ def test_serve_fails_when_the_disk_fills_up_mid_download(tmp_path, monkeypatch):
     and died in the engine — the exact failure this is all about."""
     started = []
     _serving_ok(monkeypatch)
-    monkeypatch.setattr(container, "run_checked", lambda argv: started.append(argv))
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: started.append(argv))
     monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
 
     def boom(ref, **kw):
