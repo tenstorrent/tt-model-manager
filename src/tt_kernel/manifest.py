@@ -104,6 +104,10 @@ class BundledPlatform(BaseModel):
     install_script: Optional[str] = None  # e.g. "install.sh"
     run_script: Optional[str] = None  # e.g. "run.sh"
     firmware_min: Optional[str] = None  # minimum card firmware/driver version, informational
+    vllm_overrides: Optional[str] = None  # bundle-relative override file (opencv/numpy pins)
+    # applied when installing vLLM's own deps — ttnn needs numpy<2, vLLM's requirements want
+    # opencv-python-headless>=4.13 (numpy>=2 only); see packaging._VLLM_OVERRIDES_TEMPLATE. Set
+    # whenever vllm_wheel is present — mirrors Deps.vllm.overrides on the v6 thin schema.
 
     @property
     def wheels(self) -> List[WheelArtifact]:
