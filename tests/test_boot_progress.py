@@ -117,10 +117,23 @@ class TestDiagnosis:
         assert any("lsof" in a for a in diag["actions"])
 
     def test_still_running_is_not_reported_as_a_crash(self):
-        diag = diagnose_boot(["still booting"], exited=False, target="org/x", timeout_s=1800)
-        assert "did not report ready within 30 min" in diag["cause"]
+        # No timeout_s: the card's default must be the SAME deadline the wait uses, or the
+        # card names a figure that never expired. 30 min was too short for a real boot
+        # (JIT + a large load + an in-container weight download), so it is hours now.
+        diag = diagnose_boot(["still booting"], exited=False, target="org/x")
+        assert "did not report ready within 4 h" in diag["cause"]
+        assert "30 min" not in diag["cause"]
         assert "still running" in diag["detail"]
+        assert "TT_MODEL_READY_TIMEOUT" in diag["detail"]
         assert any("tt-model stop org/x" in a for a in diag["actions"])
+
+    def test_the_deadline_reads_in_the_unit_it_was_set_in(self):
+        def cause(seconds):
+            return diagnose_boot(["x"], exited=False, target="org/x", timeout_s=seconds)["cause"]
+        assert cause(5400).endswith("within 1 h 30 min")
+        assert cause(900).endswith("within 15 min")
+        assert cause(45).endswith("within 45 s")
+        assert "240 min" not in cause(14400)
 
     def test_an_unknown_crash_quotes_the_last_error_line_not_the_traceback(self):
         tail = ["(EngineCore pid=60) Traceback (most recent call last):",

@@ -164,6 +164,40 @@ def test_wait_ready_honours_timeout_on_a_silent_container(monkeypatch):
     assert elapsed < 5, f"wait_ready hung past its timeout ({elapsed:.1f}s)"
 
 
+def test_ready_timeout_default_is_hours_not_minutes():
+    """The watch used to give up after 30 min -- shorter than JIT + a large multi-chip load,
+    and far shorter than a weight download inside the container on a slow link. The bound
+    only stops the WATCH (the container keeps booting), so generous is cheap."""
+    import inspect
+    assert container.READY_TIMEOUT_S == 4 * 3600
+    default = inspect.signature(container.wait_ready).parameters["timeout_s"].default
+    assert default == container.READY_TIMEOUT_S, "wait_ready's default drifted from the constant"
+
+
+class TestReadyTimeoutEnv:
+    def test_unset_or_blank_means_the_default(self, monkeypatch):
+        monkeypatch.delenv("TT_MODEL_READY_TIMEOUT", raising=False)
+        monkeypatch.delenv("TT_KERNEL_READY_TIMEOUT", raising=False)
+        assert container.ready_timeout_s() == container.READY_TIMEOUT_S
+        monkeypatch.setenv("TT_MODEL_READY_TIMEOUT", "  ")
+        assert container.ready_timeout_s() == container.READY_TIMEOUT_S
+
+    def test_seconds_from_the_env(self, monkeypatch):
+        monkeypatch.setenv("TT_MODEL_READY_TIMEOUT", " 90 ")
+        assert container.ready_timeout_s() == 90
+
+    def test_legacy_tt_kernel_spelling_still_works(self, monkeypatch):
+        monkeypatch.delenv("TT_MODEL_READY_TIMEOUT", raising=False)
+        monkeypatch.setenv("TT_KERNEL_READY_TIMEOUT", "120")
+        assert container.ready_timeout_s() == 120
+
+    @pytest.mark.parametrize("bad", ["abc", "1.5", "0", "-30"])
+    def test_garbage_is_refused_by_name(self, monkeypatch, bad):
+        monkeypatch.setenv("TT_MODEL_READY_TIMEOUT", bad)
+        with pytest.raises(ContainerError, match="TT_MODEL_READY_TIMEOUT"):
+            container.ready_timeout_s()
+
+
 # ---- 5. wait_ready survives what docker logs actually emits -----------------------------
 
 class _FragmentStdout:
