@@ -20,13 +20,26 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tt_kernel import build
+from tt_kernel import build, oci
 from tt_kernel.build import BuildError, InterruptGuard
 
 from test_container_manifest import BASE
 
 
 # ------------------------------------------------------------------ fixtures
+
+
+@pytest.fixture(autouse=True)
+def _no_real_skopeo(monkeypatch):
+    """Force ``oci.save``'s docker-save fallback, which ``_fake_docker`` mocks.
+
+    When ``skopeo`` is on PATH (it is on a GitHub runner, but not on many dev boxes),
+    ``oci.save`` shells out to ``skopeo copy docker-daemon:<image> …`` against the real
+    daemon — which has no such image in these tests, so the copy fails. Pretending skopeo is
+    absent routes every test through the deterministic ``docker save`` path the fake driver
+    already handles, so the build tests pass whether or not the host has skopeo installed.
+    """
+    monkeypatch.setattr(oci, "_skopeo", lambda: None)
 
 
 def _fake_metal(root: Path, *, commit: bool = True) -> Path:
