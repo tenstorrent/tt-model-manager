@@ -406,6 +406,17 @@ def _vendor_dependencies(bundle_dir: Path, manifest: Manifest) -> None:
                 [str(pip), "download", "--no-deps", str(vllm_path), "-d", str(wheels)],
                 check=True,
             )
+        # A vendored dependency wheel ships its own test suite verbatim — no relation to this
+        # bundle, and a standing false-positive generator for a secret scanner's regex (fsspec's
+        # own pytest function names tripped one on a real published bundle). Strip test(s)/ dirs
+        # from every downloaded wheel, skipping the platform wheels we shipped ourselves (they're
+        # the author's own build, not a `pip download`, and this bundle's actual behavior).
+        skip = {(bundle_dir / w.path).resolve() for w in (manifest.bundled.wheels if manifest.bundled else [])}
+        for whl in sorted(wheels.glob("*.whl")):
+            if whl.resolve() in skip:
+                continue
+            if packaging.strip_wheel_test_dirs(whl):
+                typer.echo(f"  stripped test dir(s) from {whl.name}")
     except subprocess.CalledProcessError as exc:
         raise _err(f"dependency vendoring failed (exit {exc.returncode}). "
                    "Re-run with --no-vendor-deps to install deps from the index instead.")

@@ -6,9 +6,12 @@ no network: fake wheel files + a fake metal tree are staged and the running-fold
 manifest are asserted.
 """
 
+import base64
+import hashlib
 import json
 import os
 import subprocess
+import zipfile
 
 from typer.testing import CliRunner
 
@@ -30,6 +33,86 @@ def _fake_wheel(dirpath, filename, content=b"PK\x03\x04 fake wheel"):
     p = dirpath / filename
     p.write_bytes(content)
     return p
+
+
+def _build_real_wheel(path, files: dict) -> None:
+    """A real, installable-shaped wheel: real entries + a real RECORD, for tests that need
+    to actually open it as a zip (unlike ``_fake_wheel``'s opaque junk bytes)."""
+    record_name = "pkg-1.0.0.dist-info/RECORD"
+    lines = []
+    with zipfile.ZipFile(path, "w") as z:
+        for name, data in sorted(files.items()):
+            z.writestr(name, data)
+            digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+            lines.append(f"{name},sha256={digest},{len(data)}")
+        lines.append(f"{record_name},,")
+        z.writestr(record_name, "\n".join(lines) + "\n")
+
+
+def test_strip_wheel_test_dirs_removes_tests_and_fixes_record(tmp_path):
+    """A downloaded dependency wheel ships its OWN test suite verbatim -- fsspec's
+    fsspec/tests/abstract/{copy,get,put}.py happened to contain pytest function names
+    (test_copy_list_of_files_to_new_directory, etc.) matching a secret scanner's API-key
+    regex in a real published bundle (episod/tt-tnt-1024). Strip test(s)/ dirs and
+    regenerate RECORD so the wheel stays internally consistent.
+    """
+    whl = tmp_path / "pkg-1.0.0-py3-none-any.whl"
+    _build_real_wheel(whl, {
+        "pkg/__init__.py": b"x = 1\n",
+        "pkg/core.py": b"def real_code(): pass\n",
+        "pkg/tests/__init__.py": b"",
+        "pkg/tests/test_core.py": b"def test_copy_list_of_files_to_new_directory(): pass\n",
+        "pkg-1.0.0.dist-info/METADATA": b"Metadata-Version: 2.1\nName: pkg\n",
+    })
+
+    changed = packaging.strip_wheel_test_dirs(whl)
+    assert changed is True
+
+    with zipfile.ZipFile(whl) as z:
+        names = set(z.namelist())
+        assert "pkg/tests/__init__.py" not in names
+        assert "pkg/tests/test_core.py" not in names
+        assert "pkg/core.py" in names and "pkg/__init__.py" in names
+        # RECORD must name exactly what's left, with hashes that actually verify.
+        record = z.read("pkg-1.0.0.dist-info/RECORD").decode()
+        record_names = {line.split(",")[0] for line in record.splitlines() if line}
+        assert record_names == names
+        for line in record.splitlines():
+            name, digest_field, size_field = line.split(",")
+            if not digest_field:
+                continue  # RECORD's own self-entry has no hash
+            data = z.read(name)
+            algo, _, b64 = digest_field.partition("=")
+            assert algo == "sha256"
+            expect = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+            assert b64 == expect, name
+            assert int(size_field) == len(data)
+
+
+def test_strip_wheel_test_dirs_leaves_a_clean_wheel_untouched(tmp_path):
+    whl = tmp_path / "pkg-1.0.0-py3-none-any.whl"
+    _build_real_wheel(whl, {
+        "pkg/__init__.py": b"x = 1\n",
+        "pkg-1.0.0.dist-info/METADATA": b"Metadata-Version: 2.1\nName: pkg\n",
+    })
+    before = whl.read_bytes()
+    changed = packaging.strip_wheel_test_dirs(whl)
+    assert changed is False
+    assert whl.read_bytes() == before
+
+
+def test_strip_wheel_test_dirs_does_not_match_a_package_named_requests(tmp_path):
+    """The regex must bind to a path SEGMENT ("test(s)/"), not any substring match --
+    "requests/__init__.py" must survive untouched."""
+    whl = tmp_path / "pkg-1.0.0-py3-none-any.whl"
+    _build_real_wheel(whl, {
+        "requests/__init__.py": b"x = 1\n",
+        "pkg-1.0.0.dist-info/METADATA": b"Metadata-Version: 2.1\nName: pkg\n",
+    })
+    changed = packaging.strip_wheel_test_dirs(whl)
+    assert changed is False
+    with zipfile.ZipFile(whl) as z:
+        assert "requests/__init__.py" in z.namelist()
 
 
 def _run_sh_manifest(**over):
@@ -416,6 +499,47 @@ def test_vendor_dependencies_no_vllm_wheel_stays_one_call(tmp_path, monkeypatch)
     cli._vendor_dependencies(bundle, m)
     download_calls = [c for c in calls if len(c) > 1 and c[1] == "download"]
     assert len(download_calls) == 1
+
+
+def test_vendor_dependencies_strips_test_dirs_from_downloaded_wheels_not_our_own(tmp_path, monkeypatch):
+    """The mocked `pip download` calls don't actually populate wheels/ (no real network) --
+    place a real dependency wheel there ourselves, standing in for what a real download would
+    have left, and confirm _vendor_dependencies strips its tests/ dir afterward. The platform
+    wheel we shipped ourselves (junk bytes, not a real zip) must be left alone -- it's the
+    author's own build, not a `pip download`, and stripping it would crash on a bad zip."""
+    from tt_kernel import cli
+
+    bundle = tmp_path / "bundle"
+    wheels = bundle / "wheels"
+    wheels.mkdir(parents=True)
+    (bundle / "requirements.txt").write_text("# nothing extra\n")
+
+    ttnn = wheels / "ttnn-0.77.0-cp312-cp312-manylinux_2_34_x86_64.whl"
+    ttnn.write_bytes(b"not a real zip")  # our own platform wheel -- must be skipped, not opened
+
+    dep = wheels / "fsspec-2026.7.0-py3-none-any.whl"
+    _build_real_wheel(dep, {
+        "fsspec/__init__.py": b"x = 1\n",
+        "fsspec/tests/test_core.py": b"def test_copy_list_of_files_to_new_directory(): pass\n",
+        "fsspec-2026.7.0.dist-info/METADATA": b"Metadata-Version: 2.1\nName: fsspec\n",
+    })
+
+    m = _run_sh_manifest(bundled={
+        "ttnn_wheel": {"path": "wheels/ttnn-0.77.0-cp312-cp312-manylinux_2_34_x86_64.whl", "sha256": "a"},
+        "requirements": "requirements.txt",
+    })
+    monkeypatch.setattr(
+        cli.subprocess, "run",
+        lambda cmd, **kw: type("R", (), {"returncode": 0})()
+    )
+
+    cli._vendor_dependencies(bundle, m)
+
+    assert ttnn.read_bytes() == b"not a real zip"  # untouched
+    with zipfile.ZipFile(dep) as z:
+        names = z.namelist()
+        assert not any("tests/" in n for n in names)
+        assert "fsspec/__init__.py" in names
 
 
 def test_stage_package_dangling_symlink_and_cache_excludes(tmp_path):

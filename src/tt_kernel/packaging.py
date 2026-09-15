@@ -18,6 +18,7 @@ so it is unit-testable offline.
 
 from __future__ import annotations
 
+import base64
 import datetime
 import hashlib
 import json
@@ -25,6 +26,7 @@ import re
 import shlex
 import shutil
 import socket
+import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -309,6 +311,51 @@ def sha256_file(path: Path, _chunk: int = 1 << 20) -> str:
         for block in iter(lambda: fh.read(_chunk), b""):
             h.update(block)
     return h.hexdigest()
+
+
+# Matches a "test"/"tests" path SEGMENT (bounded by "/" or the start of the path), not any
+# name that merely contains those letters — "requests/__init__.py" must not match.
+_WHEEL_TEST_DIR_RE = re.compile(r"(?:^|/)tests?/")
+
+
+def strip_wheel_test_dirs(wheel_path: Path) -> bool:
+    """Rewrite ``wheel_path`` with its own ``test(s)/`` directory removed, RECORD regenerated
+    to match. Returns True if the wheel was rewritten, False if it had nothing to strip (left
+    byte-for-byte untouched).
+
+    ``pip download`` fetches a dependency wheel verbatim — its own test suite included. That
+    suite has zero relation to what a bundle ships, but it still gets published: HF's secret
+    scanner flagged 3 "Lob (active)" hits in a real published bundle
+    (episod/tt-tnt-1024/wheels/fsspec-2026.7.0-py3-none-any.whl) — three pytest function
+    names in fsspec's OWN ``fsspec/tests/abstract/{copy,get,put}.py`` that happen to be
+    exactly "test_" + 35 chars, which is Lob's API-key shape. No real secret; nothing to
+    rotate — but a big dependency's test suite is a standing false-positive generator for
+    whatever a future scanner's regex happens to be, and it costs bundle size for nothing.
+    """
+    with zipfile.ZipFile(wheel_path, "r") as zin:
+        infos = {i.filename: i for i in zin.infolist()}
+        record_name = next((n for n in infos if n.endswith(".dist-info/RECORD")), None)
+        strip = {n for n in infos if _WHEEL_TEST_DIR_RE.search(n) and n != record_name}
+        if not strip:
+            return False
+        contents = {n: zin.read(n) for n in infos if n not in strip and n != record_name}
+
+    record_lines = [
+        f"{n},sha256={base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()},{len(data)}"
+        for n, data in sorted(contents.items())
+    ]
+    if record_name:
+        record_lines.append(f"{record_name},,")
+    new_record = ("\n".join(record_lines) + "\n").encode()
+
+    tmp_path = wheel_path.with_name(wheel_path.name + ".stripped")
+    with zipfile.ZipFile(tmp_path, "w") as zout:
+        for n, data in sorted(contents.items()):
+            zout.writestr(infos[n], data)
+        if record_name:
+            zout.writestr(infos[record_name], new_record)
+    tmp_path.replace(wheel_path)
+    return True
 
 
 def parse_wheel_tags(filename: str) -> Dict[str, Optional[str]]:
@@ -1084,6 +1131,7 @@ __all__ = [
     "sha256_file",
     "parse_wheel_tags",
     "make_wheel_artifact",
+    "strip_wheel_test_dirs",
     "host_python_tag",
     "host_incompatible_wheels",
     "render_install_sh",
