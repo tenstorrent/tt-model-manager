@@ -47,6 +47,26 @@ def data_dir(base: Path) -> Path:
     return current
 
 
+def cache_dir() -> Path:
+    """The per-user cache root, honoring the ``tt-kernel`` -> ``tt-model`` rename shim.
+
+    Use this instead of hardcoding ``~/.cache/tt-model``. On a pre-rename box (only
+    ``~/.cache/tt-kernel`` exists), hardcoding the new name and writing under it CREATES
+    ``~/.cache/tt-model`` — which flips ``data_dir`` to the new dir for every OTHER consumer
+    too (``localdb``, ``runtime``), orphaning the legacy ``installed.json`` and making the
+    already-installed bundles vanish from ``list``/``rm``. Routing through here keeps all
+    state agreeing on one dir. See issue #62.
+
+    KNOWN GAP: this resolves ``~/.cache`` directly, while ``localdb._index_path`` honors
+    ``$XDG_CACHE_HOME``. With that variable set the two land on different roots, so the
+    agreement above holds only when it is unset. That is a consistency wart, not the #62
+    data loss -- neither root's creation flips the other's ``data_dir`` -- and it predates
+    this shim. Unifying the base belongs here, but moving ``localdb`` onto it RELOCATES an
+    existing index for anyone with the variable set, so it needs the same migration thought
+    as issue #62 option 2 rather than a silent change."""
+    return data_dir(Path.home() / ".cache")
+
+
 def invoked_as_legacy() -> bool:
     """True when the process was started via the old ``tt-kernel`` command name."""
     import sys

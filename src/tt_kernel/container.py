@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+from . import compat
 from .manifest import DEFAULT_PORT, Manifest, ServeProfile
 
 #: Docker label applied to every container and used to find ours again.
@@ -612,7 +613,7 @@ def _safe_name(name: str) -> str:
 
 def model_cache_dir(m: Manifest) -> Path:
     """Host-side JIT kernel cache, per model. Survives container removal on purpose."""
-    return Path.home() / ".cache" / "tt-model" / _safe_name(m.name) / "cache"
+    return compat.cache_dir() / _safe_name(m.name) / "cache"
 
 
 def model_weight_cache_dir(m: Manifest) -> Path:
@@ -633,7 +634,7 @@ def model_weight_cache_dir(m: Manifest) -> Path:
     subdirectories by checkpoint, parallel config and mesh shape, so nothing collides
     inside one tree.
     """
-    return Path.home() / ".cache" / "tt-model" / _safe_name(m.name) / "weights"
+    return compat.cache_dir() / _safe_name(m.name) / "weights"
 
 
 def model_tensor_cache_dir(m: Manifest) -> Path:
@@ -648,7 +649,7 @@ def model_tensor_cache_dir(m: Manifest) -> Path:
     Keyed per model to match ``model_cache_dir`` — same ``_safe_name`` guard, same parent — so
     ``remove_container``'s single rmtree of that parent drops this too, with no extra bookkeeping.
     """
-    return Path.home() / ".cache" / "tt-model" / _safe_name(m.name) / "tensors"
+    return compat.cache_dir() / _safe_name(m.name) / "tensors"
 
 
 def compose_run(
