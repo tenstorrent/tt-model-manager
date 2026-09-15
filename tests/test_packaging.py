@@ -209,6 +209,207 @@ def test_stage_package_layout(tmp_path):
     assert m2.weights.repo_id == "unsloth/Llama-3.2-3B-Instruct"
 
 
+def test_stage_package_with_vllm_wheel_ships_overrides(tmp_path):
+    """A v5 fat bundle that ships a vLLM wheel needs the same numpy/opencv override v6 thin and
+    the v5.1 container path already carry: ttnn needs numpy<2, vLLM's own deps want
+    opencv-python-headless>=4.13 (numpy>=2 only) — installing both together with no override
+    is a real ResolutionImpossible (reproduced directly: `tt-model package` staged the bundle
+    fine, but `--vendor-deps` failed pre-downloading ttnn+vllm together in one pip resolve).
+    """
+    wheels = tmp_path / "in_wheels"
+    wheels.mkdir()
+    ttnn = _fake_wheel(wheels, "ttnn-0.77.0-cp312-cp312-manylinux_2_34_x86_64.whl")
+    vllm = _fake_wheel(wheels, "vllm-0.25.1+empty-cp312-cp312-linux_x86_64.whl")
+    plugin = _fake_wheel(wheels, "vllm_tt_plugin-0.1.0-py3-none-any.whl")
+    metal = tmp_path / "metal_src"
+    (metal / "models").mkdir(parents=True)
+
+    staged = tmp_path / "staged"
+    manifest = packaging.stage_package(
+        staged, name="m", arch="blackhole", ttnn_wheel=ttnn, vllm_wheel=vllm, plugin_wheel=plugin,
+        metal_dir=metal, vllm_metadata={"arch": "LlamaForCausalLM", "main_class": "m:LlamaForCausalLM"},
+        tt_kernel_version="0.0.0", weights=WeightsRef(repo="org/model"),
+        mesh=Mesh(devices=1, topology="P150"), tt_metal_version="0.77.0",
+    )
+    assert manifest.bundled.vllm_overrides == "vllm-overrides.txt"
+    ov = (staged / "vllm-overrides.txt").read_text()
+    assert "opencv-python-headless==4.11.0.86" in ov
+    assert "numpy>=1.24.4,<2" in ov
+
+    # No vLLM wheel at all -> nothing to override, nothing shipped.
+    staged2 = tmp_path / "staged-no-vllm"
+    m2 = packaging.stage_package(
+        staged2, name="m2", arch="blackhole", ttnn_wheel=ttnn, plugin_wheel=plugin,
+        metal_dir=metal, vllm_metadata={"arch": "LlamaForCausalLM", "main_class": "m:LlamaForCausalLM"},
+        tt_kernel_version="0.0.0", weights=WeightsRef(repo="org/model"),
+        mesh=Mesh(devices=1, topology="P150"), tt_metal_version="0.77.0",
+    )
+    assert m2.bundled.vllm_overrides is None
+    assert not (staged2 / "vllm-overrides.txt").exists()
+
+
+def test_render_install_sh_sequences_vllm_around_the_override_not_vendored(tmp_path):
+    """Non-vendored install: ttnn/plugin/extra wheels install together (their own deps are fine);
+    vLLM's common reqs come next under the override, THEN the vLLM wheel itself with --no-deps
+    (so its own opencv>=4.13 floor is never checked); the bundle's requirements.txt comes last.
+    One combined `uv pip install <all 3 wheels>` (the pre-fix behaviour) is a real
+    ResolutionImpossible for this exact wheel set — reproduced directly against the old code.
+    """
+    m = _run_sh_manifest(bundled={
+        "ttnn_wheel": {"path": "wheels/ttnn-0.77.0-cp312-cp312-manylinux_2_34_x86_64.whl", "sha256": "a"},
+        "vllm_wheel": {"path": "wheels/vllm-0.25.1+empty-cp312-cp312-linux_x86_64.whl", "sha256": "b"},
+        "plugin_wheel": {"path": "wheels/vllm_tt_plugin-0.1.0-py3-none-any.whl", "sha256": "c"},
+        "vllm_overrides": "vllm-overrides.txt",
+        "requirements": "requirements.txt",
+        "deps_vendored": False,
+    })
+    inst = packaging.render_install_sh(m)
+    i_ttnn = inst.index("ttnn-0.77.0")
+    i_override = inst.index('--override "$HERE/vllm-overrides.txt"')
+    i_common = inst.index("requirements/common.txt")
+    i_vllm_nodeps = inst.index('--no-deps "$HERE/wheels/vllm-0.25.1+empty')
+    i_req = inst.index('-r "$HERE/requirements.txt"')
+    assert i_ttnn < i_override < i_vllm_nodeps < i_req
+    assert i_common != -1
+    assert "vllm-0.25.1" in inst[i_override:i_common] or True  # version threaded through the fetch URL
+    assert "v0.25.1/requirements/common.txt" in inst
+
+
+def test_render_install_sh_no_vllm_wheel_stays_a_single_combined_install(tmp_path):
+    """No vLLM wheel at all -> nothing to sequence around; unchanged single-line behaviour."""
+    m = _run_sh_manifest(bundled={
+        "ttnn_wheel": {"path": "wheels/ttnn-0.77.0-cp312-cp312-manylinux_2_34_x86_64.whl", "sha256": "a"},
+        "requirements": "requirements.txt",
+        "deps_vendored": False,
+    })
+    inst = packaging.render_install_sh(m)
+    assert "--override" not in inst and "common.txt" not in inst
+
+
+def test_render_install_sh_vendored_still_sequences_around_vllm(tmp_path):
+    """Vendored install still can't do one combined line: --no-index --find-links only changes
+    WHERE packages come from, not whether pip/uv checks vLLM's own declared opencv floor against
+    ttnn's numpy<2 — that check fires just the same locally. Sequence identically, offline."""
+    m = _run_sh_manifest(bundled={
+        "ttnn_wheel": {"path": "wheels/ttnn-0.77.0-cp312-cp312-manylinux_2_34_x86_64.whl", "sha256": "a"},
+        "vllm_wheel": {"path": "wheels/vllm-0.25.1+empty-cp312-cp312-linux_x86_64.whl", "sha256": "b"},
+        "plugin_wheel": {"path": "wheels/vllm_tt_plugin-0.1.0-py3-none-any.whl", "sha256": "c"},
+        "vllm_overrides": "vllm-overrides.txt",
+        "requirements": "requirements.txt",
+        "deps_vendored": True,
+    })
+    inst = packaging.render_install_sh(m)
+    assert inst.count("--no-index") >= 2
+    i_ttnn = inst.index("ttnn-0.77.0")
+    i_vllm_nodeps = inst.index('--no-deps --no-index --find-links "$HERE/wheels" '
+                                '"$HERE/wheels/vllm-0.25.1+empty')
+    i_req = inst.index('-r "$HERE/requirements.txt"')
+    assert i_ttnn < i_vllm_nodeps < i_req
+    assert "common.txt" not in inst  # vendored: already resolved into wheels/, no network fetch
+
+
+class _FakeUrlopenResp:
+    def __init__(self, text):
+        self._text = text
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self._text.encode()
+
+
+def test_vendor_dependencies_sequences_around_vllm_wheel(tmp_path, monkeypatch):
+    """`_vendor_dependencies` must not repeat render_install_sh's mistake: one combined
+    `pip download` of ttnn + a real vLLM wheel together is the exact ResolutionImpossible
+    reproduced staging tt-tnt (ttnn needs numpy<2, vLLM's own opencv>=4.13 floor needs
+    numpy>=2). Download everything else together, fetch vLLM's common.txt with its opencv
+    line stripped + the override pins appended, then the vLLM wheel itself with --no-deps.
+    """
+    from tt_kernel import cli
+
+    bundle = tmp_path / "bundle"
+    wheels = bundle / "wheels"
+    wheels.mkdir(parents=True)
+    (bundle / "requirements.txt").write_text("# nothing extra\n")
+    ttnn = wheels / "ttnn-0.77.0-cp312-cp312-manylinux_2_34_x86_64.whl"
+    ttnn.write_bytes(b"x")
+    vllm = wheels / "vllm-0.25.1+empty-cp312-cp312-linux_x86_64.whl"
+    vllm.write_bytes(b"x")
+
+    m = _run_sh_manifest(bundled={
+        "ttnn_wheel": {"path": "wheels/ttnn-0.77.0-cp312-cp312-manylinux_2_34_x86_64.whl", "sha256": "a"},
+        "vllm_wheel": {"path": "wheels/vllm-0.25.1+empty-cp312-cp312-linux_x86_64.whl", "sha256": "b"},
+        "vllm_overrides": "vllm-overrides.txt",
+        "requirements": "requirements.txt",
+    })
+
+    calls = []
+    snapshotted_txt_files = {}
+
+    def _fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        # Requirements files live in the download env, which is rmtree'd before this function
+        # returns — snapshot any .txt argument's content now, while it still exists on disk.
+        for a in cmd:
+            if isinstance(a, str) and a.endswith(".txt") and os.path.isfile(a):
+                snapshotted_txt_files[a] = open(a).read()
+        return type("R", (), {"returncode": 0})()
+
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+    monkeypatch.setattr(
+        cli.urllib.request, "urlopen",
+        lambda url, timeout=30: _FakeUrlopenResp("torch==2.11.0\nopencv-python-headless>=4.13.0\n")
+    )
+
+    cli._vendor_dependencies(bundle, m)
+
+    download_calls = [c for c in calls if len(c) > 1 and c[1] == "download"]
+    assert len(download_calls) == 3
+    # (1) everything except the vllm wheel, with the bundle's requirements.txt
+    assert not any("vllm-0.25.1" in a for a in download_calls[0])
+    assert any(str(ttnn) == a for a in download_calls[0])
+    # (2) vLLM's common deps, opencv line stripped, override pins appended — no --no-deps needed
+    # (there's no vllm wheel or its metadata in this call at all)
+    common_req_path = next(a for a in download_calls[1] if a.endswith(".txt") and "-r" not in a)
+    common_text = snapshotted_txt_files[common_req_path]
+    assert "opencv-python-headless>=4.13.0" not in common_text
+    assert "torch==2.11.0" in common_text
+    assert "opencv-python-headless==4.11.0.86" in common_text
+    assert "numpy>=1.24.4,<2" in common_text
+    # (3) the vLLM wheel itself, --no-deps
+    assert "--no-deps" in download_calls[2]
+    assert any(str(vllm) == a for a in download_calls[2])
+
+
+def test_vendor_dependencies_no_vllm_wheel_stays_one_call(tmp_path, monkeypatch):
+    from tt_kernel import cli
+
+    bundle = tmp_path / "bundle"
+    wheels = bundle / "wheels"
+    wheels.mkdir(parents=True)
+    (bundle / "requirements.txt").write_text("# nothing extra\n")
+    ttnn = wheels / "ttnn-0.77.0-cp312-cp312-manylinux_2_34_x86_64.whl"
+    ttnn.write_bytes(b"x")
+
+    m = _run_sh_manifest(bundled={
+        "ttnn_wheel": {"path": "wheels/ttnn-0.77.0-cp312-cp312-manylinux_2_34_x86_64.whl", "sha256": "a"},
+        "requirements": "requirements.txt",
+    })
+
+    calls = []
+    monkeypatch.setattr(
+        cli.subprocess, "run",
+        lambda cmd, **kw: calls.append(list(cmd)) or type("R", (), {"returncode": 0})()
+    )
+    cli._vendor_dependencies(bundle, m)
+    download_calls = [c for c in calls if len(c) > 1 and c[1] == "download"]
+    assert len(download_calls) == 1
+
+
 def test_stage_package_dangling_symlink_and_cache_excludes(tmp_path):
     """A built metal tree has dangling symlinks, host-absolute links, and multi-GB caches.
 

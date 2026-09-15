@@ -415,21 +415,58 @@ def render_install_sh(manifest: Manifest) -> str:
     else:
         b = manifest.bundled
         pyver = (b.python if b and b.python else "3.12")
-        plat_wheels = " ".join(f'"$HERE/{w.path}"' for w in (b.wheels if b else []))
         vendored = bool(b and b.deps_vendored)
-        if vendored:
-            install = (
-                f'uv pip install --python "$VENV/bin/python" --link-mode=copy --no-index '
-                f'--find-links "$HERE/{WHEELS_DIR}" {plat_wheels} -r "$HERE/{REQUIREMENTS}"'
-            )
-            deps_note = "offline, from the vendored wheels (reproducible, no network)"
+        pip5 = 'uv pip install --python "$VENV/bin/python" --link-mode=copy'
+        no_index = f'--no-index --find-links "$HERE/{WHEELS_DIR}" ' if vendored else ""
+
+        if b and b.vllm_wheel is not None:
+            # Same conflict v6 thin's Deps.vllm.overrides already solves: ttnn needs numpy<2,
+            # vLLM's own deps want opencv-python-headless>=4.13 (numpy>=2 only) — one combined
+            # install of ttnn + this vLLM wheel together is a real ResolutionImpossible.
+            # --no-index/--find-links only changes WHERE packages come from, not whether the
+            # resolver checks vLLM's declared opencv floor against ttnn's numpy<2, so both the
+            # vendored and network paths need the same sequencing: (1) ttnn/plugin/extra wheels
+            # together (their own deps are fine), (2) vLLM's OWN deps — vendored: already
+            # resolved into wheels/ by _vendor_dependencies, just installed from there; network:
+            # fetched from the pinned upstream tag's requirements/common.txt under the override
+            # so the opencv/numpy pin isn't clobbered — (3) the vLLM wheel itself with --no-deps
+            # so its declared floor is never checked, (4) the bundle's own requirements.txt.
+            other = [w for w in (b.ttnn_wheel, *b.extra_wheels, b.plugin_wheel) if w is not None]
+            other_wheels = " ".join(f'"$HERE/{w.path}"' for w in other)
+            steps = [f'{pip5} {no_index}{other_wheels}']
+            if not vendored:
+                # Vendored: vLLM's own deps were already resolved into wheels/ by the (also
+                # fixed) _vendor_dependencies — nothing to fetch, the requirements.txt install
+                # below picks them up from --find-links.
+                override = f'--override "$HERE/{b.vllm_overrides}" ' if b.vllm_overrides else ""
+                steps.append(
+                    'VLLM_COMMON="$(mktemp)"\n'
+                    f'curl -fsSL "https://raw.githubusercontent.com/vllm-project/vllm/'
+                    f'v{VLLM_VERSION}/requirements/common.txt" -o "$VLLM_COMMON"\n'
+                    f'{pip5} {override}-r "$VLLM_COMMON"\n'
+                    'rm -f "$VLLM_COMMON"'
+                )
+            steps.append(f'{pip5} --no-deps {no_index}"$HERE/{b.vllm_wheel.path}"')
+            if vendored:
+                steps.append(f'{pip5} {no_index}-r "$HERE/{REQUIREMENTS}"')
+            else:
+                steps.append(
+                    f'{pip5} --extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{REQUIREMENTS}"'
+                )
+            install = "\n".join(steps)
         else:
-            install = (
-                f'uv pip install --python "$VENV/bin/python" --link-mode=copy {plat_wheels} && \\\n'
-                f'  uv pip install --python "$VENV/bin/python" --link-mode=copy '
-                f'--extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{REQUIREMENTS}"'
-            )
-            deps_note = "from the CPU index (deps not vendored — pass --vendor-deps for offline)"
+            plat_wheels = " ".join(f'"$HERE/{w.path}"' for w in (b.wheels if b else []))
+            if vendored:
+                install = f'{pip5} {no_index}{plat_wheels} -r "$HERE/{REQUIREMENTS}"'
+            else:
+                install = (
+                    f'{pip5} {plat_wheels} && \\\n'
+                    f'  {pip5} --extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{REQUIREMENTS}"'
+                )
+        deps_note = (
+            "offline, from the vendored wheels (reproducible, no network)" if vendored else
+            "from the CPU index (deps not vendored — pass --vendor-deps for offline)"
+        )
     return f"""#!/usr/bin/env bash
 # Install this self-contained TT model package into an isolated, reproducible venv (via uv).
 # Usage: ./{INSTALL_SCRIPT} [venv-path]   (default: ./venv)
@@ -646,6 +683,15 @@ def stage_package(
     plugin_art = _copy_wheel(plugin_wheel) if plugin_wheel else None
     extra_arts = [_copy_wheel(w) for w in (extra_wheels or [])]
 
+    # A v5 fat bundle shipping a vLLM wheel hits the exact numpy/opencv conflict v6 thin's
+    # Deps.vllm.overrides already solves: ttnn needs numpy<2, vLLM's own deps want
+    # opencv-python-headless>=4.13 (numpy>=2 only). Ship the same override file so
+    # render_install_sh can sequence around it instead of one combined, unsatisfiable install.
+    vllm_overrides_rel: Optional[str] = None
+    if vllm_art is not None:
+        (staged / VLLM_OVERRIDES).write_text(_VLLM_OVERRIDES_TEMPLATE)
+        vllm_overrides_rel = VLLM_OVERRIDES
+
     # Embed the author's modified metal-community tree (skip caches/venvs/artifacts).
     # symlinks=True: copy links as links instead of following them. A built tt-metal
     # checkout normally has dangling symlinks; following them (the default) makes
@@ -704,6 +750,7 @@ def stage_package(
         install_script=INSTALL_SCRIPT,
         run_script=RUN_SCRIPT,
         firmware_min=firmware_min,
+        vllm_overrides=vllm_overrides_rel,
     )
     entrypoint = Entrypoint(
         **{"class": vllm_metadata["main_class"], "arch_name": vllm_metadata["arch"]}

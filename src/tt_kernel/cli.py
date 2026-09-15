@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from pathlib import Path
 from typing import List, Optional
 
@@ -343,16 +344,60 @@ def _vendor_dependencies(bundle_dir: Path, manifest: Manifest) -> None:
         venv_cmd.append(str(dl_env))
         subprocess.run(venv_cmd, check=True)
         pip = dl_env / "bin" / "pip"
-        # Resolve the deps TOGETHER with the shipped platform wheels (ttnn/vLLM/plugin) so the
-        # vendored closure is consistent with what actually gets installed — this pulls vLLM's own
-        # runtime deps AND resolves version conflicts (e.g. vLLM's pydantic floor) up front, instead
-        # of exploding at the consumer's offline install.
-        platform_wheels = sorted(str(w) for w in wheels.glob("*.whl"))
-        subprocess.run(
-            [str(pip), "download", *platform_wheels, "-r", str(req), "-d", str(wheels),
-             "--only-binary=:all:", "--extra-index-url", "https://download.pytorch.org/whl/cpu"],
-            check=True,
-        )
+        cpu_index = "https://download.pytorch.org/whl/cpu"
+        vllm_wheel = manifest.bundled.vllm_wheel if manifest.bundled else None
+        if vllm_wheel is None:
+            # No vLLM wheel shipped: resolve everything together as before — there is no
+            # ttnn-vs-vLLM opencv/numpy conflict to sequence around.
+            platform_wheels = sorted(str(w) for w in wheels.glob("*.whl"))
+            subprocess.run(
+                [str(pip), "download", *platform_wheels, "-r", str(req), "-d", str(wheels),
+                 "--only-binary=:all:", "--extra-index-url", cpu_index],
+                check=True,
+            )
+        else:
+            # Same conflict render_install_sh's bundled/vLLM branch sequences around: ttnn needs
+            # numpy<2, vLLM's own deps want opencv-python-headless>=4.13 (numpy>=2 only) — one
+            # combined `pip download` of ttnn + this vLLM wheel together is a real
+            # ResolutionImpossible (reproduced directly: this is the exact failure `tt-model
+            # package --vendor-deps` hit staging tt-tnt as a v5 fat bundle).
+            #
+            # (1) Everything EXCEPT the vLLM wheel, resolved together with the bundle's own
+            # requirements.txt — their own deps are fine, no opencv/numpy involved.
+            vllm_path = bundle_dir / vllm_wheel.path
+            other_wheels = sorted(
+                str(w) for w in wheels.glob("*.whl") if w.resolve() != vllm_path.resolve()
+            )
+            subprocess.run(
+                [str(pip), "download", *other_wheels, "-r", str(req), "-d", str(wheels),
+                 "--only-binary=:all:", "--extra-index-url", cpu_index],
+                check=True,
+            )
+            # (2) vLLM's OWN runtime deps (torch/transformers/pydantic/...), fetched from the
+            # pinned upstream tag's requirements/common.txt — with its opencv line replaced by
+            # the same numpy<2-compatible pin render_install_sh's override applies, so this
+            # resolve never sees vLLM's declared opencv>=4.13 floor at all.
+            common_url = (
+                f"https://raw.githubusercontent.com/vllm-project/vllm/"
+                f"v{packaging.VLLM_VERSION}/requirements/common.txt"
+            )
+            with urllib.request.urlopen(common_url, timeout=30) as resp:
+                common_text = resp.read().decode()
+            filtered = "\n".join(
+                line for line in common_text.splitlines() if "opencv" not in line.lower()
+            )
+            common_req = dl_env / "vllm-common.txt"
+            common_req.write_text(f"{filtered}\n{packaging._VLLM_OVERRIDES_TEMPLATE}\n")
+            subprocess.run(
+                [str(pip), "download", "-r", str(common_req), "-d", str(wheels),
+                 "--only-binary=:all:", "--extra-index-url", cpu_index],
+                check=True,
+            )
+            # (3) The vLLM wheel itself, --no-deps — its declared opencv floor is never checked.
+            subprocess.run(
+                [str(pip), "download", "--no-deps", str(vllm_path), "-d", str(wheels)],
+                check=True,
+            )
     except subprocess.CalledProcessError as exc:
         raise _err(f"dependency vendoring failed (exit {exc.returncode}). "
                    "Re-run with --no-vendor-deps to install deps from the index instead.")
