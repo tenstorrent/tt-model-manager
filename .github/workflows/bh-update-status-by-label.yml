@@ -1,82 +1,155 @@
-# This workflow will run once a day
+# Tenstorrent - BH board updater
+#
+# Once a day (or on demand) this walks the BH SW Projects (v2) board and sets the
+# board's single-select priority field on every item that belongs to THIS repo,
+# based on the issue's / PR's P0..P3 label. Items with no P-label are left alone.
+#
+# Prerequisites in the adopting repo (org secrets scoped to the repo, or repo secrets):
+#   BH_SW_BOARD_ID     Projects v2 node id of the board (starts with "PVT_").
+#                      Find it with:  gh project view <number> --owner tenstorrent --format json --jq .id
+#   BH_SW_BOARD_TOKEN  PAT that can read this repo's issues and write to the board.
+#                      Classic PAT: scopes `project` + `repo`.
+#                      Fine-grained PAT: org "Projects: Read and write", repo "Issues: Read".
+#                      The built-in GITHUB_TOKEN cannot touch project boards, so this is required.
+# Optional repository variable:
+#   BH_SW_BOARD_FIELD  Name of the single-select field to set. Defaults to "Priority".
+#                      Its options must be named P0, P1, P2, P3 (same as the labels).
+#
+# The job fails loudly (red run) on any API error or misconfiguration.
+
+name: "BH board: sync priority field from P0-P3 labels"
+
 on:
   schedule:
-    - cron: '0 0 * * *'  # Runs daily at midnight UTC
-  workflow_dispatch: # Allow manual trigger
+    - cron: '0 0 * * *'  # daily at midnight UTC
+  workflow_dispatch:      # allow manual trigger
+
+# Nothing here uses the built-in token; all access goes through the PAT.
+permissions: {}
 
 jobs:
-  check-and-update-issues:
+  sync-board-priority:
     runs-on: ubuntu-latest
-    
     steps:
-      # Step 1: Check out the repository
-      - name: Checkout repository
-        uses: actions/checkout@v3
-      
-      # Step 2: Set up Node.js (for running JavaScript-based scripts)
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '16' # You can use a different version of Node.js if necessary
-      
-      # Step 3: Install dependencies
-      - name: Install dependencies
-        run: |
-          npm install axios
-
-      # Step 4: Run the script to update issue statuses
-      - name: Check issues and update status
+      - name: Sync board priority field from labels
+        uses: actions/github-script@v7
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub token for authentication
-          PROJECT_ID: ${{ secrets.BH_SW_BOARD_ID }}      # You should store your project board ID in GitHub Secrets
-        run: |
-          node -e "
-            const axios = require('axios');
-            const token = process.env.GITHUB_TOKEN;
-            const projectId = process.env.BH_SW_BOARD_ID;
+          PROJECT_ID: ${{ secrets.BH_SW_BOARD_ID }}
+          FIELD_NAME: ${{ vars.BH_SW_BOARD_FIELD || 'Priority' }}
+        with:
+          github-token: ${{ secrets.BH_SW_BOARD_TOKEN }}
+          script: |
+            const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
+            const projectId = process.env.PROJECT_ID;
+            const fieldName = process.env.FIELD_NAME;
+            const thisRepo = process.env.GITHUB_REPOSITORY;
 
-            const headers = {
-              'Authorization': \`Bearer \${token}\`,
-              'Accept': 'application/vnd.github.v3+json',
-            };
+            if (!projectId) {
+              core.setFailed('BH_SW_BOARD_ID secret is not set (expected the board\'s Projects v2 node id, e.g. PVT_...).');
+              return;
+            }
 
-            // Fetch all issues from the project board
-            async function updateIssueStatus() {
-              try {
-                const { data: issues } = await axios.get(\`https://api.github.com/projects/columns/cards\`, {
-                  params: { project_id: projectId },
-                  headers: headers,
-                });
-
-                for (const issue of issues) {
-                  const { labels, id } = issue.content;
-
-                  // Check the labels on the issue
-                  let status = '';
-                  if (labels.some(label => label.name === 'P0')) {
-                    status = 'P0';
-                  } else if (labels.some(label => label.name === 'P1')) {
-                    status = 'P1';
-                  } else if (labels.some(label => label.name === 'P2')) {
-                    status = 'P2';
-                  } else if (labels.some(label => label.name === 'P3')) {
-                    status = 'P3';
-                  }
-
-                  // If a matching label is found, update the status field
-                  if (status) {
-                    await axios.patch(\`https://api.github.com/projects/columns/cards/\${id}\`, {
-                      note: \`Status: \${status}\`,
-                    }, {
-                      headers: headers,
-                    });
-                    console.log(\`Updated issue \${id} with status: \${status}\`);
+            // 1. Resolve the board, the target field and its option ids by name.
+            const meta = await github.graphql(`
+              query($projectId: ID!) {
+                node(id: $projectId) {
+                  ... on ProjectV2 {
+                    title
+                    fields(first: 50) {
+                      nodes {
+                        ... on ProjectV2SingleSelectField { id name options { id name } }
+                      }
+                    }
                   }
                 }
-              } catch (error) {
-                console.error('Error updating issue status:', error);
+              }`, { projectId });
+
+            const project = meta.node;
+            if (!project || !project.fields) {
+              core.setFailed(`Node ${projectId} is not a Projects v2 board this token can see.`);
+              return;
+            }
+            const field = project.fields.nodes.find(f => f && f.name === fieldName);
+            if (!field) {
+              const names = project.fields.nodes.filter(f => f && f.name).map(f => f.name).join(', ');
+              core.setFailed(`Board "${project.title}" has no single-select field named "${fieldName}". Single-select fields: ${names}`);
+              return;
+            }
+            const optionIdByName = Object.fromEntries(field.options.map(o => [o.name, o.id]));
+            const missing = PRIORITIES.filter(p => !optionIdByName[p]);
+            if (missing.length) {
+              core.setFailed(`Field "${fieldName}" on "${project.title}" is missing option(s): ${missing.join(', ')}`);
+              return;
+            }
+            core.info(`Board "${project.title}", field "${fieldName}", repo ${thisRepo}`);
+
+            // 2. Walk every item on the board (paginated).
+            const items = [];
+            let cursor = null;
+            do {
+              const page = await github.graphql(`
+                query($projectId: ID!, $cursor: String, $fieldName: String!) {
+                  node(id: $projectId) {
+                    ... on ProjectV2 {
+                      items(first: 100, after: $cursor) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes {
+                          id
+                          fieldValueByName(name: $fieldName) {
+                            ... on ProjectV2ItemFieldSingleSelectValue { name }
+                          }
+                          content {
+                            ... on Issue       { number repository { nameWithOwner } labels(first: 50) { nodes { name } } }
+                            ... on PullRequest { number repository { nameWithOwner } labels(first: 50) { nodes { name } } }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }`, { projectId, cursor, fieldName });
+              const conn = page.node.items;
+              items.push(...conn.nodes);
+              cursor = conn.pageInfo.hasNextPage ? conn.pageInfo.endCursor : null;
+            } while (cursor);
+            core.info(`Board has ${items.length} item(s)`);
+
+            // 3. For this repo's items, set the field from the highest-priority label present.
+            let updated = 0, unchanged = 0, skipped = 0;
+            const failures = [];
+            for (const item of items) {
+              const c = item.content;
+              if (!c || !c.repository || c.repository.nameWithOwner !== thisRepo) { skipped++; continue; }
+              const labels = c.labels.nodes.map(l => l.name);
+              const wanted = PRIORITIES.find(p => labels.includes(p));
+              if (!wanted) { skipped++; continue; }
+              const current = item.fieldValueByName ? item.fieldValueByName.name : null;
+              if (current === wanted) { unchanged++; continue; }
+              try {
+                await github.graphql(`
+                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                    updateProjectV2ItemFieldValue(input: {
+                      projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+                      value: { singleSelectOptionId: $optionId }
+                    }) { projectV2Item { id } }
+                  }`, { projectId, itemId: item.id, fieldId: field.id, optionId: optionIdByName[wanted] });
+                core.info(`#${c.number}: ${current ?? '(unset)'} -> ${wanted}`);
+                updated++;
+              } catch (err) {
+                failures.push(`#${c.number}: ${err.message}`);
               }
             }
 
-            updateIssueStatus();
-          "
+            core.summary
+              .addHeading(`BH board sync for ${thisRepo}`)
+              .addTable([
+                [{ data: 'Result', header: true }, { data: 'Count', header: true }],
+                ['Updated', String(updated)],
+                ['Already correct', String(unchanged)],
+                ['Skipped (other repo / no P-label)', String(skipped)],
+                ['Failed', String(failures.length)],
+              ]);
+            await core.summary.write();
+
+            if (failures.length) {
+              core.setFailed(`Failed to update ${failures.length} item(s):\n${failures.join('\n')}`);
+            }
