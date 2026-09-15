@@ -985,6 +985,15 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         console.raw(shlex.join(run_argv))
         return
 
+    # Resolved first -- before the weight prefetch and before `docker run` -- so a typo in
+    # TT_MODEL_READY_TIMEOUT fails here, not after hours of download or with a container
+    # already booting. The same figure feeds the wait AND its failure card below, so the
+    # card can never quote a deadline other than the one that actually expired.
+    try:
+        ready_timeout_s = container.ready_timeout_s()
+    except container.ContainerError as e:
+        raise ContainerCliError(str(e)) from None
+
     # As the host user, so the daemon does not create them as root: see
     # container.ensure_mount_sources.
     container.ensure_mount_sources(manifest)
@@ -1051,7 +1060,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
             view.close()
         else:
             view.begin("waiting for the engine", placeholder=True)
-            result = container.wait_ready(name, probe, on_line=_feed(tracker, view))
+            result = container.wait_ready(name, probe, timeout_s=ready_timeout_s,
+                                          on_line=_feed(tracker, view))
             if result.ready:
                 if view.active:
                     view.done()
@@ -1065,7 +1075,7 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     assert result is not None
     if not result.ready:
         diag = diagnose_boot(tracker.evidence() or result.tail, exited=result.exited,
-                             target=what, extra_args=extra_args)
+                             target=what, extra_args=extra_args, timeout_s=ready_timeout_s)
         raise ContainerCliError(summarize(diag, result.tail), diagnosis=diag)
 
     console.milestone(f"{what} ready  {console.fmt_duration(view.elapsed)}")
