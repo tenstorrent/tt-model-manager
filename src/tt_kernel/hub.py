@@ -146,15 +146,25 @@ def _prune_removed(repo_id: str, folder: Path) -> None:
 
 
 def tag_repo(repo_id: str, tags: List[str]) -> None:
-    """Best-effort: write a model card with metadata tags so search can filter."""
+    """Best-effort: write a model card with metadata tags so search can filter.
+
+    Mutates ``card.data.tags`` in place rather than rebuilding ``card.data`` from scratch
+    (the same reasoning ``set_catalog_listing`` below already documents): replacing the whole
+    block drops every OTHER frontmatter field — ``license``, ``pipeline_tag``, ``library_name``,
+    ``datasets`` — that a hand-authored card set, silently, on every `package`/`package-thin`
+    push.
+    """
     from huggingface_hub import ModelCard, ModelCardData
 
     try:
         card = ModelCard.load(repo_id)
     except Exception:
         card = ModelCard("")
-    existing = list(getattr(card.data, "tags", None) or [])
-    card.data = ModelCardData(tags=sorted(set(existing) | set(tags)))
+    tags_set = set(getattr(card.data, "tags", None) or []) | set(tags)
+    if hasattr(card.data, "tags"):
+        card.data.tags = sorted(tags_set)
+    else:  # a card with no frontmatter at all
+        card.data = ModelCardData(tags=sorted(tags_set))
     card.push_to_hub(repo_id, repo_type=_REPO_TYPE)
 
 
