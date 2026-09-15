@@ -600,6 +600,54 @@ def test_a_boot_failure_carries_a_diagnosis_for_the_card(tmp_path, monkeypatch):
     assert e.value.diagnosis and "container exited" in e.value.diagnosis["cause"]
 
 
+def _serve_with_timeout_probe(tmp_path, monkeypatch, *, ready):
+    """Serve against a stub wait_ready that records the deadline it was handed."""
+    seen = {}
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "port_is_free", lambda p: True)
+
+    def fake_wait(name, probe, timeout_s=None, on_line=None):
+        seen["timeout_s"] = timeout_s
+        return container.ReadyResult(ready, False, ["still booting"], 1.0)
+
+    monkeypatch.setattr(container, "wait_ready", fake_wait)
+    container_cli.serve_container(_manifest(tmp_path), target="org/x")
+    return seen
+
+
+def test_serve_waits_for_hours_by_default_not_thirty_minutes(tmp_path, monkeypatch):
+    monkeypatch.delenv("TT_MODEL_READY_TIMEOUT", raising=False)
+    monkeypatch.delenv("TT_KERNEL_READY_TIMEOUT", raising=False)
+    seen = _serve_with_timeout_probe(tmp_path, monkeypatch, ready=True)
+    assert seen["timeout_s"] == container.READY_TIMEOUT_S == 4 * 3600
+
+
+def test_serve_honours_TT_MODEL_READY_TIMEOUT_in_the_wait_and_the_card(tmp_path, monkeypatch):
+    """One figure, two consumers. The deadline and the 'did not report ready within ...'
+    card used to be two separate 1800 literals; with an override they MUST agree."""
+    monkeypatch.setenv("TT_MODEL_READY_TIMEOUT", "5400")
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        _serve_with_timeout_probe(tmp_path, monkeypatch, ready=False)
+    assert e.value.diagnosis["cause"].endswith("within 1 h 30 min")
+    assert "still running" in e.value.diagnosis["detail"]
+
+
+def test_a_bad_TT_MODEL_READY_TIMEOUT_fails_before_anything_is_started(tmp_path, monkeypatch):
+    monkeypatch.setenv("TT_MODEL_READY_TIMEOUT", "soon")
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+
+    def boom(*a, **k):
+        raise AssertionError(f"reached docker/weights with a bad timeout: {a}")
+
+    monkeypatch.setattr(container, "run_checked", boom)
+    monkeypatch.setattr(container, "ensure_mount_sources", boom)
+    monkeypatch.setattr(container_cli, "ensure_weights", boom)
+    with pytest.raises(container_cli.ContainerCliError, match="TT_MODEL_READY_TIMEOUT"):
+        container_cli.serve_container(_manifest(tmp_path), target="org/x")
+
+
 def test_detach_returns_without_watching_the_boot(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(container, "running", lambda name=None: [])
     monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)

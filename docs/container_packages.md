@@ -330,6 +330,13 @@ a piped run prints each row once with no escape codes. Pass `--detach` to return
 as the container is started, as the old default did (`--follow` is now a hidden no-op).
 Ctrl-C stops the watching only — the container keeps booting.
 
+The watch gives up after **4 hours** by default: everything after `docker run` is on that
+clock — a cold JIT, a large multi-chip load, and (with `--no-weights` / `--local-only`) a
+weight download inside the container on whatever link the box has. When it expires only the
+watch stops; the container keeps booting and the card points at `tt-model logs -f` and
+`tt-model stop`. `TT_MODEL_READY_TIMEOUT=<seconds>` changes the bound for one run
+(`TT_MODEL_READY_TIMEOUT=28800 tt-model serve you/my-model` waits 8 h).
+
 Or split it — `tt-model pull you/my-model` moves bytes only and needs **no card**, so it can
 run on a build host; a later `serve` starts the container. Around them:
 
@@ -412,6 +419,10 @@ of a silent boot:
 → to fetch them first instead:  tt-model pull org/name --with-weights
 → or directly:  hf download org/Weights-7B --revision a1b2c3d4
 ```
+
+That in-container download counts against `serve`'s readiness watch (4 h by default; see
+above), so on a slow link either prefetch with `tt-model pull --with-weights` or raise
+`TT_MODEL_READY_TIMEOUT`.
 
 A *failed* fetch is still non-fatal: the image is loaded and the model can try for itself, so
 a gate you can click through does not cost you the serve. The exception is a full disk, which
