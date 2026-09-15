@@ -9,3 +9,6 @@ dist/
 # runtime artifacts (never commit)
 model_cache/
 generated/
+
+# local secrets
+.env
