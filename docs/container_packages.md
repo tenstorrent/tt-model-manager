@@ -341,11 +341,14 @@ run on a build host; a later `serve` starts the container. Around them:
 - `tt-model logs you/my-model -f` — follow the boot (a cold first boot JIT-compiles kernels,
   ~10 min).
 - `tt-model stop you/my-model` — a clean `SIGTERM` closes the mesh. A `SIGKILL` leaves it
-  dirty: `stop` then attempts a `tt-smi -r` scoped to that container's own chips (read back
-  from the label `serve` set, and skipped if another container has taken one of them since),
-  but that
-  is best-effort recovery, not a guarantee — a force-killed teardown can leave a device that
-  only a host reboot restores (issue #107).
+  dirty: `stop` then runs a `tt-smi -r` scoped to that container's own chips (read back from
+  the label `serve` set) and tells you what actually happened — the reset **ran**, **did not
+  complete** (nonzero/timeout → the mesh is still dirty), or was **skipped** because another
+  container has since taken one of those chips (resetting would wedge *that* one). Even a
+  reset that ran is best-effort, not a guarantee — a force-killed teardown can leave a device
+  that only a host reboot restores, and the boot then wedges at the first large host→device
+  DMA (`could only pin N of M pages` in dmesg). If a stop reports anything but a clean
+  shutdown and the next boot hangs early, reboot the host rather than retrying (issue #107).
 - `tt-model rm you/my-model` — removes a *pulled* container package, including its HF
   snapshot. `--keep-cache` keeps the JIT/weight caches for a fast re-pull;
   `--include-weights` also deletes the weights from the HF cache (off by default — they
