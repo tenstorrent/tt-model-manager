@@ -393,6 +393,14 @@ def _vendor_dependencies(bundle_dir: Path, manifest: Manifest) -> None:
                  "--only-binary=:all:", "--extra-index-url", cpu_index],
                 check=True,
             )
+            # Name these in the bundle's OWN requirements.txt too: install.sh's vendored path
+            # installs from `-r requirements.txt --no-index --find-links wheels/` with no
+            # network fetch, so the packages just downloaded above (torch/transformers/...)
+            # must be NAMED there or that final step installs nothing beyond what --no-deps
+            # left out on purpose. Non-vendored install.sh re-fetches common.txt itself instead.
+            existing_req = req.read_text() if req.is_file() else ""
+            sep = "" if existing_req.endswith("\n") or not existing_req else "\n"
+            req.write_text(f"{existing_req}{sep}{filtered}\n{packaging._VLLM_OVERRIDES_TEMPLATE}\n")
             # (3) The vLLM wheel itself, --no-deps — its declared opencv floor is never checked.
             subprocess.run(
                 [str(pip), "download", "--no-deps", str(vllm_path), "-d", str(wheels)],

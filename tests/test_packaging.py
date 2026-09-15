@@ -383,6 +383,14 @@ def test_vendor_dependencies_sequences_around_vllm_wheel(tmp_path, monkeypatch):
     # (3) the vLLM wheel itself, --no-deps
     assert "--no-deps" in download_calls[2]
     assert any(str(vllm) == a for a in download_calls[2])
+    # The bundle's OWN requirements.txt must end up NAMING those vendored deps too — the
+    # vendored install.sh reads only requirements.txt + --find-links wheels/, no network, so
+    # anything downloaded above but never named there would sit in wheels/ unused (reproduced
+    # directly: before this, a real end-to-end install left torch/transformers/opencv sitting
+    # in wheels/ but never installed, because requirements.txt named nothing).
+    final_req = (bundle / "requirements.txt").read_text()
+    assert "torch==2.11.0" in final_req
+    assert "opencv-python-headless==4.11.0.86" in final_req
 
 
 def test_vendor_dependencies_no_vllm_wheel_stays_one_call(tmp_path, monkeypatch):
