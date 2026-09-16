@@ -1,15 +1,5 @@
 # Container (v5.1) model packages
 
-> **Status.** The v5.1 container path is merged and on `main`. The base path landed in
-> [PR #37 (OCI path to serve and distribute models)](https://github.com/tenstorrent/tt-model-manager/pull/37);
-> [PR #50 (`tt-dit-server` kind)](https://github.com/tenstorrent/tt-model-manager/pull/50) added the
-> `tt-dit-server` kind and
-> [PR #51 (image digest as identity)](https://github.com/tenstorrent/tt-model-manager/pull/51) made
-> the image digest its identity. The design is additive: `container` is a new optional block on the
-> existing manifest, so v5 and v6 are untouched. A few items are called out below as **planned**;
-> everything else is implemented. Design rationale, the wire format, and the image layout are in
-> [Design notes](#design-notes) at the end of this page.
-
 A **container package** ships the whole platform *inside an Open Container Initiative (OCI)
 image*: Ubuntu, the built TT-Metalium™ tree, vLLM, the Tenstorrent vLLM plugin, and the model's own
 code, all pinned, all inside. A consumer needs only **Docker and a Tenstorrent PCIe card**: no
@@ -21,8 +11,9 @@ image.
 | | ships | consumer must have | who assembles the platform |
 |---|---|---|---|
 | **v5** self-contained | the author's `ttnn`/vLLM/plugin **wheels** + a `tt-metal-community` tree | a Tenstorrent card + firmware | the consumer, at `pull` (wheels installed into the bundle's own venv) |
-| **v6** thin | a pinned pip spec no wheels needed | a Tenstorrent card + firmware + SFPI | the consumer, at `pull` (a pinned venv built inside the bundle from pip pins) |
 | **v5.1** container | an **OCI image** with OS + TT-Metalium + vLLM + plugin + code baked in | **Docker** + a Tenstorrent card | the **author**, once, at `package` (build time) |
+| **v6** thin | a pinned pip spec no wheels needed | a Tenstorrent card + firmware + SFPI | the consumer, at `pull` (a pinned venv built inside the bundle from pip pins) |
+
 
 v5 and v6 assemble the platform on the consumer's host, so the host's glibc and architecture have
 to cooperate. v5.1 moves the assembly to the author: the image is built once, and nothing about
