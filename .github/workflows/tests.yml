@@ -1,0 +1,48 @@
+# Runs the offline pytest suite on every PR and on pushes to main — the enforcement
+# CONTRIBUTING.md / AGENTS.md already assume ("Run the full offline suite … all pass, no
+# hardware, no network"). The suite needs no TT card and no network, so a stock GitHub
+# runner is enough — no self-hosted box. See issue #100.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same branch/PR supersedes an in-flight run.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the real floor: the CLI tests read `result.stderr`, which needs click's
+        # separated-stderr CliRunner (click >= 8.2, itself Python >= 3.10). `pyproject`
+        # still says requires-python >= 3.9, but `uv --locked` resolves an older click on
+        # 3.9 and 6 tests fail — tracked separately from this CI change.
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.26"        # pinned so CI is reproducible; bump deliberately
+          enable-cache: true
+
+      # The exact commands CONTRIBUTING.md documents, so CI and the local instructions
+      # cannot drift. `--locked` fails loudly if uv.lock is stale rather than silently
+      # resolving something new.
+      - name: Sync dependencies (locked)
+        run: uv sync --locked --extra test --python ${{ matrix.python-version }}
+
+      - name: Run the offline suite
+        run: uv run --locked --extra test pytest
