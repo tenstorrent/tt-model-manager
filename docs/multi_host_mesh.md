@@ -1,9 +1,5 @@
 # Multi-host (cross-box) mesh: design of record
 
-Tracking issue: **#87**. This is the design note that issue asks for. A cross-box mesh is "a
-design effort," and everything below is grounded in the launch contract as it exists on
-Tenstorrent Blackhole® hardware, verified on hardware rather than inferred from docs.
-
 > **Status.** The hard *hardware* unknown is settled: cross-host fabric trains and computes.
 > A `1x4` mesh spanning two hosts (host A and host B, two Blackhole chips each, 800G card cables)
 > was opened under `FABRIC_1D` and ran a real op with a Pearson correlation coefficient (PCC) of
@@ -95,8 +91,8 @@ They name real machines and cannot live in a repo anyone can pull.
   plus the operator's cluster, not stored.)
 
 **Launch generation:**
-- v6 thin `run.sh`: when `mesh.hosts > 1`, extend the exact `--additional-config` emit point #86
-  added, adding `tt.rank_binding` alongside `tt.fabric_config`. The value is an operator-supplied
+- v6 thin `run.sh`: when `mesh.hosts > 1`, extend the exact `--additional-config` emit point,
+  adding `tt.rank_binding` alongside `tt.fabric_config`. The value is an operator-supplied
   path (a `TT_RANK_BINDING` env or serve flag), guarded so a multi-host bundle served without it
   fails with one clear sentence rather than silently single-hosting. The launch still runs once on
   rank 0; the plugin fans out.
