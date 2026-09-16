@@ -131,7 +131,7 @@ when the v5 path was validated.
 
 | Requirement | Why | Where it is enforced |
 |---|---|---|
-| The shipped `ttnn` wheel bundles `_ttnncpp.so`. It is pinned to interpreter, ABI, and arch (cp312/linux_x86_64). | `pull` refuses a wheel whose tags do not match the bundle's pinned interpreter or the host's arch and glibc floor. The host's own Python is not consulted; `install.sh` provisions the pinned one. | `host_incompatible_wheels` in `packaging.py` |
+| The shipped `ttnn` wheel bundles `_ttnncpp.so`. It is pinned to interpreter, ABI, and arch (cp312/linux_x86_64). | `pull` refuses a wheel whose interpreter tag does not match the host's running Python, or whose platform/glibc tags are below the host's arch and glibc floor, unless `--force`. `install.sh` then provisions the bundle's pinned interpreter for the venv itself.| `host_incompatible_wheels` in `packaging.py` |
 | Locate ttnn via `importlib.util.find_spec`, not `import ttnn`, when computing `LD_PRELOAD`. | The import is exactly what the preload fixes (glibc static thread-local storage (TLS)). | `run.sh` |
 | Single-chip runs disable fabric and set `TT_METAL_VISIBLE_DEVICES=0`. | | `run.sh` |
 | `vllm_metadata.json` lives in a per-model subfolder under `EXTRA_MODELS_DIR` (`vllm_models/<name>/`) rather than the bundle root. | The plugin scans children; a root-level file registers 0 architectures. | `stage_package` |
