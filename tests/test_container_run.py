@@ -174,6 +174,36 @@ def test_the_hf_cache_is_mounted_read_write_and_pointed_at_by_HF_HOME():
     assert "HF_HOME=/hf" in argv
 
 
+def test_pinned_primary_weights_use_the_exact_mounted_snapshot():
+    """A fresh offline cache need not carry refs/main for an immutable revision."""
+    m = _wire(weights={"repo": "org/Weights-7B", "revision": "deadbeef"})
+    argv = _run_argv(m)
+    assert "HF_MODEL=/hf/hub/models--org--Weights-7B/snapshots/deadbeef" in argv
+    image_i = argv.index("tt-model/my-model:abc123")
+    assert argv[image_i + 1 : image_i + 6] == [
+        "vllm", "serve", "org/Weights-7B", "--revision", "deadbeef"
+    ]
+
+
+def test_pinned_primary_weights_follow_an_external_hub_mount(tmp_path):
+    m = _wire(weights={"repo": "org/Weights-7B", "revision": "deadbeef"})
+    profile = m.container.resolve_profile()
+    launcher = launcher_for(m.container.kind)
+    argv = container.compose_run(
+        m,
+        profile,
+        launcher.serve_argv(m, profile),
+        launcher.serve_env(m, profile),
+        hf_home_dir=tmp_path / "hf",
+        hub_cache_dir=tmp_path / "large-disk" / "hub",
+        cache_dir=tmp_path / "c",
+        weight_cache_dir=tmp_path / "w",
+        tensor_cache_dir=tmp_path / "t",
+        include_hf_token=False,
+    )
+    assert "HF_MODEL=/hf-hub/models--org--Weights-7B/snapshots/deadbeef" in argv
+
+
 def test_the_kernel_cache_is_persisted_on_the_host():
     argv = _run_argv(_wire())
     assert "/home/u/.cache/tt-model/my-model/cache:/cache" in argv
