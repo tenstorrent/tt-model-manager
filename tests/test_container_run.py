@@ -174,6 +174,12 @@ def test_the_hf_cache_is_mounted_read_write_and_pointed_at_by_HF_HOME():
     assert "HF_HOME=/hf" in argv
 
 
+def test_pinned_weights_keep_HF_MODEL_as_the_repo_id():
+    """tt_transformers names the model after HF_MODEL's last path component."""
+    m = _wire(weights={"repo": "org/Weights-7B", "revision": "deadbeef"})
+    assert "HF_MODEL=org/Weights-7B" in _run_argv(m)
+
+
 def test_the_kernel_cache_is_persisted_on_the_host():
     argv = _run_argv(_wire())
     assert "/home/u/.cache/tt-model/my-model/cache:/cache" in argv
