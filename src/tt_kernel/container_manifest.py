@@ -289,6 +289,9 @@ class ContainerManifest(BaseModel):
     # An HF id, or a WeightsSpec to pin a revision / select files. Downloaded to the
     # HOST HF cache at pull time; never baked into the image.
     weights: Union[str, WeightsSpec]
+    # Additional runtime checkpoints (drafter weights, adapters, and similar), fetched and
+    # mounted by tt-model exactly like the primary weights. Declaration order is preserved.
+    auxiliary_weights: List[Union[str, WeightsSpec]] = Field(default_factory=list)
     kind: str = "vllm-plugin"  # launcher flavour; see tt_kernel.launchers.KINDS
     arch: str  # blackhole | wormhole_b0 — fixed by the build
 
@@ -355,6 +358,23 @@ class ContainerManifest(BaseModel):
             ignore_patterns=self.weights.ignore_patterns,
         )
 
+    @property
+    def auxiliary_weight_refs(self) -> List[WeightsRef]:
+        refs: List[WeightsRef] = []
+        for weight in self.auxiliary_weights:
+            if isinstance(weight, str):
+                refs.append(WeightsRef(repo=weight))
+            else:
+                refs.append(
+                    WeightsRef(
+                        repo=weight.repo,
+                        revision=weight.revision,
+                        allow_patterns=weight.allow_patterns,
+                        ignore_patterns=weight.ignore_patterns,
+                    )
+                )
+        return refs
+
     def profile_names(self) -> List[str]:
         return [p.name for p in self.effective_profiles()]
 
@@ -402,6 +422,18 @@ class ContainerManifest(BaseModel):
         if "/" not in self.weights_repo:
             raise ContainerManifestError(
                 f"weights must be a namespaced HF id (org/name), got {self.weights_repo!r}"
+            )
+        for ref in self.auxiliary_weight_refs:
+            if "/" not in ref.repo_id:
+                raise ContainerManifestError(
+                    "auxiliary_weights must use namespaced HF ids (org/name), got "
+                    f"{ref.repo_id!r}"
+                )
+        repos = [self.weights_repo] + [ref.repo_id for ref in self.auxiliary_weight_refs]
+        duplicates = sorted({repo for repo in repos if repos.count(repo) > 1})
+        if duplicates:
+            raise ContainerManifestError(
+                f"duplicate weight repositories across weights/auxiliary_weights: {duplicates}"
             )
 
         names = self.profile_names()
@@ -545,6 +577,7 @@ class ContainerManifest(BaseModel):
                 hostname=hostname if hostname is not None else socket.gethostname(),
             ),
             weights=self.weights_ref,
+            auxiliary_weights=self.auxiliary_weight_refs,
             container=ContainerSpec(
                 image=ImageRef(
                     registry=self.image.registry,
