@@ -1147,26 +1147,58 @@ def _live_containers(manifest: Manifest, profile_name: Optional[str] = None) -> 
     return [n for n in names if container.is_running(n)]
 
 
+# The one-line step detail per StopOutcome.reset (see container.StopOutcome).
+_STOP_DETAIL = {
+    "not_needed": "clean shutdown",
+    "ran": "killed — mesh reset ran",
+    "failed": "killed — mesh reset did NOT complete",
+    "skipped": "killed — reset skipped (chips reclaimed)",
+}
+
+# The dirty-teardown warning, per reset outcome. NONE of these say "the next boot is safe":
+# on a force-killed teardown `tt-smi -r` does not reliably recover the device — the next boot
+# then wedges on the first large host→device DMA (`could only pin N of M pages` in dmesg) until
+# the HOST is rebooted (issue #107). What differs is how much we actually know:
+#   - ran     -> the reset command completed, but that is not a guarantee (see above);
+#   - failed  -> the reset itself did not complete, so the mesh is definitely still dirty;
+#   - skipped -> we deliberately did not reset, because another container now holds these chips.
+# Reporting "a reset was attempted" for the skipped/failed cases (the old behaviour) sent people
+# debugging the model instead of the device — the exact failure #107 is about.
+_DIRTY_STOP_WARNING = {
+    "ran": (
+        "the server did not exit on SIGTERM, so the mesh was left dirty; tt-smi -r ran to reset "
+        "it. A force-killed teardown can still leave the device unusable until the HOST is "
+        "rebooted (see issue #107) — if the next boot hangs early (dmesg: 'could only pin N of M "
+        "pages'), reboot rather than retrying"
+    ),
+    "failed": (
+        "the server did not exit on SIGTERM AND the tt-smi -r reset did not complete, so the mesh "
+        "is still dirty (see issue #107). Reboot the HOST before the next boot — retrying will "
+        "wedge at device open"
+    ),
+    "skipped": (
+        "the server did not exit on SIGTERM, so its mesh was left dirty — it was NOT reset "
+        "because another container has since claimed these chips and resetting would wedge THAT "
+        "one (see issue #107). Stop the other container and reset, or reboot the HOST before "
+        "reusing these chips"
+    ),
+}
+
+
+def _warn_dirty_stop(reset: str) -> None:
+    console.note(_DIRTY_STOP_WARNING.get(reset, _DIRTY_STOP_WARNING["failed"]),
+                 marker="⚠", style="warning")
+
+
 def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) -> None:
     stopped = 0
     for name in _live_containers(manifest, profile_name):
         stopped += 1
         with console.step(f"stopping {name}") as st:
-            clean = container.stop(name, image=container.image_ref(manifest))
-            st.detail("clean shutdown" if clean else "killed — mesh reset attempted")
-        if not clean:
-            # Deliberately not "the next boot is safe" (issue #107): on a force-killed
-            # teardown `tt-smi -r` does NOT reliably recover the device — boots then wedge on
-            # the first large host→device DMA (`could only pin N of M pages`) until the host
-            # is rebooted. Promising a repair that may not have happened sends people
-            # debugging the model instead of the device.
-            console.note(
-                "the server did not exit on SIGTERM, so the mesh was left dirty. A reset was "
-                "attempted with tt-smi, but a force-killed teardown can leave the device "
-                "unusable until the HOST is rebooted (see issue #107) — if the next boot "
-                "hangs early, reboot rather than retrying",
-                marker="⚠", style="warning",
-            )
+            outcome = container.stop(name, image=container.image_ref(manifest))
+            st.detail(_STOP_DETAIL.get(outcome.reset, "killed — mesh reset"))
+        if not outcome.clean:
+            _warn_dirty_stop(outcome.reset)
     if not stopped:
         console.note("nothing running", marker="○")
     else:

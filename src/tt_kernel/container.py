@@ -968,14 +968,44 @@ def image_present(ref: str) -> bool:
     return _run(["docker", "image", "inspect", ref], capture_output=True).returncode == 0
 
 
-def stop(name: str, image: Optional[str] = None) -> bool:
-    """SIGTERM-first stop. Returns True when the shutdown was clean.
+@dataclass(frozen=True)
+class StopOutcome:
+    """What ``stop`` did — so the caller can say what actually happened, not guess.
+
+    ``clean`` is the old return value (True == the server closed the mesh itself on SIGTERM).
+    ``reset`` says what became of a *dirty* mesh, and it is the whole point of issue #107: the
+    three not-clean cases need three different things said to the user, and the old bool
+    collapsed them into one message that was wrong for two of them.
+
+    - ``"not_needed"`` — clean shutdown; nothing to recover.
+    - ``"ran"``        — dirty; ``tt-smi -r`` returned success. Still not a guarantee (a
+      force-kill can leave the device wedged until a host reboot — #107), but the reset itself
+      completed.
+    - ``"failed"``     — dirty; ``tt-smi -r`` returned nonzero or timed out (or there was no
+      image to run it from). The mesh is *still dirty*: the next boot needs a host reboot.
+    - ``"skipped"``    — dirty, but another container has since claimed these chips, so the
+      reset was deliberately NOT run (it would have wiped that live sibling's mesh). This
+      container's mesh is still dirty; the remedy is to stop the sibling first, or reboot.
+    """
+
+    clean: bool
+    reset: str = "not_needed"
+
+    def __bool__(self) -> bool:  # ergonomic: `if stop(...)` still means "was it clean?"
+        return self.clean
+
+
+def stop(name: str, image: Optional[str] = None) -> StopOutcome:
+    """SIGTERM-first stop. Reports whether the shutdown was clean and, if not, what became
+    of the dirty mesh (see ``StopOutcome``).
 
     ``docker stop`` sends SIGTERM and escalates to SIGKILL after the timeout. A kill means
     the server never closed the mesh — eth cores are left dirty — so in that case the mesh is
     reset with ``tt-smi -r all`` in a throwaway container from the same image. That is why no
     host tt-smi is needed: the image already has one. (Best-effort recovery, not a guarantee:
-    see issue #107 — a force-killed teardown can leave a device only a host reboot restores.)
+    see issue #107 — a force-killed teardown can leave a device only a host reboot restores.
+    ``StopOutcome.reset`` reports whether that reset actually ran, failed, or was skipped, so
+    the caller never claims a repair that did not happen.)
 
     The one thing this adds over resetting blind is SCOPE: the chips are read back from the
     ``DEVICES_LABEL`` set at launch, so recovering one container's dirty mesh resets its own
@@ -1011,21 +1041,27 @@ def stop(name: str, image: Optional[str] = None) -> bool:
         clean = code not in (SIGKILL_EXIT_CODE, "")
     _run(["docker", "rm", name], capture_output=True, text=True)
 
-    if not clean and image:
-        # Re-scan immediately before resetting. Removing the container released its chips,
-        # so a serve can have taken one in the interval and be mid-bring-up on it -- and a
-        # `tt-smi -r` aimed at that chip would wipe a LIVE mesh. Checked rather than locked,
-        # for the reason in ``pick_free_devices``: this shrinks the exposure from the whole
-        # reset (tens of seconds) to the few ms between the check and the reset starting,
-        # and turns the remaining failure from destructive into a skipped recovery.
-        # Only a POSITIVE "someone else has it" skips: a scan that cannot answer means
-        # docker is unwell, not that the chip is taken, and refusing to recover then would
-        # leave a dirty mesh for no reason.
-        taken = _claimed_devices(device_ids) if device_ids else None
-        if taken and set(device_ids) & taken:
-            return clean
-        reset_mesh(image, device_ids=device_ids)
-    return clean
+    if clean:
+        return StopOutcome(True, "not_needed")
+    if not image:
+        # Nothing to run tt-smi from, so the dirty mesh could not be reset at all.
+        return StopOutcome(False, "failed")
+
+    # Re-scan immediately before resetting. Removing the container released its chips,
+    # so a serve can have taken one in the interval and be mid-bring-up on it -- and a
+    # `tt-smi -r` aimed at that chip would wipe a LIVE mesh. Checked rather than locked,
+    # for the reason in ``pick_free_devices``: this shrinks the exposure from the whole
+    # reset (tens of seconds) to the few ms between the check and the reset starting,
+    # and turns the remaining failure from destructive into a skipped recovery.
+    # Only a POSITIVE "someone else has it" skips: a scan that cannot answer means
+    # docker is unwell, not that the chip is taken, and refusing to recover then would
+    # leave a dirty mesh for no reason.
+    taken = _claimed_devices(device_ids) if device_ids else None
+    if taken and set(device_ids) & taken:
+        return StopOutcome(False, "skipped")
+    # reset_mesh's bool is the whole fix for #107: a nonzero/timed-out tt-smi means the mesh
+    # is still dirty, and the caller must say "reboot", not "a reset was attempted".
+    return StopOutcome(False, "ran" if reset_mesh(image, device_ids=device_ids) else "failed")
 
 
 def compose_reset_mesh(image: str, *, device_ids: Optional[Sequence[int]] = None) -> List[str]:
