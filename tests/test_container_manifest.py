@@ -82,6 +82,39 @@ def test_a_minimal_manifest_loads_and_validates(tmp_path):
     assert m.resolved_default() == "p150x4"
 
 
+def test_auxiliary_weights_are_published_with_their_exact_pins():
+    """A drafter/adapter is part of the reproducible runtime, not a README prerequisite."""
+    m = _mani(
+        auxiliary_weights=[
+            "org/plain-aux",
+            {
+                "repo": "org/pinned-aux",
+                "revision": "deadbeef",
+                "allow_patterns": ["*.safetensors"],
+                "ignore_patterns": ["*.bin"],
+            },
+        ]
+    )
+    m.validate_semantics()
+    wire = m.to_wire(image_tag="t:1", tt_metal_version="v", tt_kernel_version="0.1.0")
+
+    assert [(w.repo_id, w.revision) for w in wire.auxiliary_weights] == [
+        ("org/plain-aux", None),
+        ("org/pinned-aux", "deadbeef"),
+    ]
+    assert wire.auxiliary_weights[1].allow_patterns == ["*.safetensors"]
+    assert wire.auxiliary_weights[1].ignore_patterns == ["*.bin"]
+
+
+def test_auxiliary_weights_must_be_namespaced_and_unique():
+    with pytest.raises(ContainerManifestError, match="auxiliary_weights.*namespaced HF id"):
+        _mani(auxiliary_weights=["bare-name"]).validate_semantics()
+    with pytest.raises(ContainerManifestError, match="duplicate weight repositories"):
+        _mani(auxiliary_weights=["org/aux", {"repo": "org/aux", "revision": "v2"}]).validate_semantics()
+    with pytest.raises(ContainerManifestError, match="duplicate weight repositories"):
+        _mani(auxiliary_weights=["org/Weights-7B"]).validate_semantics()
+
+
 def test_profile_inherits_serve_defaults():
     """`serve:` is the shared block; a profile that omits a field inherits it."""
     merged = _mani().resolve_profile("p150x4")

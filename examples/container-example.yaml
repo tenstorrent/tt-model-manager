@@ -13,6 +13,11 @@ name: my-model
 # from the ones you validated — pin a revision to prevent that:
 #   weights: {repo: org/Weights-7B, revision: <sha>, ignore_patterns: ["*.pt"]}
 weights: org/Weights-7B
+# Optional additional checkpoints required by the runtime, such as a speculative-decoding
+# drafter or adapter. `pull --with-weights` and `serve` prefetch every entry into the same
+# host HF cache, and each may be pinned independently:
+auxiliary_weights:
+  - {repo: org/Drafter-Weights, revision: <sha>}
 # The serving stack inside the image:
 #   vllm-plugin  stock vLLM from PyPI + the standalone tenstorrent/vllm-tt-plugin.
 #                Upstream vLLM's platform-plugin API means a hardware backend no longer

@@ -1084,6 +1084,22 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         targets = " or ".join(f"**{p.hardware}**" for p in profiles if p.hardware)
         lines += [f"Runs on {targets} — see the serve profiles below.", ""]
 
+    weight_refs = [m.weights_ref] + m.auxiliary_weight_refs
+    weight_links = [
+        f"[`{ref.repo_id}`](https://huggingface.co/{ref.repo_id})"
+        + (f" at `{ref.revision}`" if ref.revision else "")
+        for ref in weight_refs
+    ]
+    if len(weight_links) == 1:
+        weight_description = f"the {weight_links[0]} weights"
+    else:
+        count_words = {2: "both", 3: "all three", 4: "all four"}
+        count = count_words.get(len(weight_links), f"all {len(weight_links)}")
+        weight_description = (
+            f"automatically downloads {count} required checkpoints: "
+            + ", ".join(weight_links)
+        )
+
     lines += [
         f"Packaged and published with [tt-model-manager]({TT_MODEL_MANAGER_URL}) "
         f"{built.get('tt_model_version', '')} (manifest schema {m.schema_version}).",
@@ -1095,9 +1111,7 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         f"tt-model serve {m.repo}",
         "```",
         "",
-        f"`pull --with-weights` downloads the Docker image and the "
-        f"[`{m.weights_repo}`](https://huggingface.co/{m.weights_repo}) weights"
-        + (f" at `{m.weights_ref.revision}`" if m.weights_ref.revision else "")
+        f"`pull --with-weights` downloads the Docker image and {weight_description}"
         + " (into your HF cache; they are not in the image). `serve` starts "
         # DEFAULT_PORT, never the manifest's `port`. The two commands above are
         # `tt-model serve`, and serve deliberately ignores the manifest port as a seed:

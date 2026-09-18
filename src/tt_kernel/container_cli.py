@@ -524,7 +524,7 @@ def _space_preflight(ref) -> None:
     )
 
 
-def _weights_notice(manifest: Manifest, target: Optional[str]) -> None:
+def _weights_notice(ref, target: Optional[str]) -> None:
     """Say so when serve is about to boot without the weights on the host.
 
     The in-container fetch is a supported path — the HF cache is bind-mounted, so the bytes
@@ -536,7 +536,6 @@ def _weights_notice(manifest: Manifest, target: Optional[str]) -> None:
     The caller has already established that the weights are missing — it consulted the cache
     to decide whether to fetch at all — so this does not re-check.
     """
-    ref = manifest.weights
     at = f"@{ref.revision[:8]}" if ref.revision else ""
     head = (f"weights {ref.repo_id}{at} are not in your local HF cache; the model will "
             f"download them inside the container at first load (slower, and no progress is "
@@ -572,36 +571,37 @@ def ensure_weights(manifest: Manifest, target: Optional[str], *,
     Downloading is skipped, with the advisory note, when the user forbade it (``no_weights``)
     or forbade the network (``local_only``).
     """
-    ref = manifest.weights
-    if ref is None:
+    refs = manifest.weight_refs
+    if not refs:
         return
-    at = f"@{ref.revision[:8]}" if ref.revision else ""
-    if no_weights or local_only:
-        # The one place a local verdict is still needed, because fetching is off the table.
-        # `.incomplete` blobs are checked too: a resolvable-but-partial snapshot would
-        # otherwise read as present and cost the user the warning.
-        if _cached_locally(ref) is None or has_partial_download(ref):
-            _weights_notice(manifest, target)
-        else:
-            console.note(f"weights {ref.repo_id}{at} already on host", marker="•")
-        return
+    for ref in refs:
+        at = f"@{ref.revision[:8]}" if ref.revision else ""
+        if no_weights or local_only:
+            # The one place a local verdict is still needed, because fetching is off the table.
+            # `.incomplete` blobs are checked too: a resolvable-but-partial snapshot would
+            # otherwise read as present and cost the user the warning.
+            if _cached_locally(ref) is None or has_partial_download(ref):
+                _weights_notice(ref, target)
+            else:
+                console.note(f"weights {ref.repo_id}{at} already on host", marker="•")
+            continue
 
-    label = f"weights {ref.repo_id}{at}"
-    if has_partial_download(ref):
-        # "Resuming" reads as a stall otherwise, and the user is owed the reason their last
-        # attempt left bytes behind here.
-        label += " — resuming a partial download"
-    _space_preflight(ref)
+        label = f"weights {ref.repo_id}{at}"
+        if has_partial_download(ref):
+            # "Resuming" reads as a stall otherwise, and the user is owed the reason their last
+            # attempt left bytes behind here.
+            label += " — resuming a partial download"
+        _space_preflight(ref)
 
-    try:
-        # progress_bridge silences HF's own tqdm/xet writers and returns the tqdm_class that
-        # routes their byte counts into the activity row -- the same treatment
-        # `hub.download_bundle` gets. Without it this download writes bars straight to the
-        # terminal, on top of whatever else owns the line.
-        with console.step(label) as st, hub.progress_bridge(label) as tqdm_class:
-            st.detail(str(_download_weights(ref, tqdm_class=tqdm_class)))
-    except Exception as e:  # noqa: BLE001
-        _weights_failed(ref, e, target)
+        try:
+            # progress_bridge silences HF's own tqdm/xet writers and returns the tqdm_class that
+            # routes their byte counts into the activity row -- the same treatment
+            # `hub.download_bundle` gets. Without it this download writes bars straight to the
+            # terminal, on top of whatever else owns the line.
+            with console.step(label) as st, hub.progress_bridge(label) as tqdm_class:
+                st.detail(str(_download_weights(ref, tqdm_class=tqdm_class)))
+        except Exception as e:  # noqa: BLE001
+            _weights_failed(ref, e, target)
 
 
 def _weights_failed(ref, exc: BaseException, target: Optional[str]) -> None:
@@ -1337,12 +1337,14 @@ def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = Fal
     _purge_hf(repo_id, "package snapshot")
 
     # 6. weights, only when asked
-    if manifest.weights:
+    if manifest.weight_refs:
         if include_weights:
-            _purge_hf(manifest.weights.repo_id, f"weights {manifest.weights.repo_id}")
+            for ref in manifest.weight_refs:
+                _purge_hf(ref.repo_id, f"weights {ref.repo_id}")
         else:
+            repos = ", ".join(ref.repo_id for ref in manifest.weight_refs)
             console.note(
-                f"weights kept ({manifest.weights.repo_id}) — shared with other models, "
+                f"weights kept ({repos}) — shared with other models, "
                 "and not part of this package. --include-weights removes them too",
                 marker="○",
             )

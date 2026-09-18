@@ -442,6 +442,18 @@ def test_the_card_says_weights_are_not_baked_in():
     assert "not in the image" in _card()
 
 
+def test_the_card_names_every_auxiliary_weight_and_pin():
+    card = _card(
+        auxiliary_weights=[
+            {"repo": "org/drafter", "revision": "deadbeef"},
+            "org/adapter",
+        ]
+    )
+    assert "[`org/drafter`](https://huggingface.co/org/drafter) at `deadbeef`" in card
+    assert "[`org/adapter`](https://huggingface.co/org/adapter)" in card
+    assert "automatically downloads all three" in card
+
+
 def test_the_card_includes_the_authors_quickstart():
     assert "point it here" in _card(card={"quickstart": "point it here"}).lower()
 

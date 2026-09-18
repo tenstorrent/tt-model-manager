@@ -602,6 +602,36 @@ def hub_cache() -> Path:
         return hf_home() / "hub"
 
 
+def _container_hub_cache(hf: Path, hub: Path) -> Path:
+    """Return the path at which ``hub`` is visible inside the container.
+
+    ``compose_run`` mounts HF_HOME at ``/hf`` and, only when the hub cache lives
+    elsewhere, mounts that cache at ``/hf-hub``.  Pinned model snapshots must use
+    that same mapping: handing an offline runtime only the repo id makes
+    ``snapshot_download`` look for a moving ``refs/main`` even though tt-model
+    fetched the exact manifest revision.
+    """
+    if _is_within(hub, hf):
+        relative = hub.resolve().relative_to(hf.resolve())
+        return Path("/hf") / relative
+    return Path("/hf-hub")
+
+
+def _pinned_primary_snapshot(m: Manifest, hf: Path, hub: Path) -> Optional[str]:
+    """Exact primary-weight snapshot path as mounted in the container.
+
+    Hugging Face stores model repositories under ``models--ORG--NAME``.  A
+    published revision is normally an immutable commit hash, so its snapshot
+    directory has the same name.  ``ensure_weights`` runs before ``docker run``
+    and guarantees this path exists for a normal serve.
+    """
+    ref = m.weights
+    if ref is None or not ref.revision or ref.repo_type != "model":
+        return None
+    folder = "models--" + ref.repo_id.replace("/", "--")
+    return str(_container_hub_cache(hf, hub) / folder / "snapshots" / ref.revision)
+
+
 def _safe_name(name: str) -> str:
     """Refuse a name that would escape the managed cache dir when used as a path component.
 
@@ -762,6 +792,12 @@ def compose_run(
         # being written into an argv that `--print` would display and `ps` would leak.
         cmd += ["--env", "HF_TOKEN"]
     merged_env = dict(env)
+    pinned_primary = _pinned_primary_snapshot(m, hf, hub)
+    if pinned_primary is not None and merged_env.get("HF_MODEL") == m.weights.repo_id:
+        # The vLLM launcher also passes --revision for its own config resolution.
+        # TT model adapters independently read HF_MODEL, so point that second
+        # consumer at the very same mounted snapshot instead of refs/main.
+        merged_env["HF_MODEL"] = pinned_primary
     if device_ids is not None and len(device_ids) == 1:
         # A lone chip that is physically one ASIC of a multi-chip board (e.g. one half of a
         # P300) reports its real board type (P300, not P150) to tt-metal's Cluster bring-up,

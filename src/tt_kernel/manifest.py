@@ -431,6 +431,15 @@ class Manifest(BaseModel):
     device_count: int = 1
     producer: Producer
     weights: Optional[WeightsRef] = None
+    # Additional checkpoints required by the runtime (for example speculative-decoding
+    # drafter weights). They share the host HF cache with the primary weights and remain
+    # pointers: no model weights are embedded in the bundle or OCI image.
+    auxiliary_weights: List[WeightsRef] = Field(default_factory=list)
+
+    @property
+    def weight_refs(self) -> List[WeightsRef]:
+        """Every checkpoint the runtime needs, primary first and then auxiliaries."""
+        return ([self.weights] if self.weights is not None else []) + list(self.auxiliary_weights)
 
     # Shared serving blocks — rendered into the plugin-owned vllm_metadata.json at pull/serve.
     mesh: Optional[Mesh] = None

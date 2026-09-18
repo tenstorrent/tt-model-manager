@@ -330,6 +330,11 @@ class VllmPluginLauncher:
 
     def serve_argv(self, m: Manifest, profile: ServeProfile) -> List[str]:
         argv = ["vllm", "serve", _weights_id(m)]
+        if m.weights is not None and m.weights.revision:
+            # Resolve the exact snapshot tt-model prefetched.  Without this,
+            # offline vLLM asks the HF cache for refs/main and a pristine cache
+            # containing only the pinned snapshot fails during boot.
+            argv += ["--revision", m.weights.revision]
         if profile.max_model_len is not None:
             argv += ["--max-model-len", str(profile.max_model_len)]
         argv += ["--max-num-seqs", str(profile.max_num_seqs)]

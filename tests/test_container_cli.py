@@ -1420,6 +1420,24 @@ def test_include_weights_purges_them_too(tmp_path, monkeypatch):
     assert purged == ["org/x", "org/Weights-7B"]
 
 
+def test_include_weights_purges_auxiliary_weights_too(tmp_path, monkeypatch):
+    m = _manifest(
+        tmp_path,
+        auxiliary_weights=[
+            {"repo": "org/drafter", "revision": "draft-pin"},
+            "org/adapter",
+        ],
+    )
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
+    purged = []
+    monkeypatch.setattr(container_cli, "_purge_hf", lambda r, w: purged.append(r))
+
+    container_cli.remove_container("org/x", m, include_weights=True)
+
+    assert purged == ["org/x", "org/Weights-7B", "org/drafter", "org/adapter"]
+
+
 def test_hf_cache_dir_uses_hubs_own_layout(tmp_path, monkeypatch):
     """Computed with hub's helpers, not a formatted path, so HF_HOME and any future
     layout change are followed."""
@@ -2070,6 +2088,32 @@ def test_serve_fetches_missing_weights_before_starting_the_container(tmp_path, m
     assert order == ["download", "docker run"]
 
 
+def test_serve_prefetches_primary_and_auxiliary_weights_in_declared_order(tmp_path, monkeypatch):
+    """One serve must make every pinned checkpoint available in the shared HF cache."""
+    order = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: order.append("docker run"))
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    monkeypatch.setattr(
+        container_cli,
+        "_download_weights",
+        lambda ref, **kw: order.append((ref.repo_id, ref.revision)) or Path("/hf/x"),
+    )
+    container_cli.serve_container(
+        _manifest(
+            tmp_path,
+            weights={"repo": "org/main", "revision": "main-pin"},
+            auxiliary_weights=[{"repo": "org/drafter", "revision": "draft-pin"}],
+        ),
+        target="org/m",
+    )
+    assert order == [
+        ("org/main", "main-pin"),
+        ("org/drafter", "draft-pin"),
+        "docker run",
+    ]
+
+
 
 def test_serve_refuses_when_the_disk_cannot_hold_the_weights(tmp_path, monkeypatch):
     """Two numbers before anything starts, instead of ENOSPC halfway through a 360 GB
@@ -2115,6 +2159,25 @@ def test_no_weights_keeps_the_in_container_download(tmp_path, monkeypatch, capsy
     out = capsys.readouterr().out
     assert "not in your local HF cache" in out
     assert "hf download org/w" in out
+
+
+def test_no_weights_reports_each_missing_auxiliary_checkpoint(tmp_path, monkeypatch, capsys):
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "_cached_locally", lambda ref: None)
+    monkeypatch.setattr(container_cli, "has_partial_download", lambda ref: False)
+    container_cli.serve_container(
+        _manifest(
+            tmp_path,
+            weights={"repo": "org/main"},
+            auxiliary_weights=[{"repo": "org/drafter", "revision": "draft-pin"}],
+        ),
+        target="org/m",
+        no_weights=True,
+    )
+    out = capsys.readouterr().out
+    assert "org/main" in out
+    assert "org/drafter@draft-p" in out
+    assert "hf download org/drafter --revision draft-pin" in out
 
 
 def test_local_only_never_reaches_the_network_for_weights(tmp_path, monkeypatch, capsys):
