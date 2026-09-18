@@ -24,10 +24,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.10 is the real floor: the CLI tests read `result.stderr`, which needs click's
+        # 3.10 is the floor: the CLI tests read `result.stderr`, which needs click's
         # separated-stderr CliRunner (click >= 8.2, itself Python >= 3.10). `pyproject`
-        # still says requires-python >= 3.9, but `uv --locked` resolves an older click on
-        # 3.9 and 6 tests fail — tracked separately from this CI change.
+        # declares the same floor (#120), and `tests/test_python_floor.py` fails if this
+        # matrix and that declaration ever drift apart again.
         python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
