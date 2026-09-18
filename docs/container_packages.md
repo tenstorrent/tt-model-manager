@@ -12,8 +12,7 @@ image.
 |---|---|---|---|
 | **v5** self-contained | the author's `ttnn`/vLLM/plugin **wheels** + a `tt-metal-community` tree | a Tenstorrent card + firmware | the consumer, at `pull` (wheels installed into the bundle's own venv) |
 | **v5.1** container | an **OCI image** with OS + TT-Metalium + vLLM + plugin + code baked in | **Docker** + a Tenstorrent card | the **author**, once, at `package` (build time) |
-| **v6** thin | a pinned pip spec no wheels needed | a Tenstorrent card + firmware + SFPI | the consumer, at `pull` (a pinned venv built inside the bundle from pip pins) |
-
+| **v6** thin | a pinned pip spec plus wheels installed by path (the vllm-tt-plugin, and any custom-op / models wheels); no vLLM engine fork | a Tenstorrent card + firmware + SFPI | the consumer, at `pull` (a pinned venv built inside the bundle from pip pins) |
 
 v5 and v6 assemble the platform on the consumer's host, so the host's glibc and architecture have
 to cooperate. v5.1 moves the assembly to the author: the image is built once, and nothing about
