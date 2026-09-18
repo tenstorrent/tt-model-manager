@@ -845,6 +845,57 @@ def test_push_uploads_the_whole_directory_with_the_large_folder_uploader(tmp_pat
     assert Path(seen["folder"]) == out
 
 
+def test_repoint_card_quickstart_swaps_only_the_command_lines(tmp_path):
+    """#109: only the two quickstart command lines name the repo, so an exact swap is complete."""
+    card = ("# my-model\n\n## Quickstart\n\n```bash\n"
+            "tt-model pull  authored/x --with-weights\n"
+            "tt-model serve authored/x\n```\n"
+            "some prose mentioning authored/x that must NOT change.\n")
+    readme = tmp_path / "README.md"
+    readme.write_text(card)
+    assert container_cli._repoint_card_quickstart(readme, "authored/x", "override/y") is True
+    out = readme.read_text()
+    assert "tt-model pull  override/y --with-weights" in out
+    assert "tt-model serve override/y" in out
+    assert "prose mentioning authored/x" in out              # prose is left untouched
+    # a no-op when the repo is unchanged, and no write of an identical file
+    assert container_cli._repoint_card_quickstart(readme, "override/y", "override/y") is False
+
+
+def test_push_container_repoints_the_card_when_repo_is_overridden(tmp_path, monkeypatch):
+    """A `push --repo <other>` must publish a card whose quickstart names <other>, not the
+    repo the package was built for — otherwise the published card 404s (#109)."""
+    monkeypatch.setattr(hub, "push_large_folder", lambda *a, **k: None)
+    out = _staged(tmp_path, repo="tenstorrent/devstral")      # built.repo == what the card used
+    (out / "README.md").write_text(
+        "## Quickstart\n```bash\n"
+        "tt-model pull  tenstorrent/devstral --with-weights\n"
+        "tt-model serve tenstorrent/devstral\n```\n")
+    container_cli.push_container(str(out), container_cli.is_package_dir(out), "anirud/devstral")
+    card = (out / "README.md").read_text()
+    assert "tt-model serve anirud/devstral" in card
+    assert "tenstorrent/devstral" not in card                # the stale repo is gone
+
+
+def test_a_rendered_card_repoints_cleanly_end_to_end(tmp_path):
+    """Guards format drift: the strings _repoint_card_quickstart swaps must match what
+    render_model_card actually emits. Render a real card, repoint it, check the quickstart."""
+    from tt_kernel import build
+
+    raw = json.loads(json.dumps(BASE))
+    raw["repo"] = "authored/model"
+    m = ContainerManifest.model_validate(raw)
+    m.validate_semantics()
+    readme = tmp_path / "README.md"
+    readme.write_text(build.render_model_card(m, {"repo": m.repo, "tt_metal": {}}))
+    assert "tt-model serve authored/model" in readme.read_text()   # sanity: rendered as authored
+    assert container_cli._repoint_card_quickstart(readme, "authored/model", "pushed/model") is True
+    out = readme.read_text()
+    assert "tt-model pull  pushed/model --with-weights" in out
+    assert "tt-model serve pushed/model" in out
+    assert "authored/model" not in out
+
+
 def test_push_refuses_a_directory_whose_image_is_not_an_oci_layout(tmp_path, monkeypatch):
     out = _staged(tmp_path, with_layout=False)
     with pytest.raises(container_cli.ContainerCliError, match="not an OCI layout"):

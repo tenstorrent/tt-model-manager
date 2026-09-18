@@ -153,17 +153,45 @@ def is_package_dir(path: Path) -> Optional[Manifest]:
     return m if m.is_container else None
 
 
+def _repoint_card_quickstart(readme: Path, old_repo: str, new_repo: str) -> bool:
+    """Rewrite the model card's Quickstart from ``old_repo`` to ``new_repo``; True if changed.
+
+    ``render_model_card`` bakes the manifest's repo into the ``tt-model pull``/``serve`` lines
+    at PACKAGE time, before any ``push --repo`` override is known. Left as-is, a push to a
+    different repo publishes a card whose quickstart tells the reader to pull a repo that is
+    not there (issue #109). Those two command lines are the ONLY place the card names the repo,
+    so an exact swap is complete and safe.
+    """
+    if old_repo == new_repo or not readme.is_file():
+        return False
+    text = readme.read_text()
+    swapped = (text.replace(f"tt-model pull  {old_repo} --with-weights",
+                            f"tt-model pull  {new_repo} --with-weights")
+                   .replace(f"tt-model serve {old_repo}", f"tt-model serve {new_repo}"))
+    if swapped == text:
+        return False
+    readme.write_text(swapped)
+    return True
+
+
 def push_container(staged_dir: str, manifest: Manifest, repo_id: str) -> None:
     """Upload a staged container package directory to the Hub.
 
-    The caller owns repo creation and visibility (``_ensure_repo`` in the CLI), so this
-    only moves bytes. The model card is already written into the directory by ``package``
-    and carries its own tags, so nothing here rewrites it — ``tag_repo`` would clobber it.
+    The caller owns repo creation and visibility (``_ensure_repo`` in the CLI), so this only
+    moves bytes and does not touch the card's tags — ``tag_repo`` would clobber them. It does
+    repoint the card's Quickstart to ``repo_id`` when a ``push --repo`` sends the package to a
+    repo other than the one it was packaged for, so the published card names where it actually
+    lives rather than the authored source (issue #109).
     """
     out = Path(staged_dir)
     image_dir = out / "image"
     spec = manifest.container
     assert spec is not None
+
+    # Rendered at package time with the manifest's repo; realign it with the real target.
+    card_repo = (spec.built or {}).get("repo")
+    if isinstance(card_repo, str) and _repoint_card_quickstart(out / "README.md", card_repo, repo_id):
+        console.note(f"repointed the card's quickstart to {repo_id}", marker="•")
 
     if spec.image.is_hub_hosted:
         if not (image_dir / "oci-layout").is_file():
