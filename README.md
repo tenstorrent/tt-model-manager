@@ -46,13 +46,9 @@ walks through the five steps in order:
 
 ## Package formats
 
-A bundle is an HF **model** repo that carries or pins the whole serving stack. There are three
-kinds. All three are served with the same `tt-model serve` command.
+A bundle is an HF **model** repo that carries or pins the whole serving stack. There are two
+kinds. Both are served with the same `tt-model serve` command.
 
-- **v5 self-contained** (recommended). Embeds the author's built `ttnn` wheel (custom kernels
-  compiled in), the vLLM and plugin wheels, and the author's `tt-metal-community` tree. The
-  consumer builds a venv from them at `pull`. Author it with `tt-model package`.
-  Reference: [docs/self_contained_packages.md](docs/self_contained_packages.md).
 - **v5.1 container**. Ships the whole platform as an Open Container Initiative (OCI) image. The
   consumer needs Docker and a Tenstorrent PCIe card. Authored from a single `tt-model.yaml` with
   `tt-model package --container`.
@@ -61,7 +57,7 @@ kinds. All three are served with the same `tt-model serve` command.
   Author it with `tt-model package-thin`.
   Reference: [docs/thin_packages.md](docs/thin_packages.md).
 
-`tt-model` refuses pre-v5 bundles. Re-publish them with a current `tt-model`.
+`tt-model` refuses bundles published with an older schema. Re-publish them with a current `tt-model`.
 
 ## Documentation
 
@@ -70,7 +66,6 @@ kinds. All three are served with the same `tt-model serve` command.
 | [docs/E2E_RECIPE.md](docs/E2E_RECIPE.md) | Step-by-step: bring-up, package, push, pull, serve, verify, with troubleshooting |
 | [docs/cli.md](docs/cli.md) | Every `tt-model` command with its common flags |
 | [docs/publishing.md](docs/publishing.md) | push vs. public vs. publish, the community catalog, how compatibility is checked |
-| [docs/self_contained_packages.md](docs/self_contained_packages.md) | v5 design, layout, and testing reference |
 | [docs/container_packages.md](docs/container_packages.md) | v5.1 container packages: `tt-model.yaml`, serving, how the container runs, and design notes |
 | [docs/thin_packages.md](docs/thin_packages.md) | v6 thin bundles (draft) |
 | [docs/multi_host_mesh.md](docs/multi_host_mesh.md) | Multi-host (cross-box) mesh design note (issue #87) |

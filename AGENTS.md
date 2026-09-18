@@ -22,26 +22,18 @@ violates one of these is wrong even if tests pass:
    with `tt-model` alone; the host needs only a Tenstorrent PCIe card and firmware (plus SFPI, an
    externally managed host dep). Do not add a dependency on `tt-cli`; `tt-cli` is an *optional*
    wrapper that calls `tt-model`; `tt-model` does not call `tt-cli`. **There is no host provisioning.** Every
-   bundle builds its OWN per-model venv (v5 from embedded wheels, v6 from pip pins), so
-   `tt-model` does not install a shared platform and does not rely on a pre-installed
-   TT-Metalium™ or vLLM on the host. The compatibility check stays strictly declarative: it
+   bundle builds its OWN per-model venv (v6 from pip pins), so `tt-model` does not install a
+   shared platform and does not rely on a pre-installed TT-Metalium™ or vLLM on the host. The compatibility check stays strictly declarative: it
    discovers the target arch and machine and reports a verdict; it does not provision.
 2. **Distribution is Hugging Face.** Bundles are HF `model` repos; large
    binaries go to Git Large File Storage (LFS) via `hub.upload_folder`. Do not add Release-based
    or ad-hoc download flows.
 3. **Weights are a pointer and are not embedded** (`WeightsRef` = HF repo id). Do not stage
    weights into a bundle.
-4. **Three bundle schemas, all self-contained.**
-   - A **v5 "fat"** bundle (schema `5`, the `bundled` block, authored with `tt-model package`)
-     ships the author's built artifacts: their `ttnn` wheel (custom kernels compiled in), an
-     empty-target vLLM wheel, the plugin wheel, plus their modified `tt-metal-community` tree,
-     installed into a fresh venv by `install.sh`. Always serves via vLLM (v5 has no `kind`
-     concept).
+4. **Two bundle schemas, both self-contained.**
    - A **v5.1 container** bundle (the `container` block) ships the platform as an Open Container
      Initiative (OCI) image rather than a venv, so the consumer needs only Docker and a
-     Tenstorrent card. It is a point release of v5 because it makes the same promise (a package
-     needing no host TT-Metalium) by a stronger mechanism. That numbering left the whole number
-     free for v6.
+     Tenstorrent card.
    - A **v6 "thin"** bundle (schema `6`, the `deps` block, authored with `tt-model package-thin`)
      builds the venv from pip pins (`ttnn` / `tt-metal-models`) plus bundled wheels, with no
      embedded `ttnn` wheel and no `metal/` tree. `deps.kind` picks the serving front end
@@ -53,10 +45,10 @@ violates one of these is wrong even if tests pass:
      same-named v5.1 CONTAINER kind (`launchers.TtDitServerLauncher`).
 
    In every case the engine that serves is the one the bundle builds rather than a shared host install.
-5. **Manifest support is v5 + v5.1 + v6.** `manifest.py`'s `SUPPORTED_SCHEMAS` is
-   `{"5", "5.1", "6"}`. A bundle with any other `schema_version` is refused ("re-publish the
-   bundle with a current `tt-model`") rather than silently half-read. Bump `SCHEMA_VERSION` only
-   for a genuinely new authored schema.
+5. **Manifest support is gated on `SUPPORTED_SCHEMAS`.** A bundle whose `schema_version` is not
+   in `manifest.py`'s `SUPPORTED_SCHEMAS` is refused ("re-publish the bundle with a current
+   `tt-model`") rather than silently half-read. Bump `SCHEMA_VERSION` only for a genuinely new
+   authored schema.
 
 ## Serve-path facts the code encodes (regressions here are silent and expensive)
 - The shipped `ttnn` wheel must bundle `_ttnncpp.so`. Locate ttnn via
@@ -68,9 +60,6 @@ violates one of these is wrong even if tests pass:
 - Single-chip runs disable fabric and set `TT_METAL_VISIBLE_DEVICES=0`.
 - The serving contract is the plugin's `EXTRA_MODELS_DIR`: `vllm_metadata.json` in a per-model
   *subfolder* (`vllm_models/<name>/`) rather than the bundle root.
-- The glibc floor is real (v5). Build and repair the engine wheel on the **oldest** target
-  (Ubuntu 22.04, glibc 2.35) to serve both 22.04 and 24.04. A wheel repaired on 24.04 is
-  24.04-only.
 
 ## Workflow for a fix
 1. Branch: `fix/<slug>` or `feat/<slug>` off `main`.
@@ -81,7 +70,8 @@ violates one of these is wrong even if tests pass:
    pytest            # expected: all pass (no hardware, no network)
    ```
 5. If the change touches the serve or device path, validate on hardware (see
-   `docs/self_contained_packages.md`, Testing): package, pull, serve, `curl`.
+   `docs/thin_packages.md`, Testing it in the lab, or the `tt-model-package-test` skill for a
+   container package): package, pull, serve, `curl`.
 6. Commit messages: imperative subject, a short body explaining *why*, and end with a
    `Co-Authored-By` trailer naming the assistant that produced the change, for example
    `Co-Authored-By: <assistant name> <noreply@anthropic.com>`.
@@ -92,7 +82,7 @@ violates one of these is wrong even if tests pass:
 `hub.py` (HF push/pull and catalog listing), `runtime.py` (`download_weights`,
 `install_self_contained`), `packaging.py` (`stage_package`, `render_install_sh`,
 `render_run_sh`: the running-folder layout and the EXTRA_MODELS_DIR / `vllm_metadata.json`
-render), `manifest.py` (the v5/v6 schema and `compare()`, the compatibility verdict),
+render), `manifest.py` (the bundle manifest schema and `compare()`, the compatibility verdict),
 `metal.py`/`device.py` (arch and machine detection), `localdb.py` (installed-bundle bookkeeping).
 Prefer extending these over new parallel code paths.
 
@@ -141,33 +131,21 @@ for Codex under `.codex/skills/`): `tt-model-yaml` authors the manifest from a v
 bring-up; `tt-model-package-test` builds it, serves it on hardware, proves the API works (tool
 calling included), and pushes. Prefer them over improvising the flow.
 
-There are **two venv-based authoring paths**, both self-contained (a consumer needs only a card
-and firmware). Pick the one the user's host supports:
+There is one **venv-based authoring path**, also self-contained (a consumer needs only a card
+and firmware):
 
-- **v5 "fat"**: `tt-model package …` embeds the author's built artifacts (their `ttnn` wheel,
-  an empty-target vLLM wheel, the plugin wheel, their `tt-metal-community` tree). Runnable end to
-  end as of PR #24. Design: [docs/self_contained_packages.md](docs/self_contained_packages.md);
-  copy-paste recipe: [docs/E2E_RECIPE.md](docs/E2E_RECIPE.md).
 - **v6 "thin"**: `tt-model package-thin …` builds the venv from pip pins (`ttnn` /
   `tt-metal-models`) plus bundled wheels (`vllm-tt-plugin` plus any `generic_op`). Gated on
   `tt-metal-models` publishing (`tt-metal#54478`) and `tt_transformers` being broken out; the
   generated `requirements.txt` ships with a TODO pin until then. Design:
-  [docs/thin_packages.md](docs/thin_packages.md).
+  [docs/thin_packages.md](docs/thin_packages.md); copy-paste recipe:
+  [docs/E2E_RECIPE.md](docs/E2E_RECIPE.md).
 
 ### The canonical sequence
 
-The same four steps for both paths. Only the first command differs (`package` for v5,
-`package-thin` for v6):
-
 1. **Bring up** the model on `tt-metal-community`.
-2. **package** (producer, v5). Pushes to HF unless you pass `--out <dir>` to stage locally:
-   ```
-   tt-model package <org>/<name> --from-metal <dir> --wheels-dir <dir> --arch <isa> \
-     --arch-name <HFArch> --main-class <module:Class> --weights <hf-id> --mesh <mesh> \
-     --vendor-deps --repair
-   ```
-   **package-thin** (producer, v6). Omit `--requirements` and it writes the template with the
-   `tt-metal-models` TODO pin:
+2. **package-thin** (producer). Pushes to HF unless you pass `--out <dir>` to stage locally.
+   Omit `--requirements` and it writes the template with the `tt-metal-models` TODO pin:
    ```
    tt-model package-thin <org>/<name> --model-py model.py --requirements requirements.txt \
      [--plugin-wheel …] [--ops-wheel …] --arch <isa> --arch-name <HFArch> \
@@ -177,8 +155,8 @@ The same four steps for both paths. Only the first command differs (`package` fo
 4. **serve** (consumer): `tt-model serve <org>/<name> [--port N] [--print] [--local-only]`.
 5. **verify**: `curl .../v1/chat/completions` returns coherent text.
 
-There is no `install`, `run`, or `start` command. `package` and `package-thin` push; `pull`
-installs; `serve` installs then serves. `tt-model push` exists only for a staged v5.1 container
+There is no `install`, `run`, or `start` command. `package-thin` pushes; `pull` installs;
+`serve` installs then serves. `tt-model push` exists only for a staged v5.1 container
 directory. See the pass-through rule in [docs/cli.md](docs/cli.md#run-a-model) for which `serve`
 options are its own and which go to vLLM.
 
@@ -194,16 +172,13 @@ above in a suggested workflow. In particular:
   and system libc: interpreter (`.python/`), venv, engine, and caches all live inside. Do not
   point the model at a shared or system cache to "fix" something.
 - Weights are a pointer (`--weights <hf-id>`).
-- The engine is what the bundle builds: v5 serves the author's `ttnn` wheel (kernels compiled in,
-  made portable with `auditwheel --repair`); v6 builds it from the pinned deps. Do not substitute
-  a stock or pinned wheel into a v5 bundle.
+- The engine is what the bundle builds: v6 builds it from the pinned deps.
 
 ### Verification checkpoints: do not claim success without them
 
-- **After package (v5):** the bundle has `wheels/` (including a `manylinux_*` ttnn wheel), `metal/`,
-  `vllm_models/<name>/vllm_metadata.json`, `install.sh`, `run.sh`, `tt_kernel_manifest.json`.
-  For **package-thin (v6):** `model.py`, `requirements.txt`, the bundled `vllm-tt-plugin` (plus
-  any `generic_op`) wheel, `vllm_models/<name>/vllm_metadata.json`, `install.sh`, `run.sh`, manifest.
+- **After package-thin (v6):** the bundle has `model.py`, `requirements.txt`, the bundled
+  `vllm-tt-plugin` (plus any `generic_op`) wheel, `vllm_models/<name>/vllm_metadata.json`,
+  `install.sh`, `run.sh`, `tt_kernel_manifest.json`.
 - **After pull:** `install.sh` succeeded; `<install>/venv/bin/python` exists.
 - **After serve:** the log reaches **`Application startup complete`**. Model load plus JIT warmup
   takes minutes on a single chip; wait rather than declaring failure early. For a container
@@ -235,6 +210,6 @@ Beyond those:
 
 Prefer a clear, actionable message over a silent workaround. If `pull` refuses (glibc,
 interpreter, or arch), the fix is to **repackage on the right OS** rather than to force past the gate.
-Consult the Troubleshooting table in [docs/E2E_RECIPE.md](docs/E2E_RECIPE.md) (v5). For v6, if the
+Consult the Troubleshooting table in [docs/E2E_RECIPE.md](docs/E2E_RECIPE.md). If the
 `tt-metal-models` pin cannot resolve yet, that is the expected gate. The path is not runnable until
 `tt-metal#54478` publishes; see [docs/thin_packages.md](docs/thin_packages.md).

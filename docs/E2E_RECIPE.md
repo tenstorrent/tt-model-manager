@@ -1,19 +1,26 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc. -->
-# End-to-end recipe (v5): package, push, pull, serve
+# End-to-end recipe (v6): package, push, pull, serve
 
-This is the copy-paste recipe for the **v5 self-contained** path. Take a model you have brought
-up on `tt-metal-community`, package it into one self-contained bundle, publish it to the
-Hugging Face (HF) Hub, and let anyone with a Tenstorrent PCIe card pull and serve it. Nothing
-outside the install folder is needed to run it.
+This is the copy-paste recipe for the **v6 thin** path. Take a model you have brought up on
+`tt-metal-community`, package it into one self-contained bundle, publish it to the Hugging Face
+(HF) Hub, and let anyone with a Tenstorrent PCIe card pull and serve it. Nothing outside the
+install folder is needed to run it.
 
-> Scope: **v5 self-contained bundles only.** These ship their own engine and venv. A consumer needs
-> only a Tenstorrent card and its firmware.
+> Scope: **v6 thin bundles only.** These build their own engine and venv from pip pins. A
+> consumer needs only a Tenstorrent card, its firmware, and SFPI.
+
+> **This path is gated on an upstream publish.** It depends on the **models wheel**,
+> `tt-metal-models`, which packages the whole `models/` tree (including `tt_transformers`) for pip
+> and pins `ttnn` exactly ([`tenstorrent/tt-metal#54478`](https://github.com/tenstorrent/tt-metal/pull/54478)).
+> Until `tt-metal#54478` merges and publishes, the generated `requirements.txt` pins `ttnn` directly
+> (it is on PyPI) and carries a `tt-metal-models` TODO pin. Once the wheel publishes, a thin bundle
+> pins that one dep and is runnable end-to-end.
 
 There are two roles:
 
 - **Producer**: the host where the model already serves on `tt-metal-community`.
-- **Consumer**: any host with a Tenstorrent card and firmware. Nothing else is required.
+- **Consumer**: any host with a Tenstorrent card, firmware, and SFPI. Nothing else is required.
 
 ---
 
@@ -22,6 +29,8 @@ There are two roles:
 **Both roles**
 - Linux **x86_64**, Ubuntu **22.04 or 24.04**.
 - A Tenstorrent card with firmware and driver installed (`/dev/tenstorrent/*` present).
+- SFPI (the SFPU programming interface compiler), an externally managed host dependency. See
+  [thin_packages.md](thin_packages.md#host-prerequisites).
 - `tt-model` installed. It is **not on PyPI**; install it from a clone:
   ```bash
   git clone https://github.com/tenstorrent/tt-model-manager && cd tt-model-manager
@@ -29,8 +38,8 @@ There are two roles:
   pip install -e .
   ```
   There is nothing else to provision on the host. Each bundle builds its **own** per-model venv
-  from what it ships or pins, so any `ttnn` or vLLM on the host is not required and is not
-  touched. See the [README](../README.md#install).
+  from what it pins, so any `ttnn` or vLLM on the host is not required and is not touched. See
+  the [README](../README.md#install).
 - Authenticated to HF for push and pull of private repos, either with `tt-model login` or:
   ```bash
   export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -38,10 +47,9 @@ There are two roles:
 
 **Producer only**
 - A working `tt-metal-community` checkout that serves your model.
-- Your **built `ttnn` wheel** (custom C++ and low-level kernel (LLK) code compiled in) and the
-  `vllm_tt_plugin` wheel, in one directory.
-- `auditwheel` and `patchelf` (`pip install auditwheel patchelf`), used to make the engine wheel
-  portable.
+- Your `model.py` runner and a `requirements.txt` of the exact `ttnn` / `tt-metal-models` pins it
+  ran with (`pip freeze` in your working venv gives them).
+- The `vllm_tt_plugin` wheel, plus any `generic_op` custom-op wheel you built.
 
 ---
 
@@ -52,13 +60,8 @@ Two cases:
 - **Stock HF architecture** (Llama, Qwen, Mistral, and others): no code. Run
   `./run_demo.sh <org>/<model-id>`.
 - **New architecture**: implement the novel block against ttnn ops in
-  `models/tt_transformers/tt/`. If you wrote custom C++ or LLK kernels, rebuild *your* `ttnn`
-  wheel so they are compiled in.
-
-> **Cross-Ubuntu tip (build the engine wheel on 22.04):** the packaged `ttnn` wheel is tagged for
-> the glibc of the host it is repaired on. Build and repair on **Ubuntu 22.04 (glibc 2.35)** and one
-> bundle runs on **both 22.04 and 24.04**. Build on 24.04 (glibc 2.39) and it runs on 24.04 only;
-> `pull` refuses it on a 22.04 host with a clear glibc message.
+  `models/tt_transformers/tt/`. If you wrote custom ops, build them as a `generic_op` wheel that
+  `model.py` calls through `ttnn.generic_op(...)`.
 
 When `./run_demo.sh <model>` produces coherent text, you are ready to package.
 
@@ -66,65 +69,69 @@ When `./run_demo.sh <model>` produces coherent text, you are ready to package.
 
 ## Step 1: Package (producer)
 
-`tt-model package` snapshots your built artifacts into one bundle folder and (optionally) pushes it.
-The HF target is a **positional** argument; omit it and pass `--out <dir>` to stage locally first.
+`tt-model package-thin` snapshots your runner, pins, and wheels into one bundle folder and
+(optionally) pushes it. The HF target is a **positional** argument; omit it and pass `--out <dir>`
+to stage locally first.
 
 ```bash
-tt-model package <your-org>/<model-name> \
-  --from-metal /path/to/tt-metal-community \
-  --wheels-dir /path/to/wheels \
+tt-model package-thin <your-org>/<model-name> \
+  --model-py ./model.py \
+  --requirements ./requirements.txt \
+  --plugin-wheel ./vllm_tt_plugin-*.whl \
+  --ops-wheel ./generic_op-*.whl \
   --arch blackhole \
   --arch-name LlamaForCausalLM \
   --main-class models.tt_transformers.tt.generator_vllm:LlamaForCausalLM \
   --weights unsloth/Llama-3.2-3B-Instruct \
-  --mesh P150 \
-  --vendor-deps \
-  --repair
+  --mesh P150
 ```
 
 What the flags mean:
 
 | Flag | Meaning |
 |---|---|
-| `--from-metal <dir>` | your modified `tt-metal-community` tree (embedded as `metal/`) |
-| `--wheels-dir <dir>` | auto-classifies `ttnn-*` / `vllm-*` / `vllm_tt_plugin-*` (or pass `--ttnn-wheel`/`--plugin-wheel` explicitly) |
+| `--model-py <file>` | your runner; `--main-class` resolves against it at serve time |
+| `--requirements <file>` | the `ttnn` / `tt-metal-models` pins. Omit it to have `package-thin` write a template `requirements.txt` |
+| `--plugin-wheel <whl>` | the `vllm_tt_plugin` wheel, installed by path |
+| `--ops-wheel <whl>` | *(optional, repeatable)* custom-op wheels |
 | `--arch` | the card's instruction set architecture (ISA): `blackhole` or `wormhole_b0`. The one **fatal** compatibility gate |
 | `--arch-name` / `--main-class` | the HF architecture and adapter class, written to `vllm_metadata.json` |
 | `--weights <hf-id>` | **pointer** to the weights. The weights are not embedded |
 | `--mesh` | device topology (for example `P150`, `1x4`) |
-| `--vendor-deps` | vendor the full dependency closure so install is **offline and reproducible** (recommended) |
-| `--repair` | run auditwheel so the engine wheel is portable (`$ORIGIN` RPATH, vendored libs). Default |
-| `--manylinux <policy>` | *(optional)* assert a glibc floor, for example `manylinux_2_28_x86_64` (see the cross-Ubuntu tip) |
 | `--out <dir>` | stage locally instead of, or before, pushing |
 
 The result is one HF **model** repo, the "running folder":
 
 ```
-wheels/            your ttnn (+vllm +plugin) wheels + the vendored dep closure   (git-LFS)
-metal/             your modified tt-metal-community tree
+model.py                                  your runner
+requirements.txt                          the ttnn / tt-metal-models pins
+wheels/            vllm-tt-plugin (+ any generic_op) wheels, installed by path   (git-LFS)
 vllm_models/<name>/vllm_metadata.json     the EXTRA_MODELS_DIR contract
-install.sh  run.sh  requirements.txt
-tt_kernel_manifest.json                   the v5 manifest
+install.sh  run.sh
+tt_kernel_manifest.json                   the v6 manifest
 # weights: NOT here. A pointer in the manifest.
 ```
+
+For the full bundle layout, the remaining authoring flags, and the offline tests, see
+**[docs/thin_packages.md](thin_packages.md)**.
 
 ---
 
 ## Step 2: Push (producer)
 
-If you passed a positional `<org>/<model-name>` to `package`, it already pushed. To control
+If you passed a positional `<org>/<model-name>` to `package-thin`, it already pushed. To control
 visibility, pass a flag on the same command:
 
 ```bash
 # package + push in one go (default: private)
-tt-model package <org>/<model-name> ... --public          # or omit for private
+tt-model package-thin <org>/<model-name> ... --public     # or omit for private
 
 # stage first, inspect, then push
-tt-model package ... --out ./bundle                        # no push
+tt-model package-thin ... --out ./bundle                   # no push
 ```
 
-`tt-model push` does not accept a v5 staging directory (it is for v5.1 container packages). To
-push after inspecting a staged folder, re-run `tt-model package` with the positional
+`tt-model push` does not accept a v6 staging directory (it is for v5.1 container packages). To
+push after inspecting a staged folder, re-run `tt-model package-thin` with the positional
 `<org>/<model-name>` and the same flags.
 
 Visibility is tri-state and **a push does not flip it implicitly**. See
@@ -135,20 +142,19 @@ Storage (LFS) automatically.
 
 ## Step 3: Pull (consumer)
 
-On any host with a card and firmware:
+On any host with a card, firmware, and SFPI:
 
 ```bash
 tt-model pull <org>/<model-name>
 ```
 
 This materializes the folder, then runs its `install.sh`, which, **entirely inside the folder**,
-provisions the pinned Python interpreter (via `uv`, into `.python/`), builds the venv, and installs
-the shipped wheels and deps (offline, from `wheels/`, when they were vendored). Weights are fetched
-from the HF pointer. Add `--with-weights` to pre-download them; otherwise they are fetched on
-first serve.
+provisions the pinned Python interpreter (via `uv`, into `.python/`), builds the venv, installs
+the pinned deps, builds the empty-target vLLM, and installs the bundled wheels. Weights are
+fetched from the HF pointer. Add `--with-weights` to pre-download them; otherwise they are fetched
+on first serve.
 
-If the bundle's engine wheel needs a newer glibc than this host has, `pull` stops here with a clear
-message (repackage on Ubuntu 22.04). The same applies if the interpreter or arch do not match.
+If the bundle's `arch` does not match this host's card, `pull` stops here with a clear message.
 
 ---
 
@@ -204,11 +210,11 @@ id from the manifest, which `run.sh` also exports as `HF_MODEL`.)
 
 ## The self-containment guarantee (why this is safe to hand around)
 
-After `pull`, a v5 install is **hermetic**: everything needed to serve lives under the install
-folder: the interpreter, the venv, the engine (with your kernels), the model code, and, on first
-serve, the weights and all caches. Serving depends on nothing outside the folder **except the
-Tenstorrent device and system libc**. The only step that touches the network is `pull` (to fetch
-the interpreter, and, unless `--vendor-deps` was used, the pip deps).
+After `pull`, a v6 install is **hermetic**: everything needed to serve lives under the install
+folder: the interpreter, the venv, the engine, the model code, and, on first serve, the weights
+and all caches. Serving depends on nothing outside the folder **except the Tenstorrent device,
+system libc, and SFPI**. The only step that touches the network is `pull` (to fetch the
+interpreter, the pinned deps, and vLLM's sources unless a prebuilt wheel was bundled).
 
 ---
 
@@ -216,49 +222,12 @@ the interpreter, and, unless `--vendor-deps` was used, the pip deps).
 
 | Symptom | Cause / fix |
 |---|---|
-| `pull` refuses: "needs glibc >= 2.39, host has 2.35" | Engine wheel built on Ubuntu 24.04, host is 22.04. Repackage with the wheel built and repaired on 22.04. |
-| `pull` refuses: interpreter/arch mismatch | The shipped wheels are cp312/linux_x86_64 for a specific ISA. Pull on a matching host, or repackage. |
-| serve: "Failed to infer device type" | ttnn failed to import (static thread-local storage (TLS)). `run.sh` preloads `_ttnncpp.so` from `ttnn.libs/`; ensure the wheel was `--repair`ed. |
+| `pull`: the `tt-metal-models` pin cannot resolve | The models wheel is not published yet (`tt-metal#54478`). Pin `ttnn` directly for now, or build the wheel yourself and ship it with `--models-wheel`. |
+| `pull` refuses: arch mismatch | The bundle targets a specific ISA. Pull on a matching host, or repackage. |
+| serve: "Failed to infer device type" | ttnn failed to import (static thread-local storage (TLS)). `run.sh` preloads `_ttnncpp.so` from `ttnn.libs/`. |
 | serve: "Address already in use" | Another server holds the port. Use `tt-model serve <id> --port 8001`. |
 | Tool calling not working | The bundle must declare `capabilities.tool_parser`; `run.sh` emits `--enable-auto-tool-choice --tool-call-parser <name>`. |
 | Nothing registers in vLLM | `vllm_metadata.json` must live in `vllm_models/<name>/` rather than the bundle root (the plugin scans children). |
 
-See [docs/self_contained_packages.md](self_contained_packages.md) for the design details and the
-offline test commands.
-
----
-
-## v6 (thin): the same flow, gated
-
-There is a second authoring path, **v6 "thin,"** that runs the *same* `pull`, `serve`, `curl` flow
-for the consumer but builds the venv from pip pins instead of embedding the author's `ttnn` wheel
-and `tt-metal-community` tree. Author it with **`tt-model package-thin`**:
-
-```bash
-tt-model package-thin <your-org>/<model-name> \
-  --model-py ./model.py \
-  --requirements ./requirements.txt \
-  --plugin-wheel ./vllm_tt_plugin-*.whl \
-  --ops-wheel ./generic_op-*.whl \
-  --arch blackhole \
-  --arch-name LlamaForCausalLM \
-  --main-class models.tt_transformers.tt.generator_vllm:LlamaForCausalLM \
-  --weights unsloth/Llama-3.2-3B-Instruct \
-  --mesh P150
-```
-
-| Flag | Meaning |
-|---|---|
-| `--requirements` | the `ttnn` / `tt-metal-models` pins. Omit it to have `package-thin` write a template `requirements.txt` |
-| `--plugin-wheel` | the `vllm_tt_plugin` wheel |
-| `--ops-wheel` | *(optional, repeatable)* custom-op wheels |
-
-**This path is gated on an upstream publish.** It depends on the **models wheel**,
-`tt-metal-models`, which packages the whole `models/` tree (including `tt_transformers`) for pip
-and pins `ttnn` exactly ([`tenstorrent/tt-metal#54478`](https://github.com/tenstorrent/tt-metal/pull/54478)).
-Until `tt-metal#54478` merges and publishes, the generated `requirements.txt` pins `ttnn` directly
-(it is on PyPI) and carries a `tt-metal-models` TODO pin. Once the wheel publishes, a thin bundle
-pins that one dep and is runnable end-to-end.
-
-For the full v6 design, the bundle layout, authoring flags, and the offline tests, see
-**[docs/thin_packages.md](thin_packages.md)**.
+See [docs/thin_packages.md](thin_packages.md) for the design details, the bundle layout, and the
+lab test steps.

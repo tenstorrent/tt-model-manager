@@ -56,7 +56,7 @@ Bug fixes and new features are accepted through Pull Requests (PRs).
 - A **development environment** for editing the package and running its offline tests. It
   does not need Tenstorrent hardware, `ttnn`, vLLM, or Hugging Face credentials.
 - A **serving environment** provisioned per model by a self-contained bundle's own
-  `install.sh` (v5 fat or v6 thin). That path builds the bundle's own venv, expects `ttnn`,
+  `install.sh` (v6 thin). That path builds the bundle's own venv, expects `ttnn`,
   installs the Tenstorrent vLLM stack, and is not needed for ordinary development.
 
 Python 3.9 or newer is required. The reproducible setup uses

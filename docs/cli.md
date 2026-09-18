@@ -73,7 +73,6 @@ described in [publishing.md](publishing.md#how-compatibility-is-checked).
 ## Publish models
 
 ```bash
-tt-model package      you/mymodel ...               # author + push a v5 fat bundle
 tt-model package      --container tt-model.yaml     # build a v5.1 container package (stages a dir)
 tt-model package-thin you/mymodel ...               # author + push a v6 thin bundle (BETA, unsupported)
 tt-model push         build/mymodel                 # push a staged v5.1 container package (repo id from its manifest)
@@ -81,13 +80,11 @@ tt-model publish      you/mymodel                   # list a public bundle in th
 tt-model unpublish    you/mymodel                   # delist (repo untouched)
 ```
 
-`push` accepts only a staged v5.1 container directory. `package` and `package-thin` push v5 and
-v6 bundles themselves when given a positional `<org>/<name>`; there is no separate push step for
-those formats.
+`push` accepts only a staged v5.1 container directory. `package-thin` pushes a v6 bundle itself
+when given a positional `<org>/<name>`; there is no separate push step for that format.
 
-Flags per format: [self_contained_packages.md](self_contained_packages.md) (v5),
-[container_packages.md](container_packages.md) (v5.1), [thin_packages.md](thin_packages.md)
-(v6). Visibility and catalog rules: [publishing.md](publishing.md).
+Flags per format: [container_packages.md](container_packages.md) (v5.1) and
+[thin_packages.md](thin_packages.md) (v6). Visibility and catalog rules: [publishing.md](publishing.md).
 
 ## Maintenance
 

@@ -2,19 +2,10 @@
 
 Author on the host where you built or brought up the model, then push. The full authoring
 recipe (every flag, the resulting repo layout, and the offline and hardware tests) lives in the
-per-format guides: **[self_contained_packages.md](self_contained_packages.md)** (v5 fat),
-**[container_packages.md](container_packages.md)** (v5.1 container) and
+per-format guides: **[container_packages.md](container_packages.md)** (v5.1 container) and
 **[thin_packages.md](thin_packages.md)** (v6 thin, beta).
 
 ```bash
-# v5 fat: embeds your built ttnn wheel + vLLM/plugin wheels + your tt-metal-community tree
-tt-model package you/mymodel --public \
-  --from-metal ./tt-metal-community \
-  --ttnn-wheel dist/ttnn-*.whl \
-  --arch-name LlamaForCausalLM \
-  --main-class models.tt_transformers.tt.generator_vllm:LlamaForCausalLM \
-  --weights unsloth/Llama-3.2-3B-Instruct
-
 # v5.1 container: build the OCI image described by tt-model.yaml, then push the staged dir
 tt-model package --container tt-model.yaml
 tt-model push build/mymodel --public
@@ -26,7 +17,7 @@ tt-model pull you/mymodel                          # lay the bundle in + build i
 tt-model pull you/mymodel --with-weights           # ...and also pre-download the weights
 ```
 
-In the v5 command, `--weights` is a pointer to the weights repo; the weights are not embedded.
+In the v6 command, `--weights` is a pointer to the weights repo; the weights are not embedded.
 In the v5.1 `push`, the repo id comes from the manifest and `--repo` overrides it.
 `--out <dir>` stages the running folder locally without pushing. Large wheels go to Git Large
 File Storage (LFS) automatically on push.
@@ -37,13 +28,13 @@ These are three independent concepts. The rest of this page follows from keeping
 
 | Concept | What it does | Flag |
 |---|---|---|
-| **push** | Upload the bundle's files to a Hugging Face (HF) repo. | `package` / `package-thin` / `push` |
+| **push** | Upload the bundle's files to a Hugging Face (HF) repo. | `package-thin` / `push` |
 | **public / private** | The repo's **visibility**. | `--public` / `--private` |
 | **publish** | List the repo in the community **catalog** (a public pointer index). | `--publish`, or `tt-model publish` later |
 
 Two rules make this predictable and safe:
 
-- **Private by default.** `push`, `package`, and `package-thin` all create a **new** repo as
+- **Private by default.** `push` and `package-thin` both create a **new** repo as
   **private**. A bundle can point at proprietary weights, so a repo is not made public by
   omission. Pass `--public` to share openly; pass `--private` to be explicit. Pushing to a repo
   that **already exists does not change its visibility** unless you pass the flag, and a change
@@ -56,9 +47,9 @@ Two rules make this predictable and safe:
   repo stays under your governance.
 
 ```bash
-tt-model package you/mymodel               # private repo, not listed  (the default)
-tt-model package you/mymodel --public      # public repo, not listed   (shared by link)
-tt-model package you/mymodel --publish     # public repo, listed in the catalog (implies --public)
+tt-model package-thin you/mymodel ...            # private repo, not listed  (the default)
+tt-model package-thin you/mymodel ... --public   # public repo, not listed   (shared by link)
+tt-model package-thin you/mymodel ... --publish  # public repo, listed in the catalog (implies --public)
 ```
 
 ## Community catalog
@@ -72,9 +63,9 @@ that remains under its author's governance.
 Listing is an explicit opt-in, separate from the push:
 
 ```bash
-tt-model package   you/mymodel --publish   # push, make public, and list in one step (implies --public)
-tt-model publish   you/mymodel             # list a repo pushed earlier (makes it public if needed)
-tt-model unpublish you/mymodel             # delist (repo stays public)
+tt-model package-thin you/mymodel ... --publish   # push, make public, and list in one step (implies --public)
+tt-model publish      you/mymodel                 # list a repo pushed earlier (makes it public if needed)
+tt-model unpublish    you/mymodel                 # delist (repo stays public)
 ```
 
 `--publish` implies `--public` and adds the `tt-model-catalog` tag
@@ -93,4 +84,4 @@ builds its own venv, there is no host `ttnn` or vLLM version to gate against. v5
 packages use the same check, since an image cannot carry anything else worth gating on.
 `tt-model info <id>` prints the manifest and the required-vs-detected verdict declaratively.
 
-Older bundles (pre-v5 schemas) are refused: *re-publish the bundle with a current `tt-model`.*
+Bundles published with an older schema are refused: *re-publish the bundle with a current `tt-model`.*

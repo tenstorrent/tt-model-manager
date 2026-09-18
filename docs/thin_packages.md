@@ -70,7 +70,7 @@ this order. The order matters:
 `run.sh` wires the engine env (`LD_PRELOAD` of `_ttnncpp.so`, `TT_METAL_HOME` at the installed
 `ttnn`, `EXTRA_MODELS_DIR`, hermetic caches under the folder) and launches vLLM with
 `PYTHONPATH=$HERE` so `model.py` imports. `tt-model pull` and `serve` route a thin bundle through
-the same install and serve path as a v5 fat one.
+the generated `install.sh` and `run.sh`.
 
 > **Why vLLM is built at install rather than pinned:** the plugin runs against a vLLM compiled for an *empty* device
 > target so it can inject the `tt` platform out-of-tree. The PyPI `vllm` wheel is CUDA-built and
@@ -83,7 +83,7 @@ the same install and serve path as a v5 fat one.
 > `LD_PRELOAD` of `_ttnncpp.so` must be set **before** the interpreter starts, so it cannot be done
 > from inside `tt-model`'s own process. `run.sh` also makes the bundle runnable without `tt-model`
 > (`bash run.sh`); `tt-model serve` is the managed wrapper. The author does not write it.
-> `package`/`package-thin` generate it; the author writes `model.py`.
+> `package-thin` generates it; the author writes `model.py`.
 
 ## Serving front end: `deps.kind` picks vLLM or a direct ASGI app
 

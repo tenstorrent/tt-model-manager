@@ -6,15 +6,14 @@ code, all pinned, all inside. A consumer needs only **Docker and a Tenstorrent P
 TT-Metalium, no vLLM, no venv, no matching Python or OS. Everything needed to serve is inside the
 image.
 
-## Where it sits among the three packaging paths
+## Where it sits among the two packaging paths
 
 | | ships | consumer must have | who assembles the platform |
 |---|---|---|---|
-| **v5** self-contained | the author's `ttnn`/vLLM/plugin **wheels** + a `tt-metal-community` tree | a Tenstorrent card + firmware | the consumer, at `pull` (wheels installed into the bundle's own venv) |
 | **v5.1** container | an **OCI image** with OS + TT-Metalium + vLLM + plugin + code baked in | **Docker** + a Tenstorrent card | the **author**, once, at `package` (build time) |
 | **v6** thin | a pinned pip spec plus wheels installed by path (the vllm-tt-plugin, and any custom-op / models wheels); no vLLM engine fork | a Tenstorrent card + firmware + SFPI | the consumer, at `pull` (a pinned venv built inside the bundle from pip pins) |
 
-v5 and v6 assemble the platform on the consumer's host, so the host's glibc and architecture have
+v6 assembles the platform on the consumer's host, so the host's glibc and architecture have
 to cooperate. v5.1 moves the assembly to the author: the image is built once, and nothing about
 the consumer's host can matter because there is no host interpreter or host platform in the
 picture. The compatibility check (`compare()`) covers the two facts an image cannot carry: the
@@ -49,7 +48,7 @@ tt-model push    build/my-model --private           # publish to the Hub
 ```
 
 To also list it in the community catalog, push it public and opt in. This is the same
-`tt-model-catalog` tag the v5/v6 path writes, added after the upload so it lands on the
+`tt-model-catalog` tag the v6 path writes, added after the upload so it lands on the
 model card `package` generated:
 
 ```bash
@@ -69,9 +68,8 @@ tool-call parsers):
 /tt-model-yaml models/demos/blackhole/my_model
 ```
 
-It is scoped to v5.1 **only**. v5 "fat" and v6 "thin" bundles are authored with CLI flags
-and have no manifest file, so the skill declines those rather than emitting a YAML they
-cannot read. Source: [`.claude/skills/tt-model-yaml/`](../.claude/skills/tt-model-yaml/).
+It is scoped to v5.1 **only**. v6 "thin" bundles are authored with CLI flags and have no
+manifest file, so the skill declines them rather than emitting a YAML they cannot read. Source: [`.claude/skills/tt-model-yaml/`](../.claude/skills/tt-model-yaml/).
 
 Validation is front-loaded. Everything knowable without hardware is checked at *load* time
 (`ContainerManifest.validate_semantics` / `validate_sources_exist`): arch, kind, the mesh vs
@@ -489,15 +487,13 @@ travels, what the image checks about itself at build time, and how the path was 
 
 ### Why assembly moved to the author
 
-v5 rebuilds the world on the consumer's host, so the host's glibc, Python,
+v6 resolves a venv on the consumer's host from a pinned spec, so the host's glibc, Python,
 TT-Metalium™ and vLLM all have to cooperate. Most of `packaging.py`, `provision.py` and
-`toolchain.py` exist to negotiate that. v6 trims the payload to a pinned spec but still
-resolves a venv on the consumer's host. v5.1 moves the assembly to the author: the image is
+`toolchain.py` exist to negotiate that. v5.1 moves the assembly to the author: the image is
 built once, and nothing about the consumer's host can matter because there is no host
 interpreter or host platform in the picture. `compare()` needed no container branch at all: it
 already checked only the two facts an image cannot carry, the **arch** its binaries were built
-for (fatal) and whether the host has **enough chips** for the chosen profile (forceable). Wheel
-interpreter and platform tags are checked separately at install, on the v5 path only.
+for (fatal) and whether the host has **enough chips** for the chosen profile (forceable).
 
 ### Provenance
 
@@ -513,15 +509,15 @@ The authored YAML is *not* the published document. `ContainerManifest.to_wire()`
 renders a `schema_version: "5.1"` `Manifest`, the same `tt_kernel_manifest.json` filename
 every command already resolves, and *that* JSON lands on the Hub. Two reasons for the split:
 
-- `Manifest.from_json` gates on `SUPPORTED_SCHEMAS` (`{"5", "5.1", "6"}`), which is what
-  makes an older `tt-model` refuse a newer package loudly instead of half-reading it. Adding
-  the v5.1 path required adding `"5.1"` to that set.
+- `Manifest.from_json` gates on `SUPPORTED_SCHEMAS`, which is what makes an older `tt-model`
+  refuse a newer package loudly instead of half-reading it. Adding the v5.1 path required
+  adding `"5.1"` to that set.
 - YAML is a better *authoring* surface (comments, block scalars, no commas); JSON is a better
   *wire* format. Authors get the former, the Hub gets the latter.
 
 The wire `Manifest` carries a `container: ContainerSpec` block. It is present if and only if this
-is a container package, and absent for v5 and v6 bundles (pre-v5 schemas are refused), which is
-what keeps those paths byte-for-byte unaffected. Inside it: an `ImageRef` (registry, repository,
+is a container package, and absent for v6 bundles, which is what keeps that path byte-for-byte
+unaffected. Inside it: an `ImageRef` (registry, repository,
 tag, digest), the `kind`, the opaque `runtime` dict, the merged-once `serve` defaults and
 `serve_profiles`, a `code_dir` pointing at the browsable copy, the `verify` list, and the pinned
 `built:` provenance block. `to_wire()` also fills the top-level `device_count` from the default
