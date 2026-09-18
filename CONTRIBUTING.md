@@ -1,8 +1,8 @@
-# Contributing to tt-model
+# Contributing to `tt-model`
 
-We welcome contributions to tt-model! This document provides guidelines for contributing to the project.
+Contributions to `tt-model` are welcome. This document provides guidelines for contributing to the project.
 
-> **Automated / agent contributors (e.g. Claude Code):** read [AGENTS.md](AGENTS.md) for the binding design invariants, testing requirements, and PR discipline before opening a fix.
+> **Automated and agent contributors (for example, Claude Code):** read [AGENTS.md](AGENTS.md) for the binding design invariants, testing requirements, and PR discipline before opening a fix.
 
 ## Reporting Bugs
 
@@ -12,35 +12,35 @@ When reporting a bug, please include:
 - A clear description of the issue
 - Steps to reproduce the problem
 - Expected vs. actual behavior
-- Your environment (OS, Python version, tt-metal version, hardware)
+- Your environment (OS, Python version, TT-Metalium™ version, hardware)
 - Any relevant logs or error messages
 
 ## Submitting Pull Requests
 
-We accept bug fixes and new functionality through Pull Requests (PRs).
+Bug fixes and new features are accepted through Pull Requests (PRs).
 
 ### Before You Submit
 
 1. **Search existing issues and PRs** to avoid duplicates
 2. **Discuss significant changes** by opening an issue first
 3. **Follow the project's coding standards** and conventions
-4. **Write tests** for new functionality
+4. **Write tests** for new features
 5. **Update documentation** as needed
 
 ### PR Process
 
 1. Fork the repository and create a new branch from `main`
 2. Make your changes in the branch
-3. Run tests to ensure they pass: `pytest`
+3. Run tests to ensure they pass: `python -m pytest`
 4. Commit your changes with clear, descriptive commit messages
 5. Push your branch and submit a PR
 
 ### Review Process
 
 - PRs are reviewed weekly
-- Maintainers will provide feedback or approve your changes
+- Maintainers provide feedback or approve your changes
 - Address any requested changes
-- Once approved, a maintainer will merge your PR
+- Once approved, a maintainer merges your PR
 
 ## Coding Standards
 
@@ -51,12 +51,12 @@ We accept bug fixes and new functionality through Pull Requests (PRs).
 
 ## Development setup
 
-`tt-model` has two deliberately different environments:
+`tt-model` has two separate environments:
 
 - A **development environment** for editing the package and running its offline tests. It
   does not need Tenstorrent hardware, `ttnn`, vLLM, or Hugging Face credentials.
 - A **serving environment** provisioned per model by a self-contained bundle's own
-  `install.sh` (v5 fat / v6 thin). That path builds the bundle's own venv, expects `ttnn`,
+  `install.sh` (v6 thin). That path builds the bundle's own venv, expects `ttnn`,
   installs the Tenstorrent vLLM stack, and is not needed for ordinary development.
 
 Python 3.9 or newer is required. The reproducible setup uses
@@ -68,7 +68,7 @@ uv run --locked --extra test pytest
 ```
 
 `uv` creates and uses this checkout's `.venv`. If another virtual environment is active,
-deactivate it first so `uv` does not warn about the mismatch; do not add `--active` unless
+deactivate it first so `uv` does not warn about the mismatch. Do not add `--active` unless
 you intentionally want to modify that other environment.
 
 Without `uv`, create the same isolated editable install with the standard library and pip:
@@ -102,4 +102,4 @@ This project adheres to the [Contributor Covenant Code of Conduct](CODE_OF_CONDU
 
 ## License
 
-By contributing to this project, you agree that your contributions will be licensed under the Apache 2.0 License.
+By contributing to this project, you agree that your contributions are licensed under the Apache 2.0 License.
