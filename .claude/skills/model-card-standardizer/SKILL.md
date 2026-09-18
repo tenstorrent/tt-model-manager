@@ -21,12 +21,15 @@ something a model's author can edit per package:
 
    The Quickstart command specifically is no longer blocked on anything: `tt`
    (the `tenstorrent` PyPI package, i.e. "tt-cli") is real, published at v1.0.1,
-   and `tt model pull`/`tt serve` already lazy-install and shell out to
+   and `tt model pull`/`tt serve` already install and drive
    `tt-model pull`/`tt-model serve` themselves (checked `tenstorrent/tt-cli`,
    `src/tenstorrent/backends/serving/model_manager.py`). Swapping the hardcoded
-   strings in `render_model_card()` to `tt model pull <repo> --with-weights` /
-   `tt serve <repo>` is a safe change today — re-verify against the live
-   `tt-cli` repo before relying on this, in case something's since moved.
+   strings in `render_model_card()` to `tt model pull <repo>` / `tt serve <repo>`
+   is a safe change today. Note `tt model pull` has **no** `--with-weights`
+   flag (only `--bundle`/`--weights-only`/`--offline`) — it pulls a bundle's
+   weights by default, and that flag belongs to the lower-level `tt-model pull`.
+   Re-verify against the live `tt-cli` repo before relying on this, in case
+   something's since moved.
 2. **`CardSettings` in `src/tt_kernel/container_manifest.py`** is the only
    per-model input, and it has exactly two fields: `description` (a short lead
    paragraph, rendered right under the title) and `quickstart` (a markdown blob
@@ -80,7 +83,7 @@ As of this skill's writing, generator-owned gaps are:
 | --- | --- |
 | Quickstart command | Hardcodes `tt-model pull` / `tt-model serve` instead of `tt model pull` / `tt serve` — confirmed safe to fix now that `tt` (v1.0.1, on PyPI) already wraps `tt-model` |
 | Serve profiles columns | Hardcodes `max_num_seqs` / `max_model_len` for every `kind`, even non-LLM ones |
-| At a glance, Intended use, Expected performance, Limitations, Risks and safety, Licensing, Changelog, Related packages, Feedback | No dedicated `CardSettings` field exists for any of these — none gets its own heading unless the author manually writes one inside `card.quickstart`. Feedback specifically should point at `tt report issue` (real, implemented — auto-collects environment details, opens a prefilled GitHub issue), not a bare email address |
+| At a glance, Intended use, Expected performance, Limitations, Risks and safety, Licensing, Changelog, Related packages, Feedback | No dedicated `CardSettings` field exists for any of these — none gets its own heading unless the author manually writes one inside `card.quickstart`. Feedback specifically should point at `tt report issue` (real, implemented — auto-collects environment details, opens a prefilled GitHub issue), not a bare email address and not `tt report feedback` (still a stub that exits UNSUPPORTED) |
 | `tt_perf_summary` frontmatter, `tt-whitelisted` tag, Model CI v0 row | Not emitted by `_card_tags()` or `render_model_card()` at all |
 
 Verify this table against the live source each time — don't trust it blindly.

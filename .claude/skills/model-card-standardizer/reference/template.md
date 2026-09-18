@@ -11,9 +11,12 @@ the ticket; if the ticket's template changes, update this file to match.
 Update: the "is tt-cli ready" question has since been investigated by
 cloning tenstorrent/tt-cli. It's real, published on PyPI as the `tenstorrent`
 package (binary `tt`) at v1.0.1, and `tt model pull`/`tt serve` already
-lazy-install and shell out to `tt-model pull`/`tt-model serve` themselves —
-so the Quickstart block below is safe to document as-is. This has not yet
-been posted back to the Jira ticket as of this writing.
+install and drive `tt-model pull`/`tt-model serve` themselves — so the
+Quickstart block below is safe to document as-is. Note `tt model pull` takes
+no `--with-weights` flag (only --bundle/--weights-only/--offline); weights
+come down by default for a bundle. Also: `tt report issue` is implemented,
+but `tt report feedback` is still a stub that exits UNSUPPORTED, so the
+Feedback section must not point at it.
 -->
 
 ---
@@ -63,13 +66,13 @@ Packaged and published with [tt-model-manager](https://github.com/tenstorrent/tt
 ## Quickstart
 
 ```bash
-tt model pull <repo-slug> --with-weights
+tt model pull <repo-slug>
 tt serve <repo-slug>
 ```
 
-(`tt` is the `tenstorrent` PyPI package — confirmed live on PyPI at v1.0.1. `tt model pull`/`tt serve` already lazy-install and shell out to `tt-model pull`/`tt-model serve` themselves, so this is safe to document today, not aspirational.)
+(`tt` is the `tenstorrent` PyPI package — confirmed live on PyPI at v1.0.1. `tt model pull`/`tt serve` already install and drive `tt-model` themselves, so this is safe to document today, not aspirational. There is no `--with-weights` flag on `tt model pull` — for a bundle it pulls the weights by default; that flag belongs to the lower-level `tt-model pull`.)
 
-<Prose: what `--with-weights` downloads and where it's cached; default port; how long first-boot compile/conversion takes; the exact log line that signals readiness.>
+<Prose: what `tt model pull` downloads (image + weights, into the shared HF cache) — note there is no `--with-weights` flag on `tt`, weights come down by default for a bundle; default port; how long first-boot compile/conversion takes; the exact log line that signals readiness.>
 
 ## Serve profiles
 
