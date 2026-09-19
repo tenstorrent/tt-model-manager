@@ -11,12 +11,23 @@ the ticket; if the ticket's template changes, update this file to match.
 Update: the "is tt-cli ready" question has since been investigated by
 cloning tenstorrent/tt-cli. It's real, published on PyPI as the `tenstorrent`
 package (binary `tt`) at v1.0.1, and `tt model pull`/`tt serve` already
-install and drive `tt-model pull`/`tt-model serve` themselves — so the
-Quickstart block below is safe to document as-is. Note `tt model pull` takes
-no `--with-weights` flag (only --bundle/--weights-only/--offline); weights
-come down by default for a bundle. Also: `tt report issue` is implemented,
-but `tt report feedback` is still a stub that exits UNSUPPORTED, so the
-Feedback section must not point at it.
+install and drive `tt-model pull`/`tt-model serve` themselves. Note
+`tt model pull` takes no `--with-weights` flag (only
+--bundle/--weights-only/--offline); weights come down by default for a
+bundle. Also: `tt report issue` is implemented but files against
+tenstorrent/tt-cli (the TOOLING tracker, not the bundle), and
+`tt report feedback` is still a stub that exits UNSUPPORTED.
+
+Two decisions from code review (2026-09-18):
+- The Quickstart shows BOTH flows, `tt` first. tt-model-manager's AGENTS.md
+  invariant 1 ("tt-model alone must do the whole job; never introduce a step
+  needing tt-cli") is binding, so a card that names only `tt` would violate
+  it; the second fence is what keeps that invariant literally true.
+- Whitelist status is NOT a repo tag. A tag lives in the author's own README
+  frontmatter, which any author can edit on the Hub, so it cannot be a review
+  signal. It is an allowlist in a Tenstorrent-controlled HF dataset repo
+  (`tenstorrent/tt-model-whitelist`, `whitelist.json`), written by
+  `tt-model whitelist` and read by `tt model list --community`.
 -->
 
 ---
@@ -25,7 +36,8 @@ tags:
   - <topology-tag>          # e.g. p150, p300x2 — one per supported profile
   - tt-model-cache
   - tt-model-catalog
-  - tt-whitelisted           # add only once a DX-team reviewer has approved this model (DEVSTACK-423); omit for plain community packages
+  #                          NO whitelist tag here: review status lives in Tenstorrent's allowlist
+  #                          (dataset repo tenstorrent/tt-model-whitelist), never in the author's frontmatter.
   - <runtime-tag>           # e.g. vllm-plugin, tt-dit-server — as applicable
   - <domain-tags>           # e.g. robotics, vla, tts, 3d-reconstruction — optional, aids discovery
 license: <spdx-id-or-"other">          # omit only if the weights are genuinely unrestricted
@@ -66,13 +78,21 @@ Packaged and published with [tt-model-manager](https://github.com/tenstorrent/tt
 ## Quickstart
 
 ```bash
+uv tool install tenstorrent   # once — the Tenstorrent CLI, `tt`
 tt model pull <repo-slug>
 tt serve <repo-slug>
 ```
 
-(`tt` is the `tenstorrent` PyPI package — confirmed live on PyPI at v1.0.1. `tt model pull`/`tt serve` already install and drive `tt-model` themselves, so this is safe to document today, not aspirational. There is no `--with-weights` flag on `tt model pull` — for a bundle it pulls the weights by default; that flag belongs to the lower-level `tt-model pull`.)
+<Prose: what `tt model pull` downloads (image + weights, into the shared HF cache) — there is no `--with-weights` flag on `tt`, weights come down by default for a bundle; default port; how long first-boot compile/conversion takes; the exact log line that signals readiness.>
 
-<Prose: what `tt model pull` downloads (image + weights, into the shared HF cache) — note there is no `--with-weights` flag on `tt`, weights come down by default for a bundle; default port; how long first-boot compile/conversion takes; the exact log line that signals readiness.>
+Without tt-cli — tt-model alone does the whole job:
+
+```bash
+tt-model pull  <repo-slug> --with-weights
+tt-model serve <repo-slug>
+```
+
+(Both fences are required. `tt` is the consumer path the GA doc asks for; the `tt-model` fence keeps tt-model-manager's AGENTS.md invariant 1 true — nothing on the card may *require* tt-cli.)
 
 ## Serve profiles
 
@@ -114,7 +134,7 @@ tt serve <repo-slug>
 
 ## Feedback
 
-Run `tt report issue` to file a problem with this package — it auto-collects environment details and opens a prefilled GitHub issue. For broader product feedback, <support@tenstorrent.com> gets tagged into the internal Jira board.
+Questions or problems with this package: open a discussion at `https://huggingface.co/<repo-slug>/discussions` — the one channel that reaches the bundle's author. A problem with the `tt` tooling itself: `tt report issue` (collects your environment and opens a prefilled issue against tenstorrent/tt-cli — it does not reach this package's author). Product feedback: <support@tenstorrent.com> (tagged into the internal Jira board per the GA doc). Never `tt report feedback` — still a stub.
 
 ## Provenance
 

@@ -19,17 +19,18 @@ something a model's author can edit per package:
    of this is author-editable per model — a gap here needs a `tt-model-manager`
    code change, not different card text.
 
-   The Quickstart command specifically is no longer blocked on anything: `tt`
-   (the `tenstorrent` PyPI package, i.e. "tt-cli") is real, published at v1.0.1,
-   and `tt model pull`/`tt serve` already install and drive
-   `tt-model pull`/`tt-model serve` themselves (checked `tenstorrent/tt-cli`,
-   `src/tenstorrent/backends/serving/model_manager.py`). Swapping the hardcoded
-   strings in `render_model_card()` to `tt model pull <repo>` / `tt serve <repo>`
-   is a safe change today. Note `tt model pull` has **no** `--with-weights`
-   flag (only `--bundle`/`--weights-only`/`--offline`) — it pulls a bundle's
-   weights by default, and that flag belongs to the lower-level `tt-model pull`.
-   Re-verify against the live `tt-cli` repo before relying on this, in case
-   something's since moved.
+   The Quickstart command: `tt` (the `tenstorrent` PyPI package, i.e. "tt-cli")
+   is real, published at v1.0.1, and `tt model pull`/`tt serve` already install
+   and drive `tt-model pull`/`tt-model serve` themselves (checked
+   `tenstorrent/tt-cli`, `src/tenstorrent/backends/serving/model_manager.py`).
+   But the card must show **both** flows, `tt` first: `AGENTS.md` invariant 1
+   ("tt-model alone must do the whole job; never introduce a step needing
+   tt-cli") is binding on this repo, so a card naming only `tt` violates it.
+   Note `tt model pull` has **no** `--with-weights` flag (only
+   `--bundle`/`--weights-only`/`--offline`) — it pulls a bundle's weights by
+   default; that flag belongs to the lower-level `tt-model pull`, which is why
+   the two fences differ. Re-verify against the live `tt-cli` repo before
+   relying on this, in case something's since moved.
 2. **`CardSettings` in `src/tt_kernel/container_manifest.py`** is the only
    per-model input, and it has exactly two fields: `description` (a short lead
    paragraph, rendered right under the title) and `quickstart` (a markdown blob
@@ -50,12 +51,12 @@ author-fixable. Don't carry a stale verdict forward.
 Read `reference/template.md` in this skill directory — the template proposed
 in [DEVSTACK-447 comment 670207](https://tenstorrent.atlassian.net/browse/DEVSTACK-447).
 **Status: PROPOSED**, pending sign-off on the open questions logged there
-(should license become a manifest-required field; where does whitelist
-status live; who retrofits the existing ~50 catalog cards). The "is `tt-cli`
-ready" question has since been investigated and resolved — see the template's
-own status note — but that resolution hasn't been posted back to the ticket
-yet. Check the ticket for movement before treating any section as settled
-fact.
+(should license become a manifest-required field; who retrofits the existing
+~50 catalog cards). Two questions were settled by code review on 2026-09-18
+and are recorded in the template's own status note: `tt-cli` is ready but the
+card shows both flows (AGENTS.md invariant 1), and whitelist status is an
+allowlist in a Tenstorrent-controlled dataset repo, not a repo tag. Check the
+ticket for movement before treating any section as settled fact.
 
 Then identify the input:
 
@@ -81,10 +82,11 @@ As of this skill's writing, generator-owned gaps are:
 
 | Template section | What the generator does today |
 | --- | --- |
-| Quickstart command | Hardcodes `tt-model pull` / `tt-model serve` instead of `tt model pull` / `tt serve` — confirmed safe to fix now that `tt` (v1.0.1, on PyPI) already wraps `tt-model` |
+| Quickstart command | Hardcodes `tt-model pull` / `tt-model serve` only. The fix in flight adds the `tt` fence FIRST and keeps a `tt-model` fence (AGENTS.md invariant 1) — a card with only one of the two is wrong either way |
 | Serve profiles columns | Hardcodes `max_num_seqs` / `max_model_len` for every `kind`, even non-LLM ones |
-| At a glance, Intended use, Expected performance, Limitations, Risks and safety, Licensing, Changelog, Related packages, Feedback | No dedicated `CardSettings` field exists for any of these — none gets its own heading unless the author manually writes one inside `card.quickstart`. Feedback specifically should point at `tt report issue` (real, implemented — auto-collects environment details, opens a prefilled GitHub issue), not a bare email address and not `tt report feedback` (still a stub that exits UNSUPPORTED) |
-| `tt_perf_summary` frontmatter, `tt-whitelisted` tag, Model CI v0 row | Not emitted by `_card_tags()` or `render_model_card()` at all |
+| At a glance, Intended use, Expected performance, Limitations, Risks and safety, Licensing, Changelog, Related packages, Feedback | No dedicated `CardSettings` field exists for any of these — none gets its own heading unless the author manually writes one inside `card.quickstart`. Feedback specifically should point at the bundle's HF Discussions page (the one channel that reaches its author), describe `tt report issue` as being for `tt` tooling problems (it files against tenstorrent/tt-cli), and never mention `tt report feedback` (a stub that exits UNSUPPORTED) |
+| `tt_perf_summary` frontmatter, Model CI v0 row | Not emitted by `render_model_card()` at all |
+| Whitelist status | Not a card concern at all: it lives in Tenstorrent's allowlist (`tenstorrent/tt-model-whitelist` dataset repo, written by `tt-model whitelist`). A `tt-whitelisted` tag in a card's frontmatter means nothing — anyone can add one to their own repo — and the renderer must never emit one |
 
 Verify this table against the live source each time — don't trust it blindly.
 

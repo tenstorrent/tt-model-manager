@@ -152,8 +152,10 @@ A pulled v5.1 package whose container image was removed from the local
 daemon failed to serve with an opaque docker error. Re-pull the image by
 digest when it is missing instead.
 
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Co-Authored-By: Claude <model name> <noreply@anthropic.com>
 ```
+
+(Name the model that actually wrote the commit, e.g. `Claude Opus 4.8`.)
 
 ### 9. Push and open a draft PR against main
 
