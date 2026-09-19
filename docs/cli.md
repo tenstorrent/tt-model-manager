@@ -73,6 +73,8 @@ tt-model package-thin you/mymodel ...               # author + push a v6 thin bu
 tt-model push         build/mymodel                 # push a staged v5.1 container package (repo id from its manifest)
 tt-model publish      you/mymodel                   # list a public bundle in the community catalog
 tt-model unpublish    you/mymodel                   # delist (repo untouched)
+tt-model whitelist    you/mymodel                   # TT reviewers: copy a listed bundle into Tenstorrent/
+tt-model unwhitelist  Tenstorrent/MyModel           # withdraw that copy from the catalog (repo kept)
 ```
 
 Flags per format: [self_contained_packages.md](self_contained_packages.md) (v5),

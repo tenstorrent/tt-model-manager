@@ -102,6 +102,57 @@ tt-model unpublish you/mymodel             # delist (repo stays public)
 indexes only repos carrying it, and reads each repo's `tt_kernel_manifest.json` to render it.
 `tt-model search <term> --catalog` restricts a search to listed bundles.
 
+## Whitelisting (Tenstorrent reviewers)
+
+The catalog is open — anyone can list a bundle, and that is the point. The **whitelist** is
+the curated subset of it that a Tenstorrent reviewer has looked at, so a developer can pick a
+model that is expected to work on the hardware it claims instead of sifting through everything
+published:
+
+```bash
+tt-model whitelist   you/mymodel                 # copy a LISTED, public bundle into Tenstorrent/
+tt-model unwhitelist Tenstorrent/MyModel         # withdraw the copy from the catalog
+```
+
+**Whitelisting is the copy.** A bundle under `Tenstorrent/` has been reviewed by definition,
+because only the DX team can write that namespace (`TT_ORG` in
+[`tt_kernel/__init__.py`](../src/tt_kernel/__init__.py)). There is no index to fetch and nothing
+to keep in sync: "has Tenstorrent reviewed this" reduces to "is this repo ours", which any
+consumer can answer from the repo id alone. It is deliberately **not a repo tag** and **not a
+manifest field** — a tag lives in the author's own README frontmatter, which they can edit from
+the Hub UI, and the manifest is written by whoever publishes the model, so neither can carry a
+review someone *else* granted. Consumers see it as `tt model list --community --whitelisted`.
+
+The copy is named after the **weights** repo, not the bundle: a bundle published as
+`someone/qwen3-32b-blackhole-v51` with weights `Qwen/Qwen3-32B` becomes
+`Tenstorrent/Qwen3-32B`. That is the canonical model name a reader is looking for rather than an
+author's packaging slug.
+
+What the commands guarantee:
+
+- **The author's repo is never touched.** `duplicate_repo` is a server-side copy — it reads the
+  source and writes only the new repo. A review costs one request and moves no bundle data, even
+  for a multi-GB image.
+- **The copy is a snapshot.** It records the source repo and the exact revision it was copied at,
+  in its own card frontmatter, plus an attribution line naming the original. Later commits to the
+  original are *not* covered by the review, and `Tenstorrent/...` does not track upstream.
+- **The whitelist is a subset of the catalog.** `whitelist` refuses a repo that is not listed
+  (listing is the author's decision — it will never `publish` on their behalf) and refuses a
+  private one. The copy is then listed explicitly rather than relying on it inheriting the tag,
+  so a public-but-unlisted source cannot produce a copy nobody can find.
+- **`push` neither grants nor drops a review**, and `unpublish` has nothing to say about one: the
+  copy is its own repo, so delisting an original leaves it alone. That independence is the point.
+- **A name collision refuses.** Two bundles of the same model — two board targets, or two authors
+  packaging the same upstream weights — derive the same name. The second is refused, naming the
+  existing copy and what it was made from; it is never overwritten, because a reviewed artifact
+  someone may be relying on is not ours to replace silently.
+- **A half-finished run resumes.** If the copy landed but its review record did not, re-running
+  re-records rather than being permanently blocked by its own partial state.
+- **Withdrawing keeps the artifact.** `unwhitelist` delists the copy and leaves the repo, so
+  anyone who pinned it can still reach it, and the original reappears in listings. Delete the
+  repo by hand on the Hub if it should be gone entirely. It takes the **copy's** id — passing the
+  community bundle it came from is refused.
+
 ## How compatibility is checked
 
 `tt-model` records the target arch/machine in the bundle's `tt_kernel_manifest.json` and reports

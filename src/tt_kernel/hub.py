@@ -9,6 +9,7 @@ tagged ``tt-model-cache`` so ``search`` can filter for it.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
@@ -215,6 +216,126 @@ def is_listed(repo_id: str) -> bool:
         return TT_MODEL_CATALOG_TAG in tags
     except Exception:  # noqa: BLE001 — advisory only; absent/offline/gated all mean "not listed"
         return False
+
+
+@dataclass(frozen=True)
+class RepoState:
+    """What one ``model_info`` call says about a repo: its tags, visibility and head sha."""
+
+    tags: List[str]
+    private: bool
+    sha: Optional[str]
+    # The Hub's own spelling of the id. The caller typed one on the command line and
+    # casing is not significant there, but the whitelist stores this for humans to read
+    # and for a later drift check to display, so record what the repo is actually called
+    # rather than what the reviewer happened to type.
+    repo_id: Optional[str] = None
+
+
+def repo_state(repo_id: str) -> RepoState:
+    """Tags, visibility and head sha in ONE round trip — and it RAISES.
+
+    For a decision, not a description. ``is_listed`` fails to ``False`` by design, which
+    is right when the question is "should I preserve a tag across this push" and wrong
+    when the question is "may this repo be whitelisted": a network blip would then read
+    as "not listed" and produce a confident, false refusal. Callers wrap this in the
+    CLI's ``_hub`` so a failure renders as a diagnosis card instead.
+    """
+    info = _api().model_info(repo_id)
+    return RepoState(
+        tags=list(getattr(info, "tags", None) or []),
+        private=bool(getattr(info, "private", False)),
+        sha=getattr(info, "sha", None),
+        repo_id=getattr(info, "id", None),
+    )
+
+
+# Card frontmatter keys the whitelist writes onto a copy. They are read by tt-cli, which
+# hides a community bundle from its listing once a Tenstorrent copy claims it as a
+# source — so renaming one here silently stops that collapse with no error anywhere. The
+# weekly pin-bump checklist in tt-cli asks the reviewer to diff these.
+REVIEW_SOURCE_KEY = "tt_whitelist_source"
+REVIEW_REVISION_KEY = "tt_whitelist_revision"
+REVIEW_REVIEWER_KEY = "tt_reviewed_by"
+REVIEW_DATE_KEY = "tt_reviewed_at"
+_REVIEW_KEYS = (REVIEW_SOURCE_KEY, REVIEW_REVISION_KEY, REVIEW_REVIEWER_KEY, REVIEW_DATE_KEY)
+
+
+def duplicate_into_org(source_repo_id: str, target_repo_id: str) -> str:
+    """Server-side copy of a bundle into the Tenstorrent org. Returns the new repo URL.
+
+    ``duplicate_repo`` copies git history and LFS objects on the Hub itself, with no
+    local download/upload — so whitelisting a multi-GB bundle is one request that moves
+    no data. Visibility is inherited from the source, which the caller has already
+    established is public, and ``exist_ok=False`` so an existing target is an error the
+    caller diagnoses rather than an overwrite of someone else's reviewed copy.
+
+    Nothing is written to the source: an author's repo is never touched by a review.
+    """
+    url = _api().duplicate_repo(
+        from_id=source_repo_id,
+        to_id=target_repo_id,
+        repo_type=_REPO_TYPE,
+        exist_ok=False,
+    )
+    return str(url)
+
+
+def read_review(repo_id: str) -> Optional[dict]:
+    """The review keys on a repo's card, or None when it carries no card at all.
+
+    Used to tell "this copy records the bundle I am about to whitelist" (a resumable
+    half-finished run) from "this copy records a different bundle" (a name collision that
+    must not be overwritten). Raises on anything other than a missing card, so a
+    transient read failure can never be mistaken for "no review recorded".
+    """
+    from huggingface_hub import ModelCard
+    from huggingface_hub.utils import EntryNotFoundError
+
+    try:
+        card = ModelCard.load(repo_id)
+    except EntryNotFoundError:
+        return None
+    return {k: getattr(card.data, k, None) for k in _REVIEW_KEYS}
+
+
+def annotate_review(
+    repo_id: str,
+    *,
+    source: str,
+    revision: Optional[str],
+    reviewer: str,
+    reviewed_at: str,
+) -> None:
+    """Record the review on the copy's card: frontmatter keys plus an attribution line.
+
+    The record lives in the artifact rather than in a side index, so it cannot drift out
+    of step with what it describes, and tt-cli reads the source key straight off the
+    listing response.
+
+    ``card.data`` is mutated in place for the reason :func:`tag_repo` documents: building
+    a fresh block drops every other frontmatter field the author set (``license``,
+    ``pipeline_tag``, ``base_model``). Unlike ``tag_repo`` there is deliberately no
+    "start from an empty card" fallback — this writes the BODY as well, and a transient
+    read failure must not replace a real README with an empty one. A copy always has the
+    card it was duplicated with, so a missing card here means something is wrong.
+    """
+    from huggingface_hub import ModelCard
+
+    card = ModelCard.load(repo_id)  # raises; the CLI renders it as a diagnosis card
+    setattr(card.data, REVIEW_SOURCE_KEY, source)
+    setattr(card.data, REVIEW_REVISION_KEY, revision)
+    setattr(card.data, REVIEW_REVIEWER_KEY, reviewer)
+    setattr(card.data, REVIEW_DATE_KEY, reviewed_at)
+    card.text = card.text.rstrip() + (
+        "\n\n## Reviewed by Tenstorrent\n\n"
+        f"This is a Tenstorrent copy of [`{source}`](https://huggingface.co/{source}), "
+        "packaged and published by its author. It was reviewed"
+        + (f" at `{revision[:9]}`" if revision else "")
+        + f" by {reviewer} on {reviewed_at[:10]}, and is a snapshot of that revision — "
+        "later commits to the original are not covered by this review.\n"
+    )
+    card.push_to_hub(repo_id, repo_type=_REPO_TYPE)
 
 
 def is_private_safe(repo_id: str) -> Optional[bool]:
