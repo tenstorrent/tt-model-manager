@@ -1113,22 +1113,31 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     if m.card and m.card.quickstart:
         lines += [m.card.quickstart.rstrip(), ""]
     if len(profiles) > 1:
+        # The capacity columns are a continuous-batching engine's vocabulary. A
+        # `tt-dit-server` profile has neither (its launcher does not ask for them), so
+        # printing the headers anyway yielded two columns of empty cells on every
+        # diffusion card — a table that states nothing. Include them only when some
+        # profile actually fills them.
+        capacity = any(p.max_num_seqs or p.max_model_len for p in profiles)
+        header = ["profile", "hardware", "mesh"]
+        if capacity:
+            header += ["max_num_seqs", "max_model_len"]
         lines += [
             "## Serve profiles",
             "",
             "One image serves every profile below; pick one with `--profile`.",
             "",
-            "| profile | hardware | mesh | max_num_seqs | max_model_len |",
-            "| --- | --- | --- | --- | --- |",
+            "| " + " | ".join(header) + " |",
+            "| " + " | ".join("---" for _ in header) + " |",
         ]
         default = m.resolved_default()
         for name in m.profile_names():
             p = m.resolve_profile(name)
             label = f"`{name}`" + (" *(default)*" if name == default else "")
-            lines.append(
-                f"| {label} | {p.hardware or ''} | {p.mesh_device or ''} | "
-                f"{p.max_num_seqs or ''} | {p.max_model_len or ''} |"
-            )
+            cells = [label, p.hardware or "", p.mesh_device or ""]
+            if capacity:
+                cells += [str(p.max_num_seqs or ""), str(p.max_model_len or "")]
+            lines.append("| " + " | ".join(cells) + " |")
         lines.append("")
     lines += [
         "## Provenance",
