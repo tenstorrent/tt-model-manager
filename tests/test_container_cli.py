@@ -805,13 +805,16 @@ def test_profiles_marks_the_default(tmp_path, monkeypatch, capsys):
 # ------------------------------------------------------------------ push
 
 
-def _staged(tmp_path, *, hub_hosted=True, with_layout=True, repo="raahem/qwen") -> Path:
+def _staged(tmp_path, *, hub_hosted=True, with_layout=True, repo="raahem/qwen",
+            card=None) -> Path:
     """A staged package directory as `package --container` would leave it."""
     from tt_kernel.container_manifest import ContainerManifest
 
     raw = json.loads(json.dumps(BASE))
     if not hub_hosted:
         raw["image"] = {"registry": "ghcr.io/tenstorrent"}
+    if card is not None:
+        raw["card"] = card
     m = ContainerManifest.model_validate(raw)
     wire = m.to_wire(image_tag="tt-model/my-model:abc123", tt_metal_version="0.72.1",
                      tt_kernel_version="0.1.0", built={"repo": repo})

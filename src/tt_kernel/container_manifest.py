@@ -28,12 +28,14 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .manifest import (
     CONTAINER_SCHEMA,
+    CardSpec,
     ContainerSpec,
     ImageRef,
+    LicenseSpec,
     Manifest,
     ServeProfile,
     ServeSettings,
@@ -264,16 +266,83 @@ class ImageSettings(BaseModel):
     repository: Optional[str] = None  # name under a real registry; defaults to `name`
 
 
-class CardSettings(BaseModel):
-    """Optional model-authored Markdown for the generated model card."""
+class CardSettings(CardSpec):
+    """Optional model-authored Markdown for the generated model card.
+
+    Every field renders as its own section, in a fixed order the renderer owns, so a
+    reader finds the same information in the same place on every published card. The
+    field list is the template: what the tool can derive it derives (hardware, context,
+    quickstart, the capability notes, provenance), and what only the author knows is
+    here.
+
+    ``extra="forbid"`` on top of the permissive wire :class:`CardSpec`: a hand-written
+    YAML with ``limitiations:`` must fail at load, where the author can fix it, rather
+    than publish a card silently missing the section.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    # One or two sentences on what the model IS and what it is for ("intended for
-    # agentic coding"). Leads the card, right under the title — the tool cannot know
-    # this, so the author states it.
-    description: Optional[str] = None
-    quickstart: Optional[str] = None
+    # Every field is inherited from CardSpec; this class adds only the authoring-time
+    # checks below. What each field means is documented once, for authors, in
+    # examples/container-example.yaml and docs/container_packages.md.
+
+    @field_validator("license", "pipeline_tag", "base_model", mode="before")
+    @classmethod
+    def _collapse_authored_whitespace(cls, v):
+        """Normalise the fields that go into frontmatter VERBATIM.
+
+        Every other authored string reaches the card through ``_cell`` or ``.strip()``,
+        but the frontmatter keys are written as given — and YAML hands us trailing
+        newlines for free. ``id: >`` (a folded scalar, which this very example uses for
+        five neighbouring fields) yields ``"other\\n"``, which then fails ``== "other"``
+        and silently drops the author's licence name and link, while emitting a
+        multi-line ``license:`` value into the one field the Hub validates server-side
+        on commit — the late failure this class exists to prevent.
+        """
+        def _flat(s):
+            return " ".join(s.split()) if isinstance(s, str) else s
+
+        if isinstance(v, dict):
+            return {k: _flat(s) for k, s in v.items()}
+        if isinstance(v, list):
+            return [_flat(s) for s in v]
+        return _flat(v)
+
+    @model_validator(mode="after")
+    def _license_is_a_hub_identifier(self) -> "CardSettings":
+        """Refuse a licence the Hub would refuse — here, not after the build.
+
+        ``license`` is one of the frontmatter keys the Hub validates SERVER-SIDE when the
+        README is committed. A human-readable name ("Apache 2.0 (see LICENSE)") passes
+        every client-side check and is rejected inside ``push``, after the multi-hour
+        build and the multi-GB upload, with an error tt-model did not write. The valid
+        values are lowercase identifiers from the Hub's licence list (``apache-2.0``,
+        ``cc-by-nc-4.0``, ``other`` ...), and no client library ships that list, so the
+        check is the identifier SHAPE plus the one escape hatch.
+        """
+        lic = self.license
+        if lic is None:
+            return self
+        if not _HUB_LICENSE_ID_RE.fullmatch(lic.id):
+            raise ValueError(
+                f"card.license.id {lic.id!r} is not a Hub licence identifier. Use the "
+                "lowercase id from https://huggingface.co/docs/hub/repositories-licenses "
+                '(e.g. apache-2.0, mit, cc-by-nc-4.0), or "other" with a card.license.name'
+            )
+        if lic.id == "other" and not (lic.name or "").strip():
+            raise ValueError(
+                'card.license.id "other" needs a card.license.name saying which licence '
+                "it is — a bare \"other\" tells a reader nothing about what they may do "
+                "with the weights"
+            )
+        return self
+
+
+# Shape, not a whitelist: the Hub's list grows (``apache-2.0``, ``openrail++``,
+# ``lppl-1.3c``). Use it with ``fullmatch`` — ``match`` plus a ``$`` anchor accepts one
+# trailing newline, which is how ``"other\n"`` passed here and then failed every
+# ``== "other"`` downstream.
+_HUB_LICENSE_ID_RE = re.compile(r"[a-z0-9][a-z0-9.+-]*")
 
 
 class ContainerManifest(BaseModel):
@@ -563,6 +632,10 @@ class ContainerManifest(BaseModel):
                 code_dir=code_dir,
                 verify=list(self.verify),
                 built=dict(built or {}),
+                # Carried so a consumer — and `publish`, which has only the published
+                # repo — can read the card's sections without the authoring YAML, which
+                # never leaves the author's machine.
+                card=CardSpec.model_validate(self.card.model_dump()) if self.card else None,
             ),
         )
 
