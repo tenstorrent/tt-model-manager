@@ -2355,9 +2355,16 @@ def test_a_partial_cache_still_warns_under_no_weights(tmp_path, monkeypatch, cap
     the one warning they can act on."""
     monkeypatch.setattr(container_cli, "_cached_locally", lambda ref: Path("/hf/x"))
     monkeypatch.setattr(container_cli, "has_partial_download", lambda ref: True)
+    monkeypatch.setattr(container_cli, "_bytes_on_disk", lambda ref: 104_000_000_000)
     container_cli.ensure_weights(_manifest(tmp_path, weights={"repo": "org/w"}), "org/m",
                                  no_weights=True)
-    assert "not in your local HF cache" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # DEVSTACK-470: an interrupted fetch is a different state from one that never started,
+    # with a different fix (resume). "Not in your local HF cache" misread it.
+    assert "a download was interrupted" in out
+    assert "104.0 GB is on disk" in out          # Rich may wrap the rest of the line
+    assert "to resume it first instead:  tt-model pull org/m --with-weights" in out
+    assert "not in your local HF cache" not in out
 
 
 def test_the_prefetch_runs_before_the_boot_checklist_opens(tmp_path, monkeypatch):
@@ -2489,3 +2496,139 @@ def test_a_traversing_revision_counts_no_bytes(tmp_path, monkeypatch):
     assert container_cli._bytes_on_disk(_wref(revision="goodsha")) == 1000
     assert container_cli._bytes_on_disk(_wref(revision="/etc")) == 0
     assert container_cli._bytes_on_disk(_wref(revision="../../../etc")) == 0
+
+
+# --------------------------------------------- a pinned weights path is a gate (DEVSTACK-470)
+#
+# Some packages pin the weights' snapshot path straight into the serve env
+# (MISTRAL4_WEIGHTS_DIR=/hf/hub/models--org--w/snapshots/...) and the loader opens it
+# directly. For those, "the model will download them inside the container" is false: an
+# incomplete host cache dies in the engine on the first missing shard, after ~30s of device
+# init. A serve that cannot make the cache whole -- the network is forbidden, or the fetch just
+# failed -- must refuse before any of that, with a card. Packages without a pin keep the
+# advisory (in-container download really is their supported fallback), `pull` never refuses,
+# and `--no-weights` is the escape hatch.
+
+PIN_REV = "a11f36be" + "0" * 32
+PIN_ENV = {"MISTRAL4_WEIGHTS_DIR": f"/hf/hub/models--org--w/snapshots/{PIN_REV}"}
+
+
+def _pinned(tmp_path, env=PIN_ENV):
+    return _manifest(tmp_path, weights={"repo": "org/w", "revision": PIN_REV},
+                     serve={"port": 8000, "block_size": 64, "env": env})
+
+
+def _incomplete(monkeypatch, *, partial: bool, cached: bool = True):
+    monkeypatch.setattr(container_cli, "_cached_locally",
+                        lambda ref: Path("/hf/x") if cached else None)
+    monkeypatch.setattr(container_cli, "has_partial_download", lambda ref: partial)
+    monkeypatch.setattr(container_cli, "_bytes_on_disk", lambda ref: 104_000_000_000)
+
+
+def test_pinned_weights_env_names_the_variable_that_points_into_the_cache(tmp_path):
+    spec = _pinned(tmp_path).container
+    ref = _wref()
+    assert container_cli._pinned_weights_env(ref, spec.resolve_profile()) == "MISTRAL4_WEIGHTS_DIR"
+    # Another repo's cache dir is not this model's weights.
+    other = _pinned(tmp_path, env={"X": "/hf/hub/models--org--other/snapshots/abc"}).container
+    assert container_cli._pinned_weights_env(ref, other.resolve_profile()) is None
+    # No env at all: the default kind of package, which fetches its own weights.
+    plain = _manifest(tmp_path, weights={"repo": "org/w"}).container
+    assert container_cli._pinned_weights_env(ref, plain.resolve_profile()) is None
+
+
+def test_serve_refuses_a_pinned_package_on_a_partial_cache_under_local_only(tmp_path, monkeypatch):
+    """The reporter's state: 1 of 3 shards linked, two still `.incomplete`. Under --local-only
+    nothing can finish the download, so the boot would die in the engine after device init."""
+    started = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: started.append(argv))
+    _incomplete(monkeypatch, partial=True)
+    with pytest.raises(container_cli.ContainerCliError) as ei:
+        container_cli.serve_container(_pinned(tmp_path), target="org/m", local_only=True)
+    e = ei.value
+    assert not started, "the container must not start on an incomplete pinned cache"
+    assert e.diagnosis is not None, "a card, not one warn row"
+    assert e.diagnosis["cause"] == "weights download is incomplete"
+    text = str(e)
+    assert "104.0 GB is on disk" in text                      # partial, not "absent"
+    assert "MISTRAL4_WEIGHTS_DIR" in text                     # why this package cannot self-download
+    assert f"hf download org/w --revision {PIN_REV}" in text  # the exact resume command
+    assert "tt-model pull org/m --with-weights" in text       # the managed equivalent
+    assert "tt-model serve org/m --no-weights" in text        # the escape hatch
+    assert "resumes the partial download" in text
+
+
+def test_serve_refuses_a_pinned_package_when_the_fetch_fails_and_nothing_is_cached(tmp_path, monkeypatch):
+    """A gated repo used to be a note-and-continue on serve too. For a pinned path that note
+    described a fatal state as merely slower; now the gate's own actions lead the card."""
+    started = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: started.append(argv))
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    _incomplete(monkeypatch, partial=False, cached=False)
+
+    def gated(ref, **kw):
+        raise _gated_exc()
+    monkeypatch.setattr(container_cli, "_download_weights", gated)
+    with pytest.raises(container_cli.ContainerCliError) as ei:
+        container_cli.serve_container(_pinned(tmp_path), target="org/m")
+    assert not started
+    d = ei.value.diagnosis
+    assert d["cause"] == "weights are not on the host"
+    assert "gated" in d["detail"].lower()
+    assert any("hf download org/w" in a for a in d["actions"])
+    assert d["evidence"].startswith("403")
+
+
+def test_a_pinned_package_with_a_complete_cache_still_serves_offline(tmp_path, monkeypatch):
+    """The gate is about an INCOMPLETE cache. huggingface_hub falls back to a whole cache when
+    the Hub is unreachable, so an air-gapped serve of a pinned package must still boot."""
+    started = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: started.append(argv))
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    _incomplete(monkeypatch, partial=False, cached=True)
+
+    def offline(ref, **kw):
+        raise OSError("Connection aborted")
+    monkeypatch.setattr(container_cli, "_download_weights", offline)
+    container_cli.serve_container(_pinned(tmp_path), target="org/m")
+    assert started
+
+
+def test_a_package_without_a_pinned_path_keeps_the_advisory(tmp_path, monkeypatch, capsys):
+    """In-container download is the supported fallback for a package that from_pretrains the
+    HF id, so the same partial cache stays a note there -- and the note now says 'partial'."""
+    started = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: started.append(argv))
+    _incomplete(monkeypatch, partial=True)
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m", local_only=True)
+    assert started
+    assert "a download was interrupted" in capsys.readouterr().out
+
+
+def test_no_weights_is_the_escape_hatch_for_a_pinned_package(tmp_path, monkeypatch, capsys):
+    """A user who knows better must never be blocked: --no-weights keeps the note and boots."""
+    started = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: started.append(argv))
+    _incomplete(monkeypatch, partial=True)
+    container_cli.serve_container(_pinned(tmp_path), target="org/m", no_weights=True)
+    assert started
+    assert "a download was interrupted" in capsys.readouterr().out
+
+
+def test_pull_never_refuses_over_a_pinned_path(tmp_path, monkeypatch, capsys):
+    """`pull --with-weights` passes no profile: a failed fetch there stays the non-fatal note
+    it always was (the image is loaded; nothing is about to boot)."""
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    _incomplete(monkeypatch, partial=True, cached=False)
+
+    def gated(ref, **kw):
+        raise _gated_exc()
+    monkeypatch.setattr(container_cli, "_download_weights", gated)
+    container_cli.ensure_weights(_pinned(tmp_path), "org/m")   # must not raise
+    assert "not downloaded" in capsys.readouterr().out
