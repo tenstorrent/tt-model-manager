@@ -417,11 +417,131 @@ def test_the_card_leads_with_the_authors_description():
 
 def test_the_quickstart_sets_expectations():
     card = _card()
-    assert "tt-model pull  you/my-model --with-weights" in card
-    assert "`pull --with-weights` downloads the Docker image" in card
-    assert "tt-model serve" in card
+    assert "tt model pull you/my-model" in card
+    assert "tt serve you/my-model" in card
     assert "several minutes" in card
     assert "Application startup complete" in card
+    # The prose explaining the flow names BOTH spellings, because the fence below it is
+    # an equal path: a reader who took it must not have to infer that this paragraph
+    # describes what they ran.
+    assert "`tt model pull` (or `tt-model pull --with-weights`) downloads" in card
+    assert "`tt serve` (or `tt-model serve`) starts" in card
+
+
+def test_the_quickstart_shows_the_tt_flow_first_and_tt_model_alone_second():
+    """Both fences, in this order, both required.
+
+    `tt` is the consumer path and drives tt-model itself, so it comes first with the
+    one-line install. But AGENTS.md invariant 1 says tt-model alone must do the whole job
+    and no step may need tt-cli — the card is the consumer-facing artifact that rule is
+    about, so the `tt-model` fence is what keeps it true. And the two fences differ on
+    `--with-weights` on purpose: `tt model pull` has no such flag (it asks tt-model for
+    the weights on your behalf), while bare `tt-model pull` skips them unless told.
+    """
+    card = _card()
+    assert card.index("tt model pull you/my-model") < card.index("tt-model pull  you/my-model")
+    assert "uv tool install tenstorrent" in card
+    assert "Without tt-cli" in card
+    assert "tt-model pull  you/my-model --with-weights" in card
+    assert "tt-model serve you/my-model" in card
+    # the flag appears in the tt-model fence only
+    assert "tt model pull you/my-model --with-weights" not in card
+
+
+def test_a_vllm_card_names_the_openai_endpoint_and_the_weights_id():
+    card = _card()
+    assert "## Using it" in card
+    assert "http://127.0.0.1:20000/v1" in card
+    # Flow-neutral: the Quickstart offers a tt-model-only path, so a reader may never
+    # have run `tt serve` at all.
+    assert "or whichever port your serve command reported" in card
+    assert "the port `tt serve` reported" not in card
+    # the model id a client sends is the WEIGHTS repo, not this package's name
+    assert '"model": "org/Weights-7B"' in card
+
+
+def test_a_fork_card_names_the_openai_endpoint_and_its_own_ready_line():
+    """`vllm-fork` has a different launcher, ready line and serve path; until now no card
+    test exercised it, which is how a reworded SERVER_DESC could break every fork card
+    with the suite green."""
+    from test_container_manifest import FORK
+
+    card = _card(**FORK)
+    assert "## Using it" in card
+    assert "http://127.0.0.1:20000/v1" in card
+    assert '"model": "org/Weights-7B"' in card
+    assert "Server ready after" in card
+    assert "not** an OpenAI-compatible" not in card
+
+
+def test_the_card_documents_tool_calling_and_reasoning_when_declared():
+    card = _card(serve={**BASE["serve"],
+                        "capabilities": {"tool_parser": "hermes",
+                                         "reasoning_parser": "deepseek_r1"}})
+    assert "--tool-call-parser hermes" in card
+    assert "finish_reason: tool_calls" in card
+    assert "--reasoning_parser deepseek_r1" in card
+    assert "reasoning_content" in card
+    # one profile: stated once, unqualified
+    assert "On `--profile" not in card
+
+
+def test_a_card_without_capabilities_claims_no_tool_calling():
+    card = _card()
+    assert "Tool calling is enabled" not in card
+    assert "Reasoning output is separated" not in card
+
+
+def _two_profiles(default_caps, other_caps):
+    profiles = [
+        {"name": "latency", "hardware": "p150x2", "mesh_device": "P150x2",
+         "max_num_seqs": 1, "max_model_len": 65536, "capabilities": default_caps},
+        {"name": "tools", "hardware": "p150x4", "mesh_device": "P150x4",
+         "max_num_seqs": 32, "max_model_len": 131072, "capabilities": other_caps},
+    ]
+    return _card(serve_profiles=profiles, default_profile="latency")
+
+
+def test_identical_capabilities_across_profiles_are_stated_once():
+    caps = {"tool_parser": "hermes"}
+    card = _two_profiles(caps, caps)
+    assert card.count("--tool-call-parser hermes") == 1
+    assert "On `--profile" not in card
+
+
+def test_a_capability_only_a_non_default_profile_has_is_still_documented():
+    """Reading only the default profile said nothing about tool calling here, while
+    `tt serve --profile tools` started the server with the parser — directly under a
+    table inviting the reader to pick that profile."""
+    card = _two_profiles({}, {"tool_parser": "hermes"})
+    assert "On `--profile tools`: tool calling is enabled (`--tool-call-parser hermes`)" in card
+    assert "On `--profile latency`" not in card  # nothing to say about it
+
+
+def test_a_capability_only_the_default_profile_has_is_qualified_not_universal():
+    """The mirror image: a reasoning parser only the default sets must not be claimed
+    for every profile.
+
+    And it has to say which profile the reader already gets. "On `--profile latency`"
+    alone reads as "only if you pass this", when a bare `serve` is in fact already on
+    it — the same class of mistake as claiming it universally, in the other direction."""
+    card = _two_profiles({"reasoning_parser": "qwen3"}, {})
+    assert "On `--profile latency` (the default): reasoning output is separated" in card
+    assert "Reasoning output is separated (" not in card  # no unqualified claim
+
+
+def test_every_card_tells_readers_how_to_reach_the_author_and_the_tooling():
+    """Three channels because they reach three different people. The one that reaches
+    the bundle's AUTHOR is the repo's Discussions tab; `tt report issue` files against
+    tenstorrent/tt-cli, so it is offered for `tt` problems, not for this package."""
+    card = _card()
+    assert "## Feedback" in card
+    assert "https://huggingface.co/you/my-model/discussions" in card
+    assert "tt report issue" in card
+    assert "tenstorrent/tt-cli" in card
+    assert "support@tenstorrent.com" in card
+    # `tt report feedback` is still a stub that exits UNSUPPORTED
+    assert "tt report feedback" not in card
 
 
 def test_the_card_pins_provenance():
@@ -1206,9 +1326,41 @@ def _dit_manifest():
 
 
 def test_a_diffusion_card_does_not_claim_an_openai_api():
+    """It must never read as OpenAI-compatible.
+
+    This used to assert the string "OpenAI" was absent entirely. The card now says the
+    opposite out loud -- "**not** an OpenAI-compatible chat API" -- because silence left
+    readers of a dit card to assume the usual endpoint and discover otherwise from a 404;
+    the published vision/robotics cards state the negation for the same reason. So the
+    check is that no POSITIVE claim survives, not that the word is missing.
+    """
     card = build.render_model_card(_dit_manifest(), _built())
-    assert "OpenAI" not in card
+    assert "an OpenAI-compatible server" not in card
+    assert "not** an OpenAI-compatible chat API" in card
     assert "the model's own HTTP server" in card
+    # exactly one mention, and it is the negation — an ADDITIVE positive claim (an
+    # "OpenAI Python client" snippet, say) would otherwise slip past the two asserts above
+    assert card.count("OpenAI") == 1
+
+
+def test_a_diffusion_card_points_at_author_notes_only_when_there_are_some():
+    """"See the author's notes above" on a card with no author notes is a dead end; a dit
+    bundle published without a `card:` block then offered no guidance at all on the
+    payload the server expects."""
+    from tt_kernel.container_manifest import ContainerManifest
+
+    bare = build.render_model_card(_dit_manifest(), _built())
+    assert "author's notes" not in bare
+    assert "`GET /docs`" in bare and "`code/`" in bare
+
+    raw = json.loads(json.dumps(BASE))
+    raw["kind"] = "tt-dit-server"
+    raw["runtime"] = {"app": "models.tt_dit.server.flux2.app:app"}
+    raw.pop("serve_profiles", None)
+    raw["serve"] = {"hardware": "p150x4", "mesh_device": "P150x4", "port": 8000}
+    raw["card"] = {"quickstart": "POST /predict with a base64 image."}
+    with_notes = build.render_model_card(ContainerManifest.model_validate(raw), _built())
+    assert "See the author's notes above" in with_notes
 
 
 def test_a_vllm_card_still_says_openai_compatible():
@@ -1257,6 +1409,25 @@ def test_every_kind_describes_the_server_it_starts():
         desc = getattr(launcher, "SERVER_DESC", None)
         assert desc, f"kind {name} has no SERVER_DESC"
         assert not desc.endswith("."), f"{name}: SERVER_DESC is a clause, not a sentence"
+
+
+def test_every_kind_declares_whether_it_is_openai_compatible():
+    """The card branches on this FACT, never on the SERVER_DESC prose: rewording the
+    prose once made every vllm-fork card contradict itself with the whole suite green."""
+    from tt_kernel.launchers import KINDS
+
+    for name, launcher in KINDS.items():
+        flag = getattr(launcher, "OPENAI_COMPATIBLE", None)
+        assert isinstance(flag, bool), f"kind {name} has no boolean OPENAI_COMPATIBLE"
+        # The two must agree, or one card sentence contradicts the next: a kind
+        # declaring SERVER_DESC "an OpenAI-compatible transcription server" with
+        # OPENAI_COMPATIBLE False renders "exposes an OpenAI-compatible transcription
+        # server, **not** an OpenAI-compatible chat API".
+        assert ("OpenAI" in launcher.SERVER_DESC) == flag, (
+            f"{name}: SERVER_DESC and OPENAI_COMPATIBLE disagree")
+    assert KINDS["tt-dit-server"].OPENAI_COMPATIBLE is False
+    assert KINDS["vllm-plugin"].OPENAI_COMPATIBLE is True
+    assert KINDS["vllm-fork"].OPENAI_COMPATIBLE is True
 
 
 def test_the_card_documents_the_port_serve_opens_not_the_manifests_bind_port():

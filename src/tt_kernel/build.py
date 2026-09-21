@@ -1039,11 +1039,102 @@ def _card_tags(m: ContainerManifest) -> set:
     return tags
 
 
+def _card_using_it(m: ContainerManifest) -> List[str]:
+    """The ``## Using it`` section: what a client actually sends.
+
+    Derived, not authored. The endpoint shape follows from ``kind``, and the two
+    capability parsers are already in the manifest because the launcher turns them into
+    vLLM flags (``launchers`` -> ``--tool-call-parser`` / ``--reasoning_parser``). A card
+    that omits them tells a reader the model cannot do tool calling when in fact the
+    server was started for it — the most expensive kind of wrong, since the client
+    silently gets prose back instead of ``tool_calls``.
+    """
+    from .launchers import launcher_for
+    from .manifest import DEFAULT_PORT
+
+    launcher = launcher_for(m.kind)
+    lines = ["## Using it", ""]
+    if launcher.OPENAI_COMPATIBLE:
+        lines += [
+            f"The server speaks the OpenAI API at `http://127.0.0.1:{DEFAULT_PORT}/v1` "
+            # Not "the port `tt serve` reported": the Quickstart offers a tt-model-only
+            # path too, and a reader who took it never ran `tt serve`.
+            "(or whichever port your serve command reported; chat completions, "
+            f"completions, and `/v1/models`). Pass `\"model\": \"{m.weights_repo}\"` — "
+            "the weights id, not this package's name.",
+            "",
+        ]
+        lines += _capability_notes(m)
+    else:
+        lines += [
+            f"This package exposes {launcher.SERVER_DESC} on port {DEFAULT_PORT}, "
+            "**not** an OpenAI-compatible chat API — its request and response shapes are "
+            "the model's own. "
+            + (
+                "See the author's notes above for the payload it expects."
+                if m.card and ((m.card.quickstart or "").strip()
+                               or (m.card.description or "").strip())
+                # No author text to point at: sending the reader "above" would be a dead
+                # end, so name the two places the contract actually lives.
+                else "For the payload it expects, see the server's own routes (`GET /docs` "
+                     "on a FastAPI app) or the model code under `code/` in this repo."
+            ),
+            "",
+        ]
+    return lines
+
+
+def _capability_notes(m: ContainerManifest) -> List[str]:
+    """Tool-calling and reasoning notes, qualified per profile when profiles disagree.
+
+    Capabilities deep-merge per profile, so two profiles of one image can start the
+    server with different parsers. Reading only the default and stating the result flat
+    was wrong in both directions: a `tools` profile the default lacked went unmentioned,
+    and a reasoning parser only the default set was claimed for every profile — directly
+    under a table inviting the reader to pick a different one.
+    """
+    def _sentences(cap) -> List[str]:
+        out = []
+        if cap and cap.tool_parser:
+            out.append(
+                f"tool calling is enabled (`--tool-call-parser {cap.tool_parser}`): a "
+                "request that passes `tools` comes back with `tool_calls` and "
+                "`finish_reason: tool_calls`"
+            )
+        if cap and cap.reasoning_parser:
+            out.append(
+                f"reasoning output is separated (`--reasoning_parser "
+                f"{cap.reasoning_parser}`): the thinking text arrives in "
+                "`reasoning_content`, apart from `content`"
+            )
+        return out
+
+    per_profile = [(name, _sentences(m.resolve_profile(name).capabilities))
+                   for name in m.profile_names()]
+    if all(s == per_profile[0][1] for _, s in per_profile):
+        # One answer for the whole image: state it once, unqualified.
+        lines = []
+        for sentence in per_profile[0][1]:
+            lines += [sentence[0].upper() + sentence[1:] + ".", ""]
+        return lines
+    # Mark the default. "On `--profile tools`: ..." reads as "only if you pass this",
+    # which is the wrong answer when `tools` is what a bare `serve` already gives you —
+    # the same class of mistake as claiming the default's capabilities for every profile.
+    default = m.resolved_default()
+    lines = []
+    for name, sentences in per_profile:
+        if sentences:
+            where = f"On `--profile {name}`" + (" (the default)" if name == default else "")
+            lines += [f"{where}: " + "; ".join(sentences) + ".", ""]
+    return lines
+
+
 def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     """The generated README.md for the HF repo.
 
     The order is the reader's order: what the model is and what hardware it needs
     first, then how to run it, then (only when there is a choice) the profile table,
+    then what a client actually sends (``Using it``), then where to report a problem,
     then provenance. Provenance names each component by its official name and shows a
     commit only as a working public link.
     """
@@ -1090,24 +1181,45 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         "",
         "## Quickstart",
         "",
+        # Two fences, in this order, both required. `tt` (the Tenstorrent CLI, PyPI
+        # package `tenstorrent`) is the consumer path: it installs and drives tt-model
+        # itself, so one tool covers a fresh box to a served model. The second fence is
+        # not a courtesy — AGENTS.md invariant 1 says tt-model alone must do the whole
+        # job and no step may need tt-cli, and the card is the consumer-facing artifact
+        # that rule is about. Drop it and the card requires a tool the repo says is
+        # optional.
         "```bash",
-        f"tt-model pull  {m.repo} --with-weights",
-        f"tt-model serve {m.repo}",
+        "uv tool install tenstorrent   # once — the Tenstorrent CLI, `tt`",
+        f"tt model pull {m.repo}",
+        f"tt serve {m.repo}",
         "```",
         "",
-        f"`pull --with-weights` downloads the Docker image and the "
-        f"[`{m.weights_repo}`](https://huggingface.co/{m.weights_repo}) weights"
+        # Both spellings named once, because the fence below is an equal path and not a
+        # footnote: a reader who took it should not have to infer that the paragraph
+        # explaining the flow also describes what they ran.
+        "`tt model pull` (or `tt-model pull --with-weights`) downloads the Docker image "
+        f"and the [`{m.weights_repo}`](https://huggingface.co/{m.weights_repo}) weights"
         + (f" at `{m.weights_ref.revision}`" if m.weights_ref.revision else "")
-        + " (into your HF cache; they are not in the image). `serve` starts "
-        # DEFAULT_PORT, never the manifest's `port`. The two commands above are
-        # `tt-model serve`, and serve deliberately ignores the manifest port as a seed:
-        # authors write 8000 there for the bare-`docker run` CMD, which is exactly the
-        # port that collides on a shared box.
+        + " (into your HF cache; they are not in the image). `tt serve` (or "
+        "`tt-model serve`) starts "
+        # DEFAULT_PORT, never the manifest's `port`. Serve deliberately ignores the
+        # manifest port as a seed: authors write 8000 there for the bare-`docker run`
+        # CMD, which is exactly the port that collides on a shared box.
         f"{launcher_for(m.kind).SERVER_DESC} on port {DEFAULT_PORT} (or the next free "
         "port, if that one is busy)"
         + "; the first "
         "start compiles kernels for your device, which takes several minutes, and the "
         f"server is ready when it logs `{launcher_for(m.kind).READY_LINE}`.",
+        "",
+        "Without tt-cli — tt-model alone does the whole job:",
+        "",
+        "```bash",
+        # `tt-model pull` skips weights unless asked (the model class fetches them at
+        # load); `tt model pull` asks for them on your behalf, which is why only this
+        # fence carries the flag.
+        f"tt-model pull  {m.repo} --with-weights",
+        f"tt-model serve {m.repo}",
+        "```",
         "",
     ]
     if m.card and m.card.quickstart:
@@ -1139,7 +1251,25 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
                 cells += [str(p.max_num_seqs or ""), str(p.max_model_len or "")]
             lines.append("| " + " | ".join(cells) + " |")
         lines.append("")
+
+    lines += _card_using_it(m)
     lines += [
+        "## Feedback",
+        "",
+        # Unconditional: a reader who hits a problem is on THIS page, and the card is
+        # the only artifact they are guaranteed to have seen. Three channels, because
+        # they reach three different people: the repo's Discussions tab is the only one
+        # that reaches the bundle's AUTHOR; `tt report issue` files against
+        # tenstorrent/tt-cli (the tooling tracker — a broken bundle sent there never
+        # reaches whoever can fix it), so it is offered for `tt` problems only;
+        # support@tenstorrent.com is the address the GA plan routes product feedback to.
+        # `tt report feedback` is deliberately absent: still a stub that exits UNSUPPORTED.
+        f"Questions or problems with this package: open a discussion at "
+        f"https://huggingface.co/{m.repo}/discussions — that is what reaches its author. "
+        "A problem with the `tt` tooling itself: `tt report issue` (collects your "
+        "environment and opens a prefilled issue against tenstorrent/tt-cli). Product "
+        "feedback: support@tenstorrent.com.",
+        "",
         "## Provenance",
         "",
         "The exact sources the image was built from — `code/` in this repo is "

@@ -123,6 +123,10 @@ class VllmPluginLauncher:
     # the same category of fact -- what this stack exposes -- and the card must not
     # hardcode it: a diffusion server is NOT an OpenAI API.
     SERVER_DESC = "an OpenAI-compatible server"
+    # The FACT behind that prose, for code to branch on. SERVER_DESC is a sentence
+    # fragment and gets reworded; a caller that compared it to a literal would flip its
+    # behaviour on a copy edit with every test still green.
+    OPENAI_COMPATIBLE = True
 
     # vLLM's PyPI metadata is generated on a CUDA machine; without the CPU index a plain
     # install resolves the CUDA dependency set (~4 GB of nvidia-* wheels, no device here)
@@ -395,6 +399,7 @@ class VllmForkLauncher:
     # the same category of fact -- what this stack exposes -- and the card must not
     # hardcode it: a diffusion server is NOT an OpenAI API.
     SERVER_DESC = "an OpenAI-compatible server"
+    OPENAI_COMPATIBLE = True  # see VllmPluginLauncher
 
     # where the fork checkout lives in both build stages
     FORK_DIR = "/opt/vllm"
@@ -719,6 +724,7 @@ class TtDitServerLauncher:
     # A diffusion transformer has no tokens and no KV cache, so there is no chat/
     # completions API to be compatible WITH -- the server is the model's own ASGI app.
     SERVER_DESC = "the model's own HTTP server"
+    OPENAI_COMPATIBLE = False
 
     PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
     DEFAULT_PACKAGES = ("fastapi", "uvicorn", "pydantic>=2", "pillow")
