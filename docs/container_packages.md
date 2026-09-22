@@ -405,6 +405,17 @@ The one thing it *does* refuse to do quietly:
   counted as already-present. Skipped for a spec pinned with `allow_patterns`/`ignore_patterns`,
   where a whole-repo total would over-count.
 
+- **It won't boot a package that pins the weights path over an incomplete cache.** Some
+  manifests put the snapshot path itself into the serve env
+  (`MISTRAL4_WEIGHTS_DIR=/hf/hub/models--org--w/snapshots/…`) and the loader opens it
+  directly, so for them "the model will download the rest inside the container" is false: an
+  incomplete cache dies in the engine on the first missing shard, after device init. When
+  `serve` cannot make that cache whole — `--local-only`, or the fetch itself failed (gated,
+  offline) — it stops with a card that says whether the download is absent or interrupted, how
+  much is already on disk, and the exact `hf download … --revision …` that resumes it.
+  `--no-weights` is the escape hatch if you know the model fetches its own weights. Packages
+  without a pinned path keep the advisory below, and `pull` never refuses.
+
 Not detected, in any version: a file that is present but truncated. `huggingface_hub` verifies
 what it downloads and never re-hashes what is already on disk, so neither does this. Catching
 it would mean re-reading every byte of the weights on every serve.
@@ -419,6 +430,10 @@ of a silent boot:
 → to fetch them first instead:  tt-model pull org/name --with-weights
 → or directly:  hf download org/Weights-7B --revision a1b2c3d4
 ```
+
+An interrupted download reads differently — `weights org/Weights-7B@a1b2c3d4: a download was
+interrupted — 104.0 GB is on disk and resumable` — because its fix is to resume, not to start
+over, and nothing on disk needs deleting.
 
 That in-container download counts against `serve`'s readiness watch (4 h by default; see
 above), so on a slow link either prefetch with `tt-model pull --with-weights` or raise

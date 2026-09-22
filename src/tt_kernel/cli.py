@@ -1258,7 +1258,9 @@ def serve(
     no_weights: bool = typer.Option(
         False, "--no-weights", help="For a container package: don't fetch missing weights "
         "before boot. They are downloaded inside the container instead (same bind-mounted "
-        "cache, but slower and with no progress shown here)."
+        "cache, but slower and with no progress shown here). Also the escape hatch for a "
+        "package that pins the weights path into its serve env: serve then warns about an "
+        "incomplete cache instead of refusing to boot."
     ),
     port: Optional[int] = typer.Option(
         None, "--port", help="Serve on exactly this port (default: 20000, walking up "
