@@ -1,0 +1,7 @@
+# Review ownership for tt-model-manager. GitHub requests a review from the owners of
+# every path a pull request touches, so PRs reach the right people without being
+# assigned by hand.
+#
+# One catch-all rule for now. Split this by path if ownership ever diverges.
+
+* @tenstorrent/dx-team @ezietlowTT

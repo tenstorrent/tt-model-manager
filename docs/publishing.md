@@ -32,7 +32,7 @@ These are three independent concepts. The rest of this page follows from keeping
 | **public / private** | The repo's **visibility**. | `--public` / `--private` |
 | **publish** | List the repo in the community **catalog** (a public pointer index). | `--publish`, or `tt-model publish` later |
 
-Two rules make this predictable and safe:
+Three rules make this predictable and safe:
 
 - **Private by default.** `push` and `package-thin` both create a **new** repo as
   **private**. A bundle can point at proprietary weights, so a repo is not made public by
@@ -40,11 +40,33 @@ Two rules make this predictable and safe:
   that **already exists does not change its visibility** unless you pass the flag, and a change
   is always announced (`! Changed visibility …`).
 - **`--publish` implies `--public`.** The catalog is a public index that can only see public
-  repos, so publishing makes the repo public and lists it in one step. You do not pass both
-  flags. `--public` on its own makes the repo public **without** listing it, so it can be shared
-  by link without being advertised. `--publish` combined with `--private` is a contradiction and
-  is refused. Publishing is a pointer opt-in: the catalog stores none of your content and the
-  repo stays under your governance.
+  repos, so publishing makes the repo public and lists it in one step — you never pass both flags.
+  `--public` on its own makes the repo public **without** listing it (shared by link, not
+  advertised). `--publish` combined with `--private` is a contradiction and is refused. Publishing
+  is a pure pointer opt-in: the catalog stores none of your content and the repo stays under your
+  governance.
+- **A listing needs a card that says something.** A container package must carry
+  `card.performance` and `card.limitations` to be listed — how the model performs and where it
+  falls short are the two questions a stranger picking from the catalog asks, and the two only its
+  author can answer. `package` warns when they are missing; `tt-model publish` and `push --publish`
+  refuse, and so does a plain `push` of a bundle that is *already* listed (a re-push re-applies the
+  listing, so it is held to the same bar — add the sections, or `tt-model unpublish` first).
+  Pushing an unlisted bundle and serving are unaffected, so an experimental or private bundle is
+  never blocked. Bundles published before cards were carried in the manifest are exempt from
+  `tt-model publish` (there is nothing to read, which is not the same as nothing to say) and pick
+  up the template on their next `tt-model package --container`. That exemption is for
+  `tt-model publish` only: a **staged directory** from before card sections is refused on `push`,
+  because there re-packaging is local and a manifest is a JSON file anyone can hand-edit — and if
+  the listing should go rather than the sections be added, `tt-model unpublish` settles it in one
+  command instead of a rebuild.
+
+  The check fails closed: if the published manifest cannot be read, nothing is listed and nothing
+  is made public. That includes a manifest that will not *parse* — most likely one pushed by a
+  newer tt-model, which says so and asks you to upgrade rather than blaming the network.
+
+  Known gap, tracked separately: the v5/v6 `package`/`package-thin` paths turn `--mesh`/`--arch`
+  into repo tags without validation, so a value of `tt-model-catalog` there lists a bundle with no
+  card check at all.
 
 ```bash
 tt-model package-thin you/mymodel ...            # private repo, not listed  (the default)

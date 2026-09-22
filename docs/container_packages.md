@@ -100,7 +100,7 @@ Fields, from `src/tt_kernel/container_manifest.py`:
 | `default_profile` | required when more than one profile is declared. The author decides the default rather than leaving it to the consumer's environment. |
 | `verify` | build-time Python assertions run **inside the finished image**, on top of the launcher's own import checks. |
 | `image` | where the built image is published: `registry: hf` (default) or a real registry namespace. |
-| `card.quickstart` | optional Markdown appended to the generated model card. |
+| `card` | the model-card sections the tool cannot derive, each rendered in a fixed place the renderer owns. Own `##` section: `performance`, `limitations` (both always rendered — an italic "not provided" placeholder when empty, and both required for a catalog listing: see [publishing.md](publishing.md)), `risks`, `licensing`, `related`, and `intended_use` / `out_of_scope_use` (together, as *Intended use*). Rows in the *At a glance* table (keep to a short phrase): `architecture`, `status`. Merged into a derived section: `description` (the lede under the title), `quickstart` (appended under *Quickstart*), `usage` (appended under *Using it*). Frontmatter, under the Hub's own keys: `license` (`{id, name, link}` — `id` must be a lowercase Hub licence identifier or `other`; `name` and `link` are emitted **only** beside `id: other`, which is the case the Hub documents them for, and ignored otherwise), `pipeline_tag` (defaults to `text-generation` for the vLLM kinds), `base_model` (defaults to the weights repo). Bundles already published pick up the template on their next `tt-model package --container`; nothing rewrites a live card. The annotated block is in [`examples/container-example.yaml`](../examples/container-example.yaml). |
 
 `max_num_seqs` and `block_size` are **required after profile merge**. The Tenstorrent backend
 rejects vLLM's own defaults. `mesh_device` must be a value from the plugin's closed
@@ -357,6 +357,17 @@ The one thing it refuses to do quietly:
   counted as already-present. Skipped for a spec pinned with `allow_patterns`/`ignore_patterns`,
   where a whole-repo total would over-count.
 
+- **It won't boot a package that pins the weights path over an incomplete cache.** Some
+  manifests put the snapshot path itself into the serve env
+  (`MISTRAL4_WEIGHTS_DIR=/hf/hub/models--org--w/snapshots/…`) and the loader opens it
+  directly, so for them "the model will download the rest inside the container" is false: an
+  incomplete cache dies in the engine on the first missing shard, after device init. When
+  `serve` cannot make that cache whole — `--local-only`, or the fetch itself failed (gated,
+  offline) — it stops with a card that says whether the download is absent or interrupted, how
+  much is already on disk, and the exact `hf download … --revision …` that resumes it.
+  `--no-weights` is the escape hatch if you know the model fetches its own weights. Packages
+  without a pinned path keep the advisory below, and `pull` never refuses.
+
 Not detected, in any version: a file that is present but truncated. `huggingface_hub` verifies
 what it downloads and does not re-hash what is already on disk, so neither does this. Catching
 it would mean re-reading every byte of the weights on every serve.
@@ -370,6 +381,10 @@ fetch its own weights at first load, with an advisory note instead of a silent b
 → to fetch them first instead:  tt-model pull org/name --with-weights
 → or directly:  hf download org/Weights-7B --revision a1b2c3d4
 ```
+
+An interrupted download reads differently — `weights org/Weights-7B@a1b2c3d4: a download was
+interrupted — 104.0 GB is on disk and resumable` — because its fix is to resume, not to start
+over, and nothing on disk needs deleting.
 
 That in-container download counts against `serve`'s readiness watch (4 h by default; see
 above), so on a slow link either prefetch with `tt-model pull --with-weights` or raise
