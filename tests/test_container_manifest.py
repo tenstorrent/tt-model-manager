@@ -718,3 +718,23 @@ def test_a_folded_bare_other_still_hits_the_needs_a_name_rule():
     with pytest.raises(Exception) as exc:
         _with_card(license={"id": "other\n", "name": "  \n  "})
     assert "needs a card.license.name" in str(exc.value)
+def test_publish_gaps_names_the_missing_required_sections():
+    from tt_kernel.container_manifest import card_publish_gaps
+
+    assert card_publish_gaps(_with_card(description="x").card) == [
+        "performance", "limitations"]
+    assert card_publish_gaps(_with_card(performance="fast").card) == ["limitations"]
+    assert card_publish_gaps(
+        _with_card(performance="fast", limitations="none").card) == []
+    # whitespace is not a section — the same definition the renderer's placeholder uses
+    assert card_publish_gaps(
+        _with_card(performance="   ", limitations="none").card) == ["performance"]
+
+
+def test_publish_gaps_judges_nothing_when_there_is_no_card_on_the_wire():
+    """A bundle from before cards were carried says nothing about its sections; that is
+    not the same as saying they are missing. Whether that exempts the bundle is the
+    caller's decision (publish: yes; push --publish: no), not this function's."""
+    from tt_kernel.container_manifest import card_publish_gaps
+
+    assert card_publish_gaps(None) == []

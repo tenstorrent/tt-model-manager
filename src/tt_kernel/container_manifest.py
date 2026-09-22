@@ -345,6 +345,27 @@ class CardSettings(CardSpec):
 _HUB_LICENSE_ID_RE = re.compile(r"[a-z0-9][a-z0-9.+-]*")
 
 
+#: Card sections a bundle must carry before it can be listed in the public catalog.
+#: Both are things only the author knows and a consumer cannot infer: what the model
+#: scores and how fast it is, and where it falls short. A listing without them is the
+#: state the catalog is already full of — see DEVSTACK-447.
+REQUIRED_CARD_SECTIONS = ("performance", "limitations")
+
+
+def card_publish_gaps(card: Optional[CardSpec]) -> List[str]:
+    """Which required card sections are missing. Pure, so every call site agrees.
+
+    ``None`` means the bundle predates cards on the wire; there is nothing to judge, so
+    no gaps are reported rather than every section being called missing. Whether a
+    caller treats ``None`` as exempt or as a gap is the caller's decision — `publish`
+    exempts (the bundle is already in the wild), `push --publish` does not (the staged
+    directory is local and can be re-packaged).
+    """
+    if card is None:
+        return []
+    return [f for f in REQUIRED_CARD_SECTIONS if not (getattr(card, f, None) or "").strip()]
+
+
 class ContainerManifest(BaseModel):
     """The authored ``tt-model.yaml``."""
 
