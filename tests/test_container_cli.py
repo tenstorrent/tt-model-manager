@@ -600,6 +600,54 @@ def test_a_boot_failure_carries_a_diagnosis_for_the_card(tmp_path, monkeypatch):
     assert e.value.diagnosis and "container exited" in e.value.diagnosis["cause"]
 
 
+def _serve_with_timeout_probe(tmp_path, monkeypatch, *, ready):
+    """Serve against a stub wait_ready that records the deadline it was handed."""
+    seen = {}
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "port_is_free", lambda p: True)
+
+    def fake_wait(name, probe, timeout_s=None, on_line=None):
+        seen["timeout_s"] = timeout_s
+        return container.ReadyResult(ready, False, ["still booting"], 1.0)
+
+    monkeypatch.setattr(container, "wait_ready", fake_wait)
+    container_cli.serve_container(_manifest(tmp_path), target="org/x")
+    return seen
+
+
+def test_serve_waits_for_hours_by_default_not_thirty_minutes(tmp_path, monkeypatch):
+    monkeypatch.delenv("TT_MODEL_READY_TIMEOUT", raising=False)
+    monkeypatch.delenv("TT_KERNEL_READY_TIMEOUT", raising=False)
+    seen = _serve_with_timeout_probe(tmp_path, monkeypatch, ready=True)
+    assert seen["timeout_s"] == container.READY_TIMEOUT_S == 4 * 3600
+
+
+def test_serve_honours_TT_MODEL_READY_TIMEOUT_in_the_wait_and_the_card(tmp_path, monkeypatch):
+    """One figure, two consumers. The deadline and the 'did not report ready within ...'
+    card used to be two separate 1800 literals; with an override they MUST agree."""
+    monkeypatch.setenv("TT_MODEL_READY_TIMEOUT", "5400")
+    with pytest.raises(container_cli.ContainerCliError) as e:
+        _serve_with_timeout_probe(tmp_path, monkeypatch, ready=False)
+    assert e.value.diagnosis["cause"].endswith("within 1 h 30 min")
+    assert "still running" in e.value.diagnosis["detail"]
+
+
+def test_a_bad_TT_MODEL_READY_TIMEOUT_fails_before_anything_is_started(tmp_path, monkeypatch):
+    monkeypatch.setenv("TT_MODEL_READY_TIMEOUT", "soon")
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+
+    def boom(*a, **k):
+        raise AssertionError(f"reached docker/weights with a bad timeout: {a}")
+
+    monkeypatch.setattr(container, "run_checked", boom)
+    monkeypatch.setattr(container, "ensure_mount_sources", boom)
+    monkeypatch.setattr(container_cli, "ensure_weights", boom)
+    with pytest.raises(container_cli.ContainerCliError, match="TT_MODEL_READY_TIMEOUT"):
+        container_cli.serve_container(_manifest(tmp_path), target="org/x")
+
+
 def test_detach_returns_without_watching_the_boot(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(container, "running", lambda name=None: [])
     monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)
@@ -757,13 +805,16 @@ def test_profiles_marks_the_default(tmp_path, monkeypatch, capsys):
 # ------------------------------------------------------------------ push
 
 
-def _staged(tmp_path, *, hub_hosted=True, with_layout=True, repo="raahem/qwen") -> Path:
+def _staged(tmp_path, *, hub_hosted=True, with_layout=True, repo="raahem/qwen",
+            card=None) -> Path:
     """A staged package directory as `package --container` would leave it."""
     from tt_kernel.container_manifest import ContainerManifest
 
     raw = json.loads(json.dumps(BASE))
     if not hub_hosted:
         raw["image"] = {"registry": "ghcr.io/tenstorrent"}
+    if card is not None:
+        raw["card"] = card
     m = ContainerManifest.model_validate(raw)
     wire = m.to_wire(image_tag="tt-model/my-model:abc123", tt_metal_version="0.72.1",
                      tt_kernel_version="0.1.0", built={"repo": repo})
@@ -905,7 +956,8 @@ def test_publish_lists_a_container_package_after_the_upload(tmp_path, monkeypatc
     monkeypatch.setattr(hub, "set_catalog_listing",
                         lambda repo_id, listed: order.append(("list", repo_id, listed)))
 
-    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen")),
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen",
+                                                       card=_COMPLETE)),
                                   "--public", "--publish"])
     assert res.exit_code == 0, res.output
     assert order == ["upload", ("list", "raahem/qwen", True)]
@@ -935,7 +987,7 @@ def test_a_plain_push_preserves_an_existing_catalog_listing(tmp_path, monkeypatc
     monkeypatch.setattr(hub, "set_catalog_listing",
                         lambda repo_id, listed: calls.append((repo_id, listed)))
 
-    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path))])   # no --publish
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, card=_COMPLETE))])   # no --publish
     assert res.exit_code == 0, res.output
     assert calls == [("raahem/qwen", True)], calls   # listing restored, not dropped
     assert "kept" in res.output and "catalog" in res.output
@@ -1001,7 +1053,8 @@ def test_publish_alone_implies_public_and_lists(tmp_path, monkeypatch):
     monkeypatch.setattr(hub, "set_catalog_listing",
                         lambda repo_id, listed: seen["order"].append(("list", repo_id, listed)))
 
-    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen")), "--publish"])
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen",
+                                                       card=_COMPLETE)), "--publish"])
     assert res.exit_code == 0, res.output
     assert seen["ensure_private"] is False  # --publish forced public
     assert seen["order"] == ["upload", ("list", "raahem/qwen", True)]  # listed after the upload
@@ -1016,7 +1069,8 @@ def test_a_failed_listing_does_not_read_as_a_failed_push(tmp_path, monkeypatch):
         raise RuntimeError("hub said no")
 
     monkeypatch.setattr(hub, "set_catalog_listing", boom)
-    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen")),
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen",
+                                                       card=_COMPLETE)),
                                   "--public", "--publish"])
     assert res.exit_code == 0, res.output
     assert "tt-model publish raahem/qwen" in res.output
@@ -2358,9 +2412,16 @@ def test_a_partial_cache_still_warns_under_no_weights(tmp_path, monkeypatch, cap
     the one warning they can act on."""
     monkeypatch.setattr(container_cli, "_cached_locally", lambda ref: Path("/hf/x"))
     monkeypatch.setattr(container_cli, "has_partial_download", lambda ref: True)
+    monkeypatch.setattr(container_cli, "_bytes_on_disk", lambda ref: 104_000_000_000)
     container_cli.ensure_weights(_manifest(tmp_path, weights={"repo": "org/w"}), "org/m",
                                  no_weights=True)
-    assert "not in your local HF cache" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # DEVSTACK-470: an interrupted fetch is a different state from one that never started,
+    # with a different fix (resume). "Not in your local HF cache" misread it.
+    assert "a download was interrupted" in out
+    assert "104.0 GB is on disk" in out          # Rich may wrap the rest of the line
+    assert "to resume it first instead:  tt-model pull org/m --with-weights" in out
+    assert "not in your local HF cache" not in out
 
 
 def test_the_prefetch_runs_before_the_boot_checklist_opens(tmp_path, monkeypatch):
@@ -2492,3 +2553,290 @@ def test_a_traversing_revision_counts_no_bytes(tmp_path, monkeypatch):
     assert container_cli._bytes_on_disk(_wref(revision="goodsha")) == 1000
     assert container_cli._bytes_on_disk(_wref(revision="/etc")) == 0
     assert container_cli._bytes_on_disk(_wref(revision="../../../etc")) == 0
+
+
+# --------------------------------------------- a pinned weights path is a gate (DEVSTACK-470)
+#
+# Some packages pin the weights' snapshot path straight into the serve env
+# (MISTRAL4_WEIGHTS_DIR=/hf/hub/models--org--w/snapshots/...) and the loader opens it
+# directly. For those, "the model will download them inside the container" is false: an
+# incomplete host cache dies in the engine on the first missing shard, after ~30s of device
+# init. A serve that cannot make the cache whole -- the network is forbidden, or the fetch just
+# failed -- must refuse before any of that, with a card. Packages without a pin keep the
+# advisory (in-container download really is their supported fallback), `pull` never refuses,
+# and `--no-weights` is the escape hatch.
+
+PIN_REV = "a11f36be" + "0" * 32
+PIN_ENV = {"MISTRAL4_WEIGHTS_DIR": f"/hf/hub/models--org--w/snapshots/{PIN_REV}"}
+
+
+def _pinned(tmp_path, env=PIN_ENV):
+    return _manifest(tmp_path, weights={"repo": "org/w", "revision": PIN_REV},
+                     serve={"port": 8000, "block_size": 64, "env": env})
+
+
+def _incomplete(monkeypatch, *, partial: bool, cached: bool = True):
+    monkeypatch.setattr(container_cli, "_cached_locally",
+                        lambda ref: Path("/hf/x") if cached else None)
+    monkeypatch.setattr(container_cli, "has_partial_download", lambda ref: partial)
+    monkeypatch.setattr(container_cli, "_bytes_on_disk", lambda ref: 104_000_000_000)
+
+
+def test_pinned_weights_env_names_the_variable_that_points_into_the_cache(tmp_path):
+    spec = _pinned(tmp_path).container
+    ref = _wref()
+    assert container_cli._pinned_weights_env(ref, spec.resolve_profile()) == "MISTRAL4_WEIGHTS_DIR"
+    # Another repo's cache dir is not this model's weights.
+    other = _pinned(tmp_path, env={"X": "/hf/hub/models--org--other/snapshots/abc"}).container
+    assert container_cli._pinned_weights_env(ref, other.resolve_profile()) is None
+    # No env at all: the default kind of package, which fetches its own weights.
+    plain = _manifest(tmp_path, weights={"repo": "org/w"}).container
+    assert container_cli._pinned_weights_env(ref, plain.resolve_profile()) is None
+
+
+def test_serve_refuses_a_pinned_package_on_a_partial_cache_under_local_only(tmp_path, monkeypatch):
+    """The reporter's state: 1 of 3 shards linked, two still `.incomplete`. Under --local-only
+    nothing can finish the download, so the boot would die in the engine after device init."""
+    started = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: started.append(argv))
+    _incomplete(monkeypatch, partial=True)
+    with pytest.raises(container_cli.ContainerCliError) as ei:
+        container_cli.serve_container(_pinned(tmp_path), target="org/m", local_only=True)
+    e = ei.value
+    assert not started, "the container must not start on an incomplete pinned cache"
+    assert e.diagnosis is not None, "a card, not one warn row"
+    assert e.diagnosis["cause"] == "weights download is incomplete"
+    text = str(e)
+    assert "104.0 GB is on disk" in text                      # partial, not "absent"
+    assert "MISTRAL4_WEIGHTS_DIR" in text                     # why this package cannot self-download
+    assert f"hf download org/w --revision {PIN_REV}" in text  # the exact resume command
+    assert "tt-model pull org/m --with-weights" in text       # the managed equivalent
+    assert "tt-model serve org/m --no-weights" in text        # the escape hatch
+    assert "resumes the partial download" in text
+
+
+def test_serve_refuses_a_pinned_package_when_the_fetch_fails_and_nothing_is_cached(tmp_path, monkeypatch):
+    """A gated repo used to be a note-and-continue on serve too. For a pinned path that note
+    described a fatal state as merely slower; now the gate's own actions lead the card."""
+    started = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: started.append(argv))
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    _incomplete(monkeypatch, partial=False, cached=False)
+
+    def gated(ref, **kw):
+        raise _gated_exc()
+    monkeypatch.setattr(container_cli, "_download_weights", gated)
+    with pytest.raises(container_cli.ContainerCliError) as ei:
+        container_cli.serve_container(_pinned(tmp_path), target="org/m")
+    assert not started
+    d = ei.value.diagnosis
+    assert d["cause"] == "weights are not on the host"
+    assert "gated" in d["detail"].lower()
+    assert any("hf download org/w" in a for a in d["actions"])
+    assert d["evidence"].startswith("403")
+
+
+def test_a_pinned_package_with_a_complete_cache_still_serves_offline(tmp_path, monkeypatch):
+    """The gate is about an INCOMPLETE cache. huggingface_hub falls back to a whole cache when
+    the Hub is unreachable, so an air-gapped serve of a pinned package must still boot."""
+    started = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: started.append(argv))
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    _incomplete(monkeypatch, partial=False, cached=True)
+
+    def offline(ref, **kw):
+        raise OSError("Connection aborted")
+    monkeypatch.setattr(container_cli, "_download_weights", offline)
+    container_cli.serve_container(_pinned(tmp_path), target="org/m")
+    assert started
+
+
+def test_a_package_without_a_pinned_path_keeps_the_advisory(tmp_path, monkeypatch, capsys):
+    """In-container download is the supported fallback for a package that from_pretrains the
+    HF id, so the same partial cache stays a note there -- and the note now says 'partial'."""
+    started = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: started.append(argv))
+    _incomplete(monkeypatch, partial=True)
+    container_cli.serve_container(_manifest(tmp_path, weights={"repo": "org/w"}),
+                                  target="org/m", local_only=True)
+    assert started
+    assert "a download was interrupted" in capsys.readouterr().out
+
+
+def test_no_weights_is_the_escape_hatch_for_a_pinned_package(tmp_path, monkeypatch, capsys):
+    """A user who knows better must never be blocked: --no-weights keeps the note and boots."""
+    started = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: started.append(argv))
+    _incomplete(monkeypatch, partial=True)
+    container_cli.serve_container(_pinned(tmp_path), target="org/m", no_weights=True)
+    assert started
+    assert "a download was interrupted" in capsys.readouterr().out
+
+
+def test_pull_never_refuses_over_a_pinned_path(tmp_path, monkeypatch, capsys):
+    """`pull --with-weights` passes no profile: a failed fetch there stays the non-fatal note
+    it always was (the image is loaded; nothing is about to boot)."""
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    _incomplete(monkeypatch, partial=True, cached=False)
+
+    def gated(ref, **kw):
+        raise _gated_exc()
+    monkeypatch.setattr(container_cli, "_download_weights", gated)
+    container_cli.ensure_weights(_pinned(tmp_path), "org/m")   # must not raise
+    assert "not downloaded" in capsys.readouterr().out
+# -- the card gate on push -----------------------------------------------------------
+# Every route by which a push can END with the repo listed is gated: `--publish`, and a
+# plain re-push of a repo that is already listed (which restores the listing the card
+# overwrite just dropped). Refusals happen before the upload.
+
+
+def _push_hub(monkeypatch, *, listed):
+    order = []
+    monkeypatch.setattr(container_cli, "push_container", lambda *a, **k: order.append("upload"))
+    monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: order.append("create"))
+    monkeypatch.setattr(hub, "is_listed", lambda r: listed)
+    monkeypatch.setattr(hub, "set_catalog_listing",
+                        lambda repo_id, listed: order.append(("list", listed)))
+    return order
+
+
+_COMPLETE = {"performance": "41 ms/token", "limitations": "p150x4 only"}
+_GAPPED = {"description": "just a blurb"}
+
+
+def test_push_publish_refuses_a_card_missing_the_required_sections(tmp_path, monkeypatch):
+    order = _push_hub(monkeypatch, listed=False)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, card=_GAPPED)),
+                                  "--public", "--publish"])
+    assert res.exit_code != 0
+    assert order == []            # nothing created, uploaded or listed
+    assert "performance" in res.output and "limitations" in res.output
+    assert "push <dir> --publish" in res.output
+
+
+def test_push_publish_lists_a_bundle_whose_card_is_complete(tmp_path, monkeypatch):
+    order = _push_hub(monkeypatch, listed=False)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, card=_COMPLETE)),
+                                  "--public", "--publish"])
+    assert res.exit_code == 0, res.output
+    assert order == ["create", "upload", ("list", True)]
+
+
+def test_push_publish_refuses_a_staged_dir_from_before_card_sections(tmp_path, monkeypatch):
+    """`container.card is None` is an exemption for `publish` (the bundle is in the wild)
+    but a gap here: the directory is local, re-packaging is one command, and a manifest
+    is a JSON file anyone can hand-edit to dodge the gate."""
+    order = _push_hub(monkeypatch, listed=False)
+    staged = _staged(tmp_path)                       # no card block → card None on the wire
+    res = runner.invoke(cli.app, ["push", str(staged), "--public", "--publish"])
+    assert res.exit_code != 0
+    assert order == []
+    assert "packaged before model cards" in res.output
+
+
+def test_a_plain_push_of_a_listed_repo_is_held_to_the_same_bar(tmp_path, monkeypatch):
+    """The ordinary update workflow — publish once, later drop a section, push — used to
+    keep the listing through the ungated restore branch. It is the same catalog state the
+    gate exists to prevent, reached without ever typing --publish."""
+    order = _push_hub(monkeypatch, listed=True)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, card=_GAPPED))])
+    assert res.exit_code != 0
+    assert order == []            # refused BEFORE the upload
+    assert "re-pushing would leave raahem/qwen listed" in res.output
+    assert "tt-model unpublish raahem/qwen" in res.output
+
+
+def test_a_plain_push_of_a_listed_repo_with_a_complete_card_restores_the_listing(
+    tmp_path, monkeypatch
+):
+    order = _push_hub(monkeypatch, listed=True)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, card=_COMPLETE))])
+    assert res.exit_code == 0, res.output
+    assert order == ["create", "upload", ("list", True)]
+
+
+def test_a_plain_push_of_an_unlisted_repo_does_not_check_the_card(tmp_path, monkeypatch):
+    """The gate is on LISTING, not on pushing: a private or in-progress bundle is exactly
+    the case where the card is not finished yet."""
+    order = _push_hub(monkeypatch, listed=False)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, card=_GAPPED))])
+    assert res.exit_code == 0, res.output
+    assert order == ["create", "upload"]
+
+
+def test_a_private_push_is_never_gated_because_it_delists(tmp_path, monkeypatch):
+    """`--private` DELISTS the repo, so the catalog state the gate protects cannot be
+    reached — and gating it would block the one action that fixes a bad listing.
+
+    Named rather than left to a cardless fixture another test happens to use: that
+    coverage was accidental, and editing that fixture would have removed it silently."""
+    order = _push_hub(monkeypatch, listed=True)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, card=_GAPPED)),
+                                  "--private"])
+    assert res.exit_code == 0, res.output
+    assert order == ["create", "upload", ("list", False)]
+
+
+def test_a_plain_repush_with_no_card_offers_unpublish_not_a_four_hour_rebuild(
+    tmp_path, monkeypatch
+):
+    """The `card is None` arm has to branch on context like the gaps arm does.
+
+    Unbranched it said "cannot be listed" about an already-listed repo, and offered
+    `package --container` — the 2.5-4h cold build — as the only way out of a routine
+    update, never mentioning the one-command `unpublish` its sibling arm offers. Every
+    bundle staged before card sections meets this on its next ordinary push."""
+    order = _push_hub(monkeypatch, listed=True)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path))])   # no card block
+    assert res.exit_code != 0
+    assert order == []
+    assert "re-pushing would leave raahem/qwen listed" in res.output
+    assert "packaged before model cards" in res.output
+    assert "tt-model unpublish raahem/qwen" in res.output
+    assert "cannot be listed" not in res.output      # it IS listed
+
+
+def test_the_package_warning_names_each_missing_section():
+    from tt_kernel.container_cli import card_gap_warning
+
+    assert card_gap_warning([]) is None
+    one = card_gap_warning(["limitations"])
+    assert one.startswith("the model card has no card.limitations")
+    assert one.endswith("refused without it")
+    both = card_gap_warning(["performance", "limitations"])
+    assert "card.performance or card.limitations" in both
+    assert both.endswith("refused without them")
+
+
+@pytest.mark.parametrize(("card", "warned"), [(_GAPPED, True), (_COMPLETE, False)])
+def test_package_emits_the_card_warning_at_its_call_site(
+    tmp_path, monkeypatch, capsys, card, warned
+):
+    """The test above is pure, so it proved only that the STRING is right.
+
+    Replacing the call in package_container with `pass` left the whole suite green: the
+    warning could have been deleted, moved after an early return, or had its condition
+    inverted and CI would not have noticed. This drives the real function with the build
+    stubbed out."""
+    from types import SimpleNamespace
+
+    out = _staged(tmp_path, card=card)
+    m = ContainerManifest.model_validate({**json.loads(json.dumps(BASE)), "card": card})
+    staged = SimpleNamespace(
+        manifest=m, ctx=tmp_path, out=out, image="x:y", built={},
+        metal=SimpleNamespace(sha="a" * 40, branch="main", dirty=False, mode="local",
+                              pushed=True),
+        code_tree=["models/common"], code_skipped=[],
+    )
+    monkeypatch.setattr(container_cli, "stage", lambda *a, **k: staged)
+    monkeypatch.setattr(container_cli, "run_build", lambda *a, **k: None)
+    monkeypatch.setattr(container_cli, "finalize", lambda *a, **k: out)
+
+    container_cli.package_container(str(tmp_path / "tt-model.yaml"))
+    printed = capsys.readouterr().out
+    assert ("the model card has no card." in printed) is warned, printed

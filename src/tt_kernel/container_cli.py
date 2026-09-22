@@ -25,7 +25,11 @@ from typing import List, Optional
 from . import MANIFEST_NAME, compat, console, container, hub, localdb, oci
 from .boot_progress import BootTracker, diagnose_boot, summarize
 from .build import BuildError, build_log_path, finalize, run_build, stage
-from .container_manifest import ContainerManifestError, hardware_chip_count
+from .container_manifest import (
+    ContainerManifestError,
+    card_publish_gaps,
+    hardware_chip_count,
+)
 from .launchers import launcher_for
 from .manifest import DEFAULT_PORT, Manifest
 
@@ -64,6 +68,20 @@ def require_host(*, need_devices: bool):
 
 
 # --------------------------------------------------------------------------- package
+
+
+def card_gap_warning(gaps: List[str]) -> Optional[str]:
+    """The one-line warning `package` prints for missing required card sections.
+
+    Pure so the wording — singular/plural and all — is testable without a build.
+    """
+    if not gaps:
+        return None
+    return (
+        "the model card has no " + " or ".join(f"card.{g}" for g in gaps)
+        + " — a catalog listing (`tt-model publish`, `push --publish`) is refused "
+        + ("without them" if len(gaps) > 1 else "without it")
+    )
 
 
 def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> Path:
@@ -106,6 +124,14 @@ def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> 
         pinned = staged.built.get(key)
         if isinstance(pinned, dict):
             console.note(f"{key} pinned to {str(pinned.get('sha'))[:9]}", marker="•")
+
+    # Said now, not at publish time: this is a 2.5-4 hour build, and discovering
+    # afterwards that the card is missing the two sections a listing requires means
+    # editing the YAML and running all of it again. A warning only — a private or
+    # experimental build has every right to skip them.
+    warning = card_gap_warning(card_publish_gaps(staged.manifest.card))
+    if warning:
+        console.note(warning, marker="!", style="warning")
 
     console.phase("Stage")
     console.note(f"{len(staged.code_tree)} code path(s) → code/", marker="•")
@@ -410,6 +436,26 @@ def has_partial_download(ref) -> bool:
         return False
 
 
+def _pinned_weights_env(ref, profile) -> Optional[str]:
+    """The serve-env variable that pins a path inside this weights repo's HF cache dir, or None.
+
+    Two kinds of package declare ``weights``. One calls ``from_pretrained`` on the HF id
+    inside the container, so a missing or partial host cache only means a slower first boot:
+    the loader downloads into the same bind-mounted cache. The other pins the snapshot path
+    itself into the serve env (``MISTRAL4_WEIGHTS_DIR=/hf/hub/models--org--w/snapshots/...``)
+    and the loader opens that path directly. For that kind an incomplete cache is fatal --
+    the engine dies on the first missing shard, after device init -- so serve has to know
+    which kind it is holding. The HF cache dir name is the one stable marker of "this path
+    is the weights": it is derived from the repo id, and a pin anywhere in the env that
+    contains it means the model will read from the cache rather than fill it.
+    """
+    needle = f"models--{ref.repo_id.replace('/', '--')}"
+    for key, value in sorted((getattr(profile, "env", None) or {}).items()):
+        if needle in str(value):
+            return key
+    return None
+
+
 def _revision_size(ref) -> Optional[int]:
     """Total bytes of the pinned revision on the Hub, or None when it cannot be asked.
 
@@ -562,25 +608,87 @@ def _weights_notice(manifest: Manifest, target: Optional[str]) -> None:
     forbids the network by definition).
 
     The caller has already established that the weights are missing — it consulted the cache
-    to decide whether to fetch at all — so this does not re-check.
+    to decide whether to fetch at all — so this does not re-check that. It does check
+    *how*: an interrupted 100 GB fetch is a different state from one that never started, with
+    a different fix (resume, not restart), and telling the user how much is already on disk
+    is what stops them deleting it.
     """
     ref = manifest.weights
     at = f"@{ref.revision[:8]}" if ref.revision else ""
-    head = (f"weights {ref.repo_id}{at} are not in your local HF cache; the model will "
-            f"download them inside the container at first load (slower, and no progress is "
-            f"shown here)")
+    if has_partial_download(ref):
+        head = (f"weights {ref.repo_id}{at}: a download was interrupted — "
+                f"{_gb(_bytes_on_disk(ref))} is on disk and resumable; the model will fetch "
+                f"the rest inside the container at first load (slower, and no progress is "
+                f"shown here)")
+        verb = "to resume it first instead"
+    else:
+        head = (f"weights {ref.repo_id}{at} are not in your local HF cache; the model will "
+                f"download them inside the container at first load (slower, and no progress "
+                f"is shown here)")
+        verb = "to fetch them first instead"
     rev = f" --revision {ref.revision}" if ref.revision else ""
     hints = []
     if target:
-        hints.append(f"to fetch them first instead:  tt-model pull {target} --with-weights")
+        hints.append(f"{verb}:  tt-model pull {target} --with-weights")
     hints.append(f"or directly:  hf download {ref.repo_id}{rev}")
     console.note(head, marker="⚠", style="warning")
     for h in hints:
         console.note(h, marker="→")
 
 
+def _weights_incomplete_error(ref, target: Optional[str], pinned_env: str, *,
+                              fetch_error: Optional[BaseException] = None) -> ContainerCliError:
+    """The refusal for a package that pins the weights path while the cache is incomplete.
+
+    A card, not a warn row: the advisory wording ("the model will download them inside the
+    container") is false for this kind of package -- the loader opens the pinned path and
+    raises -- so the one line that should stop the run must not describe a fatal state as
+    merely slower. Partial and absent are told apart, and the partial case says how much is
+    already on disk, because the fix differs (``hf download`` resumes; nothing needs deleting).
+
+    ``fetch_error`` is the exception from the prefetch that just failed, when there was one:
+    its classification (gated, offline, no such repo) is the actual reason the cache is still
+    incomplete, and its actions come first because they are what unblocks the download.
+    """
+    at = f"@{ref.revision[:8]}" if ref.revision else ""
+    rev = f" --revision {ref.revision}" if ref.revision else ""
+    cache = container.hub_cache()
+    partial = has_partial_download(ref)
+    if partial:
+        cause = "weights download is incomplete"
+        state = (f"the download of weights {ref.repo_id}{at} was interrupted: "
+                 f"{_gb(_bytes_on_disk(ref))} is on disk in {cache} and the rest is missing")
+    else:
+        cause = "weights are not on the host"
+        state = f"weights {ref.repo_id}{at} are not in the HF cache ({cache})"
+    detail = (f"{state}. This package pins that snapshot's path into the container "
+              f"({pinned_env} in the manifest's serve env), so the model would open it "
+              f"directly and fail on the first missing shard, after device init.")
+    actions: List[str] = []
+    evidence = None
+    if fetch_error is not None:
+        try:
+            d = hub.classify_hub_error(fetch_error, ref.repo_id, weights=True)
+            detail += f" The fetch just attempted failed — {d['cause']}: {d['detail']}"
+            actions += list(d.get("actions", ()))
+        except Exception:  # noqa: BLE001 — the classifier is total, but this must not raise
+            detail += f" The fetch just attempted failed ({type(fetch_error).__name__})."
+        evidence = str(fetch_error).strip().splitlines()[0] if str(fetch_error).strip() else None
+    resume = "   # resumes the partial download" if partial else ""
+    if target:
+        actions.append(f"tt-model pull {target} --with-weights{resume}")
+    actions.append(f"hf download {ref.repo_id}{rev}{resume}")
+    if target:
+        actions.append(f"tt-model serve {target} --no-weights   # boot anyway, if you know "
+                       f"the model fetches its own weights")
+    diagnosis = {"cause": cause, "detail": detail, "evidence": evidence, "actions": actions}
+    text = detail + "".join(f"\n  → {a}" for a in actions)
+    return ContainerCliError(text, diagnosis=diagnosis)
+
+
 def ensure_weights(manifest: Manifest, target: Optional[str], *,
-                   local_only: bool = False, no_weights: bool = False) -> None:
+                   local_only: bool = False, no_weights: bool = False,
+                   profile=None) -> None:
     """Put the pinned weights on the host before the container starts, or explain why not.
 
     Resumes unconditionally rather than deciding for itself whether the cache is complete.
@@ -599,16 +707,26 @@ def ensure_weights(manifest: Manifest, target: Optional[str], *,
 
     Downloading is skipped, with the advisory note, when the user forbade it (``no_weights``)
     or forbade the network (``local_only``).
+
+    ``profile`` is the merged serve profile about to launch; ``serve`` passes it, ``pull``
+    does not. When its env pins a path into the weights' HF cache dir
+    (``_pinned_weights_env``), the model cannot fetch its own weights, so an incomplete cache
+    that this function cannot fix -- the network is forbidden, or the fetch just failed -- is
+    a refusal (``_weights_incomplete_error``) rather than the advisory note. ``no_weights`` is
+    the escape hatch: the user has said they know better, so it stays a note.
     """
     ref = manifest.weights
     if ref is None:
         return
     at = f"@{ref.revision[:8]}" if ref.revision else ""
+    pinned = _pinned_weights_env(ref, profile) if profile is not None else None
     if no_weights or local_only:
         # The one place a local verdict is still needed, because fetching is off the table.
         # `.incomplete` blobs are checked too: a resolvable-but-partial snapshot would
         # otherwise read as present and cost the user the warning.
         if _cached_locally(ref) is None or has_partial_download(ref):
+            if pinned and not no_weights:
+                raise _weights_incomplete_error(ref, target, pinned)
             _weights_notice(manifest, target)
         else:
             console.note(f"weights {ref.repo_id}{at} already on host", marker="•")
@@ -629,11 +747,12 @@ def ensure_weights(manifest: Manifest, target: Optional[str], *,
         with console.step(label) as st, hub.progress_bridge(label) as tqdm_class:
             st.detail(str(_download_weights(ref, tqdm_class=tqdm_class)))
     except Exception as e:  # noqa: BLE001
-        _weights_failed(ref, e, target)
+        _weights_failed(ref, e, target, pinned=pinned)
 
 
-def _weights_failed(ref, exc: BaseException, target: Optional[str]) -> None:
-    """What a failed weights fetch means. Raises only for a full disk.
+def _weights_failed(ref, exc: BaseException, target: Optional[str], *,
+                    pinned: Optional[str] = None) -> None:
+    """What a failed weights fetch means. Raises for a full disk, and for a pinned path.
 
     Everything else stays non-fatal, as it always has on the pull path: the image is loaded
     and the model can still fetch its own weights inside the container, so a gate that is one
@@ -643,8 +762,15 @@ def _weights_failed(ref, exc: BaseException, target: Optional[str]) -> None:
     written once per caller. Warning and carrying on is what left a half-populated cache that
     then read as complete to everything downstream — the failure this whole change is about.
     It has to stop the run, on serve exactly as on pull.
+
+    ``pinned`` (the serve-env variable that pins the weights path, see
+    ``_pinned_weights_env``) is the other exception: "the model can still fetch its own
+    weights" is exactly what is untrue for that package, so if the cache is not whole after
+    the failed fetch the boot would die in the engine. A complete cache still serves offline.
     """
     if not _is_out_of_space(exc):
+        if pinned and (_cached_locally(ref) is None or has_partial_download(ref)):
+            raise _weights_incomplete_error(ref, target, pinned, fetch_error=exc) from exc
         _weights_download_failed(ref, exc)
         # Falling back to the cache is only safe if the cache is whole, and here we cannot
         # ask the Hub which files that would mean. Half-fetched blobs are the one local
@@ -1013,6 +1139,15 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         console.raw(shlex.join(run_argv))
         return
 
+    # Resolved first -- before the weight prefetch and before `docker run` -- so a typo in
+    # TT_MODEL_READY_TIMEOUT fails here, not after hours of download or with a container
+    # already booting. The same figure feeds the wait AND its failure card below, so the
+    # card can never quote a deadline other than the one that actually expired.
+    try:
+        ready_timeout_s = container.ready_timeout_s()
+    except container.ContainerError as e:
+        raise ContainerCliError(str(e)) from None
+
     # As the host user, so the daemon does not create them as root: see
     # container.ensure_mount_sources.
     container.ensure_mount_sources(manifest)
@@ -1024,10 +1159,12 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     # checklist spinner would both be writing it. It also means a failed prefetch is
     # printed above the list, so the list's final erase cannot take the message with it.
     try:
-        ensure_weights(manifest, target, local_only=local_only, no_weights=no_weights)
+        ensure_weights(manifest, target, local_only=local_only, no_weights=no_weights,
+                       profile=profile)
     except ContainerCliError:
-        # A refusal this raises deliberately (no disk for the weights) is the point of
-        # the check — it must not be swallowed as advisory chatter.
+        # A refusal this raises deliberately (no disk for the weights; a pinned weights path
+        # over an incomplete cache) is the point of the check — it must not be swallowed as
+        # advisory chatter.
         raise
     except Exception:  # noqa: BLE001 — never a reason not to serve
         pass
@@ -1079,7 +1216,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
             view.close()
         else:
             view.begin("waiting for the engine", placeholder=True)
-            result = container.wait_ready(name, probe, on_line=_feed(tracker, view))
+            result = container.wait_ready(name, probe, timeout_s=ready_timeout_s,
+                                          on_line=_feed(tracker, view))
             if result.ready:
                 if view.active:
                     view.done()
@@ -1093,7 +1231,7 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     assert result is not None
     if not result.ready:
         diag = diagnose_boot(tracker.evidence() or result.tail, exited=result.exited,
-                             target=what, extra_args=extra_args)
+                             target=what, extra_args=extra_args, timeout_s=ready_timeout_s)
         raise ContainerCliError(summarize(diag, result.tail), diagnosis=diag)
 
     console.milestone(f"{what} ready  {console.fmt_duration(view.elapsed)}")

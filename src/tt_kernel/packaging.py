@@ -18,6 +18,7 @@ so it is unit-testable offline.
 
 from __future__ import annotations
 
+import base64
 import datetime
 import hashlib
 import json
@@ -25,6 +26,7 @@ import re
 import shlex
 import shutil
 import socket
+import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -311,6 +313,51 @@ def sha256_file(path: Path, _chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
+# Matches a "test"/"tests" path SEGMENT (bounded by "/" or the start of the path), not any
+# name that merely contains those letters — "requests/__init__.py" must not match.
+_WHEEL_TEST_DIR_RE = re.compile(r"(?:^|/)tests?/")
+
+
+def strip_wheel_test_dirs(wheel_path: Path) -> bool:
+    """Rewrite ``wheel_path`` with its own ``test(s)/`` directory removed, RECORD regenerated
+    to match. Returns True if the wheel was rewritten, False if it had nothing to strip (left
+    byte-for-byte untouched).
+
+    ``pip download`` fetches a dependency wheel verbatim — its own test suite included. That
+    suite has zero relation to what a bundle ships, but it still gets published: HF's secret
+    scanner flagged 3 "Lob (active)" hits in a real published bundle
+    (episod/tt-tnt-1024/wheels/fsspec-2026.7.0-py3-none-any.whl) — three pytest function
+    names in fsspec's OWN ``fsspec/tests/abstract/{copy,get,put}.py`` that happen to be
+    exactly "test_" + 35 chars, which is Lob's API-key shape. No real secret; nothing to
+    rotate — but a big dependency's test suite is a standing false-positive generator for
+    whatever a future scanner's regex happens to be, and it costs bundle size for nothing.
+    """
+    with zipfile.ZipFile(wheel_path, "r") as zin:
+        infos = {i.filename: i for i in zin.infolist()}
+        record_name = next((n for n in infos if n.endswith(".dist-info/RECORD")), None)
+        strip = {n for n in infos if _WHEEL_TEST_DIR_RE.search(n) and n != record_name}
+        if not strip:
+            return False
+        contents = {n: zin.read(n) for n in infos if n not in strip and n != record_name}
+
+    record_lines = [
+        f"{n},sha256={base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()},{len(data)}"
+        for n, data in sorted(contents.items())
+    ]
+    if record_name:
+        record_lines.append(f"{record_name},,")
+    new_record = ("\n".join(record_lines) + "\n").encode()
+
+    tmp_path = wheel_path.with_name(wheel_path.name + ".stripped")
+    with zipfile.ZipFile(tmp_path, "w") as zout:
+        for n, data in sorted(contents.items()):
+            zout.writestr(infos[n], data)
+        if record_name:
+            zout.writestr(infos[record_name], new_record)
+    tmp_path.replace(wheel_path)
+    return True
+
+
 def parse_wheel_tags(filename: str) -> Dict[str, Optional[str]]:
     """Extract (python_tag, abi_tag, platform_tag) from a wheel filename.
 
@@ -415,21 +462,58 @@ def render_install_sh(manifest: Manifest) -> str:
     else:
         b = manifest.bundled
         pyver = (b.python if b and b.python else "3.12")
-        plat_wheels = " ".join(f'"$HERE/{w.path}"' for w in (b.wheels if b else []))
         vendored = bool(b and b.deps_vendored)
-        if vendored:
-            install = (
-                f'uv pip install --python "$VENV/bin/python" --link-mode=copy --no-index '
-                f'--find-links "$HERE/{WHEELS_DIR}" {plat_wheels} -r "$HERE/{REQUIREMENTS}"'
-            )
-            deps_note = "offline, from the vendored wheels (reproducible, no network)"
+        pip5 = 'uv pip install --python "$VENV/bin/python" --link-mode=copy'
+        no_index = f'--no-index --find-links "$HERE/{WHEELS_DIR}" ' if vendored else ""
+
+        if b and b.vllm_wheel is not None:
+            # Same conflict v6 thin's Deps.vllm.overrides already solves: ttnn needs numpy<2,
+            # vLLM's own deps want opencv-python-headless>=4.13 (numpy>=2 only) — one combined
+            # install of ttnn + this vLLM wheel together is a real ResolutionImpossible.
+            # --no-index/--find-links only changes WHERE packages come from, not whether the
+            # resolver checks vLLM's declared opencv floor against ttnn's numpy<2, so both the
+            # vendored and network paths need the same sequencing: (1) ttnn/plugin/extra wheels
+            # together (their own deps are fine), (2) vLLM's OWN deps — vendored: already
+            # resolved into wheels/ by _vendor_dependencies, just installed from there; network:
+            # fetched from the pinned upstream tag's requirements/common.txt under the override
+            # so the opencv/numpy pin isn't clobbered — (3) the vLLM wheel itself with --no-deps
+            # so its declared floor is never checked, (4) the bundle's own requirements.txt.
+            other = [w for w in (b.ttnn_wheel, *b.extra_wheels, b.plugin_wheel) if w is not None]
+            other_wheels = " ".join(f'"$HERE/{w.path}"' for w in other)
+            steps = [f'{pip5} {no_index}{other_wheels}']
+            if not vendored:
+                # Vendored: vLLM's own deps were already resolved into wheels/ by the (also
+                # fixed) _vendor_dependencies — nothing to fetch, the requirements.txt install
+                # below picks them up from --find-links.
+                override = f'--override "$HERE/{b.vllm_overrides}" ' if b.vllm_overrides else ""
+                steps.append(
+                    'VLLM_COMMON="$(mktemp)"\n'
+                    f'curl -fsSL "https://raw.githubusercontent.com/vllm-project/vllm/'
+                    f'v{VLLM_VERSION}/requirements/common.txt" -o "$VLLM_COMMON"\n'
+                    f'{pip5} {override}-r "$VLLM_COMMON"\n'
+                    'rm -f "$VLLM_COMMON"'
+                )
+            steps.append(f'{pip5} --no-deps {no_index}"$HERE/{b.vllm_wheel.path}"')
+            if vendored:
+                steps.append(f'{pip5} {no_index}-r "$HERE/{REQUIREMENTS}"')
+            else:
+                steps.append(
+                    f'{pip5} --extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{REQUIREMENTS}"'
+                )
+            install = "\n".join(steps)
         else:
-            install = (
-                f'uv pip install --python "$VENV/bin/python" --link-mode=copy {plat_wheels} && \\\n'
-                f'  uv pip install --python "$VENV/bin/python" --link-mode=copy '
-                f'--extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{REQUIREMENTS}"'
-            )
-            deps_note = "from the CPU index (deps not vendored — pass --vendor-deps for offline)"
+            plat_wheels = " ".join(f'"$HERE/{w.path}"' for w in (b.wheels if b else []))
+            if vendored:
+                install = f'{pip5} {no_index}{plat_wheels} -r "$HERE/{REQUIREMENTS}"'
+            else:
+                install = (
+                    f'{pip5} {plat_wheels} && \\\n'
+                    f'  {pip5} --extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{REQUIREMENTS}"'
+                )
+        deps_note = (
+            "offline, from the vendored wheels (reproducible, no network)" if vendored else
+            "from the CPU index (deps not vendored — pass --vendor-deps for offline)"
+        )
     return f"""#!/usr/bin/env bash
 # Install this self-contained TT model package into an isolated, reproducible venv (via uv).
 # Usage: ./{INSTALL_SCRIPT} [venv-path]   (default: ./venv)
@@ -646,6 +730,15 @@ def stage_package(
     plugin_art = _copy_wheel(plugin_wheel) if plugin_wheel else None
     extra_arts = [_copy_wheel(w) for w in (extra_wheels or [])]
 
+    # A v5 fat bundle shipping a vLLM wheel hits the exact numpy/opencv conflict v6 thin's
+    # Deps.vllm.overrides already solves: ttnn needs numpy<2, vLLM's own deps want
+    # opencv-python-headless>=4.13 (numpy>=2 only). Ship the same override file so
+    # render_install_sh can sequence around it instead of one combined, unsatisfiable install.
+    vllm_overrides_rel: Optional[str] = None
+    if vllm_art is not None:
+        (staged / VLLM_OVERRIDES).write_text(_VLLM_OVERRIDES_TEMPLATE)
+        vllm_overrides_rel = VLLM_OVERRIDES
+
     # Embed the author's modified metal-community tree (skip caches/venvs/artifacts).
     # symlinks=True: copy links as links instead of following them. A built tt-metal
     # checkout normally has dangling symlinks; following them (the default) makes
@@ -704,6 +797,7 @@ def stage_package(
         install_script=INSTALL_SCRIPT,
         run_script=RUN_SCRIPT,
         firmware_min=firmware_min,
+        vllm_overrides=vllm_overrides_rel,
     )
     entrypoint = Entrypoint(
         **{"class": vllm_metadata["main_class"], "arch_name": vllm_metadata["arch"]}
@@ -1037,6 +1131,7 @@ __all__ = [
     "sha256_file",
     "parse_wheel_tags",
     "make_wheel_artifact",
+    "strip_wheel_test_dirs",
     "host_python_tag",
     "host_incompatible_wheels",
     "render_install_sh",

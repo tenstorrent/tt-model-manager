@@ -26,6 +26,10 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
+# A constant only: this module still touches no docker, terminal, or clock. The card
+# for a slow boot names the deadline, and that deadline is owned by container.py.
+from .container import READY_TIMEOUT_S
+
 Event = Tuple  # ("start", key, label) | ("done", key, label, detail) |
 #                ("progress", done, total) | ("detail", text) | ("ready",)
 
@@ -288,9 +292,23 @@ def _evidence(tail: Sequence[str], pattern: Optional[str] = None) -> str:
     return cleaned[-1] if cleaned else ""
 
 
+def _fmt_deadline(seconds: int) -> str:
+    """`4 h` / `1 h 30 min` / `15 min` / `45 s` -- a deadline reads in the unit it was set
+    in, never as `240 min`."""
+    if seconds < 60:
+        return f"{seconds} s"
+    hours, rem = divmod(seconds, 3600)
+    minutes = rem // 60
+    if hours and minutes:
+        return f"{hours} h {minutes} min"
+    if hours:
+        return f"{hours} h"
+    return f"{minutes} min"
+
+
 def diagnose_boot(tail: Sequence[str], *, exited: bool, target: str,
                   extra_args: Optional[Sequence[str]] = None,
-                  timeout_s: int = 1800) -> dict:
+                  timeout_s: int = READY_TIMEOUT_S) -> dict:
     """Classify why a boot did not reach ready — text in, dict out.
 
     ``cause`` is the card title; ``detail`` one sentence of explanation; ``evidence`` one
@@ -304,9 +322,11 @@ def diagnose_boot(tail: Sequence[str], *, exited: bool, target: str,
 
     if not exited:
         return {
-            "cause": f"the server did not report ready within {timeout_s // 60} min",
+            "cause": f"the server did not report ready within {_fmt_deadline(timeout_s)}",
             "detail": "The container is still running. A cold boot JIT-compiles kernels, "
-                      "which can take ~10 min the first time; it may simply be slow.",
+                      "which can take ~10 min the first time; it may simply be slow. "
+                      "TT_MODEL_READY_TIMEOUT=<seconds> raises this bound; --detach skips "
+                      "the wait.",
             "evidence": _evidence(tail),
             "actions": [f"keep watching:  {follow}", f"give up:        {stop}"],
         }
