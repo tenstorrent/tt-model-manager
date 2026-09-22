@@ -29,6 +29,7 @@ from . import (
 from .manifest import (
     DEFAULT_PORT,
     THIN_KINDS,
+    CardSpec,
     CompatibilityReport,
     Manifest,
     Mesh,
@@ -1657,6 +1658,120 @@ def search(
         typer.echo(f"{r['id']}  [{vis}]  downloads={r.get('downloads')}")
 
 
+def _refuse_a_listing_with_card_gaps(
+    card: "Optional[CardSpec]", repo_id: str, *, missing_card_is_a_gap: bool, context: str
+) -> None:
+    """Refuse to list a bundle whose model card is missing a required section.
+
+    The catalog's problem was never that it is empty — it is that a listing promises
+    nothing: a reader cannot tell how fast a model is or where it falls short. Those two
+    sections are the price of a listing, on EVERY route into the catalog: ``publish``,
+    ``push --publish``, and a plain re-push of a bundle that is already listed (which
+    re-applies the listing the card overwrite just dropped).
+
+    ``card is None`` means the wire manifest predates card sections. For ``publish`` that
+    is a bundle already in the wild and is exempt — there is nothing to read, which is not
+    the same as nothing to say. For ``push`` the staged directory is local, re-packaging
+    is one command away, and a manifest is a JSON file anyone can hand-edit, so there it
+    is a gap.
+
+    ``context`` picks the remedy: ``"publish"`` / ``"push"`` / ``"repush"``.
+    """
+    from .container_manifest import card_publish_gaps
+
+    if card is None:
+        if not missing_card_is_a_gap:
+            return
+        # Branch on context like the gaps arm below: on a re-push the repo IS listed,
+        # and re-packaging means the 2.5-4h cold build, so `unpublish` has to be offered
+        # too or the only remedy given is one the user cannot act on.
+        if context == "repush":
+            raise _err(
+                f"re-pushing would leave {repo_id} listed in the catalog, but this "
+                "staged directory was packaged before model cards carried their "
+                "sections, so there is nothing to check.\n"
+                "  → re-run `tt-model package --container <tt-model.yaml>` with a "
+                f"`card:` block and push that — or `tt-model unpublish {repo_id}` "
+                "first, if the listing should go."
+            )
+        raise _err(
+            f"{repo_id} cannot be listed: this staged directory was packaged before model "
+            "cards carried their sections, so there is nothing to check.\n"
+            "  → re-run `tt-model package --container <tt-model.yaml>` with a `card:` "
+            "block, then push again."
+        )
+    gaps = card_publish_gaps(card)
+    if not gaps:
+        return
+    fields = "\n".join(f"      {g}: ..." for g in gaps)
+    lead = (
+        f"re-pushing would leave {repo_id} listed in the catalog with no "
+        if context == "repush" else f"{repo_id} cannot be listed: its model card has no "
+    )
+    remedy = {
+        "publish": "  then re-package, push, and run `tt-model publish` again.",
+        "push": "  then re-run `tt-model package --container` and `tt-model push <dir> --publish`.",
+        "repush": ("  then re-package and push again — or `tt-model unpublish "
+                   f"{repo_id}` first, if the listing should go."),
+    }[context]
+    raise _err(
+        lead + " or ".join(gaps) + " section.\n"
+        "  A catalog listing is what a stranger picks a model from, so it has to say how\n"
+        "  the model performs and where it falls short. Add to your tt-model.yaml:\n"
+        f"    card:\n{fields}\n" + remedy
+    )
+
+
+def _fetch_manifest_for_listing(repo_id: str) -> "Optional[Manifest]":
+    """The published manifest, for the listing gate — or None when there is none to judge.
+
+    Fails CLOSED on everything except "the repo has no manifest file": a listing is the
+    hard-to-undo step (it makes the repo public), so a network blip must not turn into a
+    pass. The one exemption is a repo with no ``tt_kernel_manifest.json`` at all — that
+    is not a container bundle, and the gate has nothing to say about it.
+
+    Offline raises ``LocalEntryNotFoundError``, which *inherits* the not-found class; it
+    is caught first so "cannot reach the Hub" never reads as "no manifest".
+    """
+    # `.utils`, not `.errors`: the package floor is huggingface_hub>=0.23 and the
+    # `errors` module only appeared in 0.25; `utils` re-exports both on every version.
+    from huggingface_hub.utils import EntryNotFoundError, LocalEntryNotFoundError
+
+    try:
+        return hub.fetch_manifest(repo_id, None)
+    except LocalEntryNotFoundError as exc:
+        raise _fail_card("Inspect", hub.classify_hub_error(exc, repo_id),
+                         consequence="the repo was not made public and was not listed")
+    except EntryNotFoundError:
+        return None
+    except typer.Exit:
+        raise
+    except (KeyboardInterrupt, SystemExit):
+        # Not a Hub failure. Left to the BaseException arm below, Ctrl-C rendered as
+        # "the Hub request failed / KeyboardInterrupt while talking to the Hub".
+        raise
+    # pydantic's ValidationError subclasses ValueError, so this one arm covers both the
+    # schema gate's own ValueError and a shape mismatch.
+    except ValueError as exc:
+        # Fetched but unparseable: a local problem, so `classify_hub_error` would blame
+        # the network for something no retry fixes. Still fails closed.
+        if console.is_verbose():
+            raise
+        raise _fail_card(
+            "Inspect",
+            {"cause": "could not read the published manifest",
+             "detail": f"{repo_id} has a {MANIFEST_NAME} this tt-model cannot parse — "
+                       "most likely it was pushed by a newer version.",
+             "evidence": str(exc).strip().splitlines()[:3],
+             "actions": ["pip install -U tt-model-manager   # then publish again"]},
+            consequence="the repo was not made public and was not listed")
+    except BaseException as exc:  # noqa: BLE001 — classified and re-raised as an Exit
+        if console.is_verbose():
+            raise
+        raise _fail_card("Inspect", hub.classify_hub_error(exc, repo_id),
+                         consequence="the repo was not made public and was not listed")
+
+
 # ----------------------------------------------------------------------- publish
 @app.command(rich_help_panel="Publish models")
 def publish(
@@ -1669,7 +1784,15 @@ def publish(
     (announced) and then lists it. The catalog only ever holds a pointer to your public HF repo;
     it stores none of your content, and your repo stays under your governance. Delist with
     ``tt-model unpublish`` (delisting does not make the repo private again).
+
+    A container package must carry the card sections a listing requires (performance and
+    limitations). The check reads the published manifest, so it needs no local files, and
+    it runs BEFORE the visibility change: a refusal never leaves a repo flipped public.
     """
+    fetched = _fetch_manifest_for_listing(repo_id)
+    if fetched is not None and getattr(fetched, "container", None) is not None:
+        _refuse_a_listing_with_card_gaps(
+            fetched.container.card, repo_id, missing_card_is_a_gap=False, context="publish")
     try:
         was_private = hub.is_private(repo_id)
     except Exception as exc:  # noqa: BLE001
@@ -1677,16 +1800,15 @@ def publish(
     if was_private:
         # The catalog is public by definition; publishing implies public (same as the --publish
         # flag on push). Make the visibility change loud — it is never a silent side effect.
-        typer.secho(
-            f"! {repo_id} is private — making it public so it can be listed in the public catalog.",
-            fg=typer.colors.YELLOW,
+        console.note(
+            f"{repo_id} is private — making it public so it can be listed in the public catalog",
+            marker="!", style="warning",
         )
         hub.set_visibility(repo_id, private=False)
     hub.set_catalog_listing(repo_id, listed=True)
-    typer.secho(
-        f"✓ Listed {repo_id} in the community catalog (public pointer only; content stays yours). "
-        f"Delist with `tt-model unpublish {repo_id}`.",
-        fg=typer.colors.GREEN,
+    console.milestone(
+        f"listed {repo_id} in the community catalog (public pointer only; content stays "
+        f"yours) — delist with `tt-model unpublish {repo_id}`"
     )
 
 
@@ -1697,10 +1819,9 @@ def unpublish(
 ) -> None:
     """Remove a bundle from the community catalog. The repo itself is untouched."""
     hub.set_catalog_listing(repo_id, listed=False)
-    typer.secho(
-        f"✓ Delisted {repo_id} from the community catalog (it drops off on the next crawl). "
-        "The repo and its content are unchanged.",
-        fg=typer.colors.GREEN,
+    console.milestone(
+        f"delisted {repo_id} from the community catalog (it drops off on the next crawl) "
+        "— the repo and its content are unchanged"
     )
 
 
@@ -1894,6 +2015,14 @@ def push(
     # plain re-push (a card-only update) would overwrite the frontmatter and silently DELIST a
     # published repo — only `tt-model unpublish` should ever remove a listing (issue #96).
     was_listed = hub.is_listed(target)
+    # Gate every route that can END with the repo listed: `--publish` asks for it, and a
+    # plain push of a listed repo RESTORES it below. A `--private` push DELISTS it, so it
+    # is excluded. Before the upload, not after — refusing once the bytes are on the Hub
+    # would leave the push half-done.
+    if publish or (was_listed and private is not True):
+        _refuse_a_listing_with_card_gaps(
+            cmani.container.card, target, missing_card_is_a_gap=True,
+            context="push" if publish else "repush")
     _ensure_repo(target, private)
     try:
         container_cli.push_container(str(out), cmani, target)

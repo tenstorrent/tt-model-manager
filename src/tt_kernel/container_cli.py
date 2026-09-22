@@ -25,7 +25,11 @@ from typing import List, Optional
 from . import MANIFEST_NAME, compat, console, container, hub, localdb, oci
 from .boot_progress import BootTracker, diagnose_boot, summarize
 from .build import BuildError, build_log_path, finalize, run_build, stage
-from .container_manifest import ContainerManifestError, hardware_chip_count
+from .container_manifest import (
+    ContainerManifestError,
+    card_publish_gaps,
+    hardware_chip_count,
+)
 from .launchers import launcher_for
 from .manifest import DEFAULT_PORT, Manifest
 
@@ -64,6 +68,20 @@ def require_host(*, need_devices: bool):
 
 
 # --------------------------------------------------------------------------- package
+
+
+def card_gap_warning(gaps: List[str]) -> Optional[str]:
+    """The one-line warning `package` prints for missing required card sections.
+
+    Pure so the wording — singular/plural and all — is testable without a build.
+    """
+    if not gaps:
+        return None
+    return (
+        "the model card has no " + " or ".join(f"card.{g}" for g in gaps)
+        + " — a catalog listing (`tt-model publish`, `push --publish`) is refused "
+        + ("without them" if len(gaps) > 1 else "without it")
+    )
 
 
 def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> Path:
@@ -106,6 +124,14 @@ def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> 
         pinned = staged.built.get(key)
         if isinstance(pinned, dict):
             console.note(f"{key} pinned to {str(pinned.get('sha'))[:9]}", marker="•")
+
+    # Said now, not at publish time: this is a 2.5-4 hour build, and discovering
+    # afterwards that the card is missing the two sections a listing requires means
+    # editing the YAML and running all of it again. A warning only — a private or
+    # experimental build has every right to skip them.
+    warning = card_gap_warning(card_publish_gaps(staged.manifest.card))
+    if warning:
+        console.note(warning, marker="!", style="warning")
 
     console.phase("Stage")
     console.note(f"{len(staged.code_tree)} code path(s) → code/", marker="•")
