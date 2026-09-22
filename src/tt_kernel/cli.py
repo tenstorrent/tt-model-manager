@@ -1798,16 +1798,15 @@ def publish(
     if was_private:
         # The catalog is public by definition; publishing implies public (same as the --publish
         # flag on push). Make the visibility change loud — it is never a silent side effect.
-        typer.secho(
-            f"! {repo_id} is private — making it public so it can be listed in the public catalog.",
-            fg=typer.colors.YELLOW,
+        console.note(
+            f"{repo_id} is private — making it public so it can be listed in the public catalog",
+            marker="!", style="warning",
         )
         hub.set_visibility(repo_id, private=False)
     hub.set_catalog_listing(repo_id, listed=True)
-    typer.secho(
-        f"✓ Listed {repo_id} in the community catalog (public pointer only; content stays yours). "
-        f"Delist with `tt-model unpublish {repo_id}`.",
-        fg=typer.colors.GREEN,
+    console.milestone(
+        f"listed {repo_id} in the community catalog (public pointer only; content stays "
+        f"yours) — delist with `tt-model unpublish {repo_id}`"
     )
 
 
@@ -1818,10 +1817,9 @@ def unpublish(
 ) -> None:
     """Remove a bundle from the community catalog. The repo itself is untouched."""
     hub.set_catalog_listing(repo_id, listed=False)
-    typer.secho(
-        f"✓ Delisted {repo_id} from the community catalog (it drops off on the next crawl). "
-        "The repo and its content are unchanged.",
-        fg=typer.colors.GREEN,
+    console.milestone(
+        f"delisted {repo_id} from the community catalog (it drops off on the next crawl) "
+        "— the repo and its content are unchanged"
     )
 
 
