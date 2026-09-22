@@ -34,6 +34,29 @@ def test_publish_makes_a_private_repo_public_then_lists(monkeypatch):
     assert "public" in res.output.lower()             # and the flip was announced
 
 
+def test_publish_reports_through_the_phase_body_not_raw_echo(monkeypatch):
+    """Both lines go through console.py, and this test can tell the difference.
+
+    `typer.secho` writes flush-left, unmarked, and wraps wherever the terminal happens
+    to break — so a reader gets no gutter to scan and a wrapped line lands under the
+    phase label instead of under its own marker. The assertions below are on exactly
+    what console.py adds and secho cannot: a `!`/`✓` marker in a two-space gutter, and
+    padding that every wrapped continuation line keeps.
+    """
+    monkeypatch.setattr(hub, "is_private", lambda repo_id: True)
+    monkeypatch.setattr(hub, "set_visibility", lambda repo_id, private: None)
+    monkeypatch.setattr(hub, "set_catalog_listing", lambda repo_id, listed: None)
+
+    res = runner.invoke(cli.app, ["publish", "me/private-bundle"])
+    assert res.exit_code == 0, res.output
+    lines = [ln for ln in res.output.splitlines() if ln.strip()]
+    assert lines, res.output
+    assert any(ln.startswith("  ! ") for ln in lines), res.output   # the warning note
+    assert any(ln.startswith("  ✓ ") for ln in lines), res.output   # the milestone
+    # Padding, not a string indent: continuation lines stay in the body column.
+    assert all(ln.startswith("  ") for ln in lines), res.output
+
+
 def test_publish_lists_public_repo(monkeypatch):
     calls = []
     monkeypatch.setattr(hub, "is_private", lambda repo_id: False)
