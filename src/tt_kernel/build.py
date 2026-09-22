@@ -1039,6 +1039,126 @@ def _card_tags(m: ContainerManifest) -> set:
     return tags
 
 
+def _card_frontmatter(m: ContainerManifest) -> List[str]:
+    """The card's YAML frontmatter: the tags, plus the standard HF metadata keys.
+
+    ``license`` / ``license_name`` / ``license_link`` / ``pipeline_tag`` / ``base_model``
+    are the Hub's OWN field names, not tt-model's invention, which is the point: the Hub
+    indexes them and ``huggingface_hub``'s ``ModelInfo`` hands them to any consumer
+    directly. A licence buried in prose is a licence every tool has to scrape for.
+    """
+    import yaml
+
+    from .launchers import launcher_for
+
+    # Frontmatter values are emitted verbatim into YAML, so a stray newline becomes a
+    # multi-line scalar in a field the Hub validates on commit. The input here is a WIRE
+    # manifest another tt-model may have written, so normalise rather than trust it.
+    def _flat(value: Optional[str]) -> Optional[str]:
+        return " ".join(value.split()) if isinstance(value, str) else value
+
+    card = m.card
+    data: Dict[str, object] = {"tags": sorted(_card_tags(m))}
+    if card and card.license:
+        data["license"] = _flat(card.license.id)
+        # Only beside `other`, which is the case the Hub documents these two keys for.
+        # Beside a standard id their acceptance is unverified, and the Hub would decide
+        # at commit time — after the build.
+        if _flat(card.license.id) == "other":
+            if card.license.name:
+                data["license_name"] = _flat(card.license.name)
+            if card.license.link:
+                data["license_link"] = _flat(card.license.link)
+    # Left unset, the Hub shows no task on the repo, so it never appears in the task
+    # filter a consumer browses by. The launcher knows its own default (text generation
+    # for a vLLM server, nothing for a dit server); the author can always override.
+    pipeline = _flat(card.pipeline_tag if card else None) or launcher_for(m.kind).DEFAULT_PIPELINE_TAG
+    if pipeline:
+        data["pipeline_tag"] = pipeline
+    # Defaulted rather than required: the weights repo IS the upstream model, and stating
+    # the lineage is what makes this package show up on that model's own Hub page.
+    data["base_model"] = [_flat(b) for b in
+                          ((card.base_model if card else None) or [m.weights_repo])]
+    dumped = yaml.safe_dump(data, sort_keys=False, default_flow_style=False).rstrip()
+    return ["---", dumped, "---", ""]
+
+
+def _card_section(heading: str, body: Optional[str]) -> List[str]:
+    """One ``## heading`` section, or nothing at all when the author wrote nothing."""
+    if not (body or "").strip():
+        return []
+    return [f"## {heading}", "", body.rstrip(), ""]
+
+
+def _card_required_section(heading: str, body: Optional[str], missing: str) -> List[str]:
+    """A section rendered even when empty.
+
+    Silence reads as "this model has no limitations" or "its performance was not worth
+    stating". Saying the author did not provide it is both true and visible, and it is
+    the same absence a catalog listing turns on (see docs/publishing.md).
+    """
+    text = (body or "").strip() or f"_{missing}_"
+    return [f"## {heading}", "", text, ""]
+
+
+def _cell(value: object) -> str:
+    """One Markdown table cell: whitespace collapsed, pipes escaped.
+
+    Author strings land here verbatim otherwise, and both failure modes were easy to hit:
+    a `|` in "30B MoE | 3B active" adds a column, and a trailing newline — which every
+    `>`-folded YAML scalar has, and the shipped example uses `>` for five neighbouring
+    fields — ends the table mid-row and spills the remaining rows out as loose text.
+    """
+    return " ".join(str(value).split()).replace("|", "\\|")
+
+
+def _card_at_a_glance(m: ContainerManifest) -> List[str]:
+    """A scannable fact table, derived wherever the manifest already knows the answer.
+
+    Only rows that have a value: a row reading "unknown" is worse than a shorter table.
+    Deliberately no Model CI row — until that gate exists (DEVSTACK-430) any value would
+    be a claim frozen at build time that no consumer could refresh.
+    """
+    card = m.card
+    profiles = [m.resolve_profile(n) for n in m.profile_names()]
+    boards = sorted({p.hardware for p in profiles if p.hardware})
+    contexts = [p.max_model_len for p in profiles if p.max_model_len]
+    rows = [
+        ("Architecture", card.architecture if card else None),
+        ("Hardware", ", ".join(boards) if boards else None),
+        ("Context", f"{max(contexts):,} tokens" if contexts else None),
+        ("License", (card.license.name or card.license.id)
+         if (card and card.license) else None),
+        ("Status", card.status if card else None),
+    ]
+    present = [(label, value) for label, value in rows if value]
+    if not present:
+        return []
+    lines = ["## At a glance", "", "| | |", "| --- | --- |"]
+    lines += [f"| {label} | {_cell(value)} |" for label, value in present]
+    lines.append("")
+    return lines
+
+
+def _card_intended_use(m: ContainerManifest) -> List[str]:
+    """What the package is for, and what it is not.
+
+    The second half is the one that gets left out, and the one that costs: a text-only
+    port of a multimodal checkpoint looks exactly like the checkpoint until someone sends
+    an image.
+    """
+    card = m.card
+    if not card or not ((card.intended_use or "").strip()
+                        or (card.out_of_scope_use or "").strip()):
+        return []
+    lines = ["## Intended use", ""]
+    if (card.intended_use or "").strip():
+        lines += [f"**Direct use:** {card.intended_use.strip()}", ""]
+    if (card.out_of_scope_use or "").strip():
+        lines += [f"**Out-of-scope use:** {card.out_of_scope_use.strip()}", ""]
+    return lines
+
+
 def _card_using_it(m: ContainerManifest) -> List[str]:
     """The ``## Using it`` section: what a client actually sends.
 
@@ -1081,6 +1201,11 @@ def _card_using_it(m: ContainerManifest) -> List[str]:
             ),
             "",
         ]
+    # After the derived text: the author is adding to a described endpoint (a request
+    # schema, an example payload), not introducing it. Most needed by the kinds whose
+    # API only they can document.
+    if m.card and (m.card.usage or "").strip():
+        lines += [m.card.usage.rstrip(), ""]
     return lines
 
 
@@ -1143,18 +1268,9 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     from .manifest import DEFAULT_PORT
 
     tt_metal = built.get("tt_metal") or {}
-    tags = sorted(_card_tags(m))
-    lines = [
-        "---",
-        "tags:",
-        *[f"- {t}" for t in tags],
-        "---",
-        "",
-        f"# {m.name}",
-        "",
-    ]
-    if m.card and m.card.description:
-        lines += [m.card.description.rstrip(), ""]
+    lines = _card_frontmatter(m) + [f"# {m.name}", ""]
+    if m.card and (m.card.description or "").strip():
+        lines += [m.card.description.strip(), ""]
 
     # Hardware requirement, up front. One profile: the whole launch config in a
     # sentence. Several: the targets here, the details in the table below.
@@ -1179,6 +1295,10 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         f"Packaged and published with [tt-model-manager]({TT_MODEL_MANAGER_URL}) "
         f"{built.get('tt_model_version', '')} (manifest schema {m.schema_version}).",
         "",
+    ]
+    lines += _card_at_a_glance(m)
+    lines += _card_intended_use(m)
+    lines += [
         "## Quickstart",
         "",
         # Two fences, in this order, both required. `tt` (the Tenstorrent CLI, PyPI
@@ -1253,6 +1373,18 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         lines.append("")
 
     lines += _card_using_it(m)
+    card = m.card
+    # Template order. The two required sections render even when empty, so their absence
+    # is visible on the Hub rather than indistinguishable from "nothing to say".
+    lines += _card_required_section(
+        "Expected performance", card.performance if card else None,
+        "Not provided by the package author.")
+    lines += _card_required_section(
+        "Limitations", card.limitations if card else None,
+        "Not provided by the package author.")
+    lines += _card_section("Risks and safety considerations", card.risks if card else None)
+    lines += _card_section("Licensing", card.licensing if card else None)
+    lines += _card_section("Related packages", card.related if card else None)
     lines += [
         "## Feedback",
         "",

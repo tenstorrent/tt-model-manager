@@ -127,6 +127,10 @@ class VllmPluginLauncher:
     # fragment and gets reworded; a caller that compared it to a literal would flip its
     # behaviour on a copy edit with every test still green.
     OPENAI_COMPATIBLE = True
+    # The Hub task this kind serves by construction, for the card's `pipeline_tag`
+    # frontmatter when the author states none. Text generation is what a vLLM server
+    # does; a dit server's task is not knowable here (None — the author's to state).
+    DEFAULT_PIPELINE_TAG: Optional[str] = "text-generation"
 
     # vLLM's PyPI metadata is generated on a CUDA machine; without the CPU index a plain
     # install resolves the CUDA dependency set (~4 GB of nvidia-* wheels, no device here)
@@ -400,6 +404,7 @@ class VllmForkLauncher:
     # hardcode it: a diffusion server is NOT an OpenAI API.
     SERVER_DESC = "an OpenAI-compatible server"
     OPENAI_COMPATIBLE = True  # see VllmPluginLauncher
+    DEFAULT_PIPELINE_TAG: Optional[str] = "text-generation"
 
     # where the fork checkout lives in both build stages
     FORK_DIR = "/opt/vllm"
@@ -725,6 +730,7 @@ class TtDitServerLauncher:
     # completions API to be compatible WITH -- the server is the model's own ASGI app.
     SERVER_DESC = "the model's own HTTP server"
     OPENAI_COMPATIBLE = False
+    DEFAULT_PIPELINE_TAG: Optional[str] = None  # image? audio? only the author knows
 
     PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
     DEFAULT_PACKAGES = ("fastapi", "uvicorn", "pydantic>=2", "pillow")

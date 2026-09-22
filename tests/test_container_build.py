@@ -544,6 +544,238 @@ def test_every_card_tells_readers_how_to_reach_the_author_and_the_tooling():
     assert "tt report feedback" not in card
 
 
+# -- the authored sections -----------------------------------------------------------
+# Everything the tool cannot derive: what the model is for, how fast it is, where it
+# falls short. The renderer owns the ORDER so a reader finds the same thing in the same
+# place on every card; the author owns the words.
+
+_FULL_CARD = {
+    "description": "A 7B instruct model for chat and code.",
+    "architecture": "7B dense decoder-only",
+    "status": "Experimental community bring-up",
+    "intended_use": "General chat and code assistance.",
+    "out_of_scope_use": "Image input — the vision tower is not ported.",
+    "usage": "Send `tools` for function calling.",
+    "performance": "78.1% GSM8K; 41 ms/token at batch 1 on p150x4.",
+    "limitations": "No speculative decoding; only p150x4 was validated.",
+    "risks": "Repetition loops above 25k reasoning tokens.",
+    "licensing": "Weights under Apache-2.0; port code Apache-2.0.",
+    "related": "See `you/my-model-p300x2` for the two-board build.",
+    "license": {"id": "apache-2.0"},
+    # Deliberately NOT the derivable defaults (text-generation / the weights repo): a
+    # renderer that ignored the author's override would otherwise pass these tests.
+    "pipeline_tag": "text2text-generation",
+    "base_model": ["org/Upstream-A", "org/Upstream-B"],
+}
+
+
+def test_the_authored_sections_render_in_template_order():
+    """A fixed order is the point of a template: a reader should not have to hunt for
+    limitations in a different place on every card."""
+    card = _card(card=_FULL_CARD)
+    order = [
+        "## At a glance",
+        "## Intended use",
+        "## Quickstart",
+        "## Using it",
+        "## Expected performance",
+        "## Limitations",
+        "## Risks and safety considerations",
+        "## Licensing",
+        "## Related packages",
+        "## Feedback",
+        "## Provenance",
+    ]
+    found = [card.index(h) for h in order]
+    assert found == sorted(found), [h for h in order if h in card]
+
+
+def test_each_authored_section_carries_the_authors_words():
+    card = _card(card=_FULL_CARD)
+    for text in (_FULL_CARD["performance"], _FULL_CARD["limitations"],
+                 _FULL_CARD["risks"], _FULL_CARD["licensing"],
+                 _FULL_CARD["related"], _FULL_CARD["usage"]):
+        assert text in card
+
+
+def test_intended_use_labels_both_halves():
+    card = _card(card=_FULL_CARD)
+    assert "**Direct use:** General chat and code assistance." in card
+    assert "**Out-of-scope use:** Image input" in card
+
+
+def test_an_optional_section_the_author_skipped_is_absent_not_empty():
+    card = _card(card={"description": "x", "performance": "fast", "limitations": "none"})
+    assert "## Risks and safety considerations" not in card
+    assert "## Licensing" not in card
+    assert "## Related packages" not in card
+    assert "## Intended use" not in card
+
+
+def test_performance_and_limitations_are_always_rendered():
+    """Silence reads as "no limitations". An explicit "not provided" is both true and
+    the same absence `tt-model publish` refuses on."""
+    card = _card()
+    assert "## Expected performance" in card
+    assert "## Limitations" in card
+    assert card.count("_Not provided by the package author._") == 2
+
+
+def test_at_a_glance_derives_what_the_manifest_already_knows():
+    card = _card(card=_FULL_CARD)
+    assert "| Hardware | p150x4 |" in card
+    assert "| Context | 131,072 tokens |" in card
+    assert "| Architecture | 7B dense decoder-only |" in card
+    assert "| Status | Experimental community bring-up |" in card
+    assert "| License | apache-2.0 |" in card
+
+
+def test_at_a_glance_omits_a_row_it_cannot_fill():
+    """A row reading "unknown" is worse than a shorter table."""
+    card = _card()  # no card block at all
+    assert "| Architecture |" not in card
+    assert "| Status |" not in card
+    assert "| Hardware | p150x4 |" in card  # still derived
+
+
+def test_no_model_ci_row_until_that_gate_exists():
+    """DEVSTACK-430 is not built. A "not yet run" row would be a claim frozen at build
+    time that no consumer could refresh."""
+    assert "Model CI" not in _card(card=_FULL_CARD)
+
+
+def test_the_frontmatter_carries_the_hub_license_keys():
+    """`license`/`pipeline_tag`/`base_model` are the Hub's own field names, so ModelInfo
+    surfaces them without anyone scraping markdown. (`license_link` is only emitted
+    beside `id: other` — the two tests below cover both sides of that.)"""
+    import yaml
+
+    card = _card(card=_FULL_CARD)
+    meta = yaml.safe_load(card.split("---")[1])
+    assert meta["license"] == "apache-2.0"
+    # the author's overrides, not the derivable defaults
+    assert meta["pipeline_tag"] == "text2text-generation"
+    assert meta["base_model"] == ["org/Upstream-A", "org/Upstream-B"]
+
+
+def test_a_standard_license_emits_neither_name_nor_link():
+    """`license_name`/`license_link` are what the Hub documents for `other`. Beside a
+    standard id their acceptance is unverified, and the Hub validates frontmatter on
+    the README commit — inside `push`, after the build — so they are not gambled."""
+    import yaml
+
+    card = _card(card={"license": {"id": "apache-2.0", "name": "Apache",
+                                   "link": "https://example.invalid/LICENSE"}})
+    meta = yaml.safe_load(card.split("---")[1])
+    assert meta["license"] == "apache-2.0"
+    assert "license_name" not in meta and "license_link" not in meta
+
+
+def test_a_license_called_other_is_named_and_linked_in_the_frontmatter():
+    import yaml
+
+    card = _card(card={"license": {"id": "other", "name": "Fish Audio Research License",
+                                   "link": "https://example.invalid/LICENSE"}})
+    meta = yaml.safe_load(card.split("---")[1])
+    assert meta["license"] == "other"
+    assert meta["license_name"] == "Fish Audio Research License"
+    assert meta["license_link"] == "https://example.invalid/LICENSE"
+
+
+def test_the_frontmatter_never_emits_a_multiline_scalar_from_a_wire_manifest():
+    """The renderer's inputs come off a WIRE manifest, possibly written by another
+    tt-model, so it normalises rather than trusting the authoring model to have done it.
+
+    `license` is the field the Hub validates server-side on the README commit, so a
+    folded scalar there fails after the build; and un-normalised, "other\\n" also misses
+    the `== "other"` branch and drops the name and link entirely."""
+    import yaml
+
+    card = _card(card={"license": {"id": "other\n", "name": "Custom\nLicence",
+                                   "link": "https://example.invalid/L\n"},
+                       "pipeline_tag": "text-to-image\n",
+                       "base_model": ["org/Upstream-A\n"]})
+    block = card.split("---")[1]
+    meta = yaml.safe_load(block)
+    assert meta["license"] == "other"
+    assert meta["license_name"] == "Custom Licence"
+    assert meta["license_link"] == "https://example.invalid/L"
+    assert meta["pipeline_tag"] == "text-to-image"
+    assert meta["base_model"] == ["org/Upstream-A"]
+    # ...and the block carries no blank line, which is what a folded scalar produces
+    assert "\n\n" not in block.strip()
+
+
+def test_the_frontmatter_defaults_the_lineage_to_the_weights_repo():
+    """Stating the base model is what makes this package show up on the upstream
+    model's own Hub page; the weights repo IS that model, so it need not be typed."""
+    import yaml
+
+    meta = yaml.safe_load(_card().split("---")[1])
+    assert meta["base_model"] == ["org/Weights-7B"]
+    assert meta["pipeline_tag"] == "text-generation"  # derived for the vLLM kinds
+
+
+def test_a_diffusion_card_claims_no_text_generation_task():
+    from tt_kernel.container_manifest import ContainerManifest
+    import yaml
+
+    raw = json.loads(json.dumps(BASE))
+    raw["kind"] = "tt-dit-server"
+    raw["runtime"] = {"app": "models.tt_dit.server.flux2.app:app"}
+    raw["serve"] = {"hardware": "p150x4", "mesh_device": "P150x4", "port": 8000}
+    raw.pop("serve_profiles", None)
+    raw.pop("default_profile", None)
+    meta = yaml.safe_load(
+        build.render_model_card(ContainerManifest.model_validate(raw), _built())
+        .split("---")[1])
+    assert "pipeline_tag" not in meta  # only the author can say what a dit server does
+
+    # ...and when the author does say, it is carried through
+    raw["card"] = {"pipeline_tag": "text-to-image"}
+    meta = yaml.safe_load(
+        build.render_model_card(ContainerManifest.model_validate(raw), _built())
+        .split("---")[1])
+    assert meta["pipeline_tag"] == "text-to-image"
+
+
+def test_every_kind_declares_a_default_pipeline_tag():
+    """The frontmatter's `pipeline_tag` default is read off the launcher, never decided by
+    string-comparing SERVER_DESC — the same coupling that once broke every fork card."""
+    from tt_kernel.launchers import KINDS
+
+    for name, launcher in KINDS.items():
+        assert hasattr(launcher, "DEFAULT_PIPELINE_TAG"), f"kind {name} has no DEFAULT_PIPELINE_TAG"
+    assert KINDS["vllm-plugin"].DEFAULT_PIPELINE_TAG == "text-generation"
+    assert KINDS["vllm-fork"].DEFAULT_PIPELINE_TAG == "text-generation"
+    assert KINDS["tt-dit-server"].DEFAULT_PIPELINE_TAG is None
+
+
+def test_at_a_glance_cells_survive_pipes_and_newlines():
+    """A `|` in a value added a column; a trailing newline — which every `>`-folded YAML
+    scalar carries — ended the table mid-row and spilled Hardware, Context and Status out
+    as loose text. Both are author-typed values, so both must be neutralised."""
+    card = _card(card={"architecture": "30B MoE | 3B active\n",
+                       "status": "alpha\nsecond line"})
+    table = card[card.index("## At a glance"):card.index("## Quickstart")]
+    rows = [l for l in table.splitlines() if l.startswith("| ") and "---" not in l
+            and l != "| | |"]
+    assert rows == [
+        "| Architecture | 30B MoE \\| 3B active |",
+        "| Hardware | p150x4 |",
+        "| Context | 131,072 tokens |",
+        "| Status | alpha second line |",
+    ]
+
+
+def test_a_whitespace_only_description_renders_nothing():
+    """Easy to produce from an empty `>`-folded scalar; it left a blank paragraph between
+    the title and the hardware sentence."""
+    card = _card(card={"description": "  \n"})
+    title_to_hardware = card[card.index("# my-model"):card.index("Runs on")]
+    assert title_to_hardware.strip() == "# my-model"
+
+
 def test_the_card_pins_provenance():
     card = _card()
     assert "a" * 40 in card and "b" * 40 in card
@@ -1481,8 +1713,15 @@ def test_the_manifest_bind_port_never_reaches_the_card():
 
 
 def _tags_of(card: str) -> list:
-    body = card.split("---")[1]
-    return [l.strip("- ").strip() for l in body.strip().splitlines() if l.startswith("- ")]
+    """The `tags:` list from the frontmatter, parsed as the YAML it is.
+
+    This used to scan for lines starting with "- ", which was fine while `tags` was the
+    only key. The frontmatter now also carries `base_model:`, whose items are list
+    entries too, so that scan would report the weights repo as a tag.
+    """
+    import yaml
+
+    return list(yaml.safe_load(card.split("---")[1])["tags"])
 
 
 def test_the_card_tags_the_board_the_model_was_authored_for():

@@ -805,13 +805,16 @@ def test_profiles_marks_the_default(tmp_path, monkeypatch, capsys):
 # ------------------------------------------------------------------ push
 
 
-def _staged(tmp_path, *, hub_hosted=True, with_layout=True, repo="raahem/qwen") -> Path:
+def _staged(tmp_path, *, hub_hosted=True, with_layout=True, repo="raahem/qwen",
+            card=None) -> Path:
     """A staged package directory as `package --container` would leave it."""
     from tt_kernel.container_manifest import ContainerManifest
 
     raw = json.loads(json.dumps(BASE))
     if not hub_hosted:
         raw["image"] = {"registry": "ghcr.io/tenstorrent"}
+    if card is not None:
+        raw["card"] = card
     m = ContainerManifest.model_validate(raw)
     wire = m.to_wire(image_tag="tt-model/my-model:abc123", tt_metal_version="0.72.1",
                      tt_kernel_version="0.1.0", built={"repo": repo})
@@ -902,7 +905,8 @@ def test_publish_lists_a_container_package_after_the_upload(tmp_path, monkeypatc
     monkeypatch.setattr(hub, "set_catalog_listing",
                         lambda repo_id, listed: order.append(("list", repo_id, listed)))
 
-    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen")),
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen",
+                                                       card=_COMPLETE)),
                                   "--public", "--publish"])
     assert res.exit_code == 0, res.output
     assert order == ["upload", ("list", "raahem/qwen", True)]
@@ -932,7 +936,7 @@ def test_a_plain_push_preserves_an_existing_catalog_listing(tmp_path, monkeypatc
     monkeypatch.setattr(hub, "set_catalog_listing",
                         lambda repo_id, listed: calls.append((repo_id, listed)))
 
-    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path))])   # no --publish
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, card=_COMPLETE))])   # no --publish
     assert res.exit_code == 0, res.output
     assert calls == [("raahem/qwen", True)], calls   # listing restored, not dropped
     assert "kept" in res.output and "catalog" in res.output
@@ -998,7 +1002,8 @@ def test_publish_alone_implies_public_and_lists(tmp_path, monkeypatch):
     monkeypatch.setattr(hub, "set_catalog_listing",
                         lambda repo_id, listed: seen["order"].append(("list", repo_id, listed)))
 
-    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen")), "--publish"])
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen",
+                                                       card=_COMPLETE)), "--publish"])
     assert res.exit_code == 0, res.output
     assert seen["ensure_private"] is False  # --publish forced public
     assert seen["order"] == ["upload", ("list", "raahem/qwen", True)]  # listed after the upload
@@ -1013,7 +1018,8 @@ def test_a_failed_listing_does_not_read_as_a_failed_push(tmp_path, monkeypatch):
         raise RuntimeError("hub said no")
 
     monkeypatch.setattr(hub, "set_catalog_listing", boom)
-    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen")),
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, repo="raahem/qwen",
+                                                       card=_COMPLETE)),
                                   "--public", "--publish"])
     assert res.exit_code == 0, res.output
     assert "tt-model publish raahem/qwen" in res.output
@@ -2489,3 +2495,156 @@ def test_a_traversing_revision_counts_no_bytes(tmp_path, monkeypatch):
     assert container_cli._bytes_on_disk(_wref(revision="goodsha")) == 1000
     assert container_cli._bytes_on_disk(_wref(revision="/etc")) == 0
     assert container_cli._bytes_on_disk(_wref(revision="../../../etc")) == 0
+
+
+# -- the card gate on push -----------------------------------------------------------
+# Every route by which a push can END with the repo listed is gated: `--publish`, and a
+# plain re-push of a repo that is already listed (which restores the listing the card
+# overwrite just dropped). Refusals happen before the upload.
+
+
+def _push_hub(monkeypatch, *, listed):
+    order = []
+    monkeypatch.setattr(container_cli, "push_container", lambda *a, **k: order.append("upload"))
+    monkeypatch.setattr(cli, "_ensure_repo", lambda *a, **k: order.append("create"))
+    monkeypatch.setattr(hub, "is_listed", lambda r: listed)
+    monkeypatch.setattr(hub, "set_catalog_listing",
+                        lambda repo_id, listed: order.append(("list", listed)))
+    return order
+
+
+_COMPLETE = {"performance": "41 ms/token", "limitations": "p150x4 only"}
+_GAPPED = {"description": "just a blurb"}
+
+
+def test_push_publish_refuses_a_card_missing_the_required_sections(tmp_path, monkeypatch):
+    order = _push_hub(monkeypatch, listed=False)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, card=_GAPPED)),
+                                  "--public", "--publish"])
+    assert res.exit_code != 0
+    assert order == []            # nothing created, uploaded or listed
+    assert "performance" in res.output and "limitations" in res.output
+    assert "push <dir> --publish" in res.output
+
+
+def test_push_publish_lists_a_bundle_whose_card_is_complete(tmp_path, monkeypatch):
+    order = _push_hub(monkeypatch, listed=False)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, card=_COMPLETE)),
+                                  "--public", "--publish"])
+    assert res.exit_code == 0, res.output
+    assert order == ["create", "upload", ("list", True)]
+
+
+def test_push_publish_refuses_a_staged_dir_from_before_card_sections(tmp_path, monkeypatch):
+    """`container.card is None` is an exemption for `publish` (the bundle is in the wild)
+    but a gap here: the directory is local, re-packaging is one command, and a manifest
+    is a JSON file anyone can hand-edit to dodge the gate."""
+    order = _push_hub(monkeypatch, listed=False)
+    staged = _staged(tmp_path)                       # no card block → card None on the wire
+    res = runner.invoke(cli.app, ["push", str(staged), "--public", "--publish"])
+    assert res.exit_code != 0
+    assert order == []
+    assert "packaged before model cards" in res.output
+
+
+def test_a_plain_push_of_a_listed_repo_is_held_to_the_same_bar(tmp_path, monkeypatch):
+    """The ordinary update workflow — publish once, later drop a section, push — used to
+    keep the listing through the ungated restore branch. It is the same catalog state the
+    gate exists to prevent, reached without ever typing --publish."""
+    order = _push_hub(monkeypatch, listed=True)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, card=_GAPPED))])
+    assert res.exit_code != 0
+    assert order == []            # refused BEFORE the upload
+    assert "re-pushing would leave raahem/qwen listed" in res.output
+    assert "tt-model unpublish raahem/qwen" in res.output
+
+
+def test_a_plain_push_of_a_listed_repo_with_a_complete_card_restores_the_listing(
+    tmp_path, monkeypatch
+):
+    order = _push_hub(monkeypatch, listed=True)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, card=_COMPLETE))])
+    assert res.exit_code == 0, res.output
+    assert order == ["create", "upload", ("list", True)]
+
+
+def test_a_plain_push_of_an_unlisted_repo_does_not_check_the_card(tmp_path, monkeypatch):
+    """The gate is on LISTING, not on pushing: a private or in-progress bundle is exactly
+    the case where the card is not finished yet."""
+    order = _push_hub(monkeypatch, listed=False)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, card=_GAPPED))])
+    assert res.exit_code == 0, res.output
+    assert order == ["create", "upload"]
+
+
+def test_a_private_push_is_never_gated_because_it_delists(tmp_path, monkeypatch):
+    """`--private` DELISTS the repo, so the catalog state the gate protects cannot be
+    reached — and gating it would block the one action that fixes a bad listing.
+
+    Named rather than left to a cardless fixture another test happens to use: that
+    coverage was accidental, and editing that fixture would have removed it silently."""
+    order = _push_hub(monkeypatch, listed=True)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path, card=_GAPPED)),
+                                  "--private"])
+    assert res.exit_code == 0, res.output
+    assert order == ["create", "upload", ("list", False)]
+
+
+def test_a_plain_repush_with_no_card_offers_unpublish_not_a_four_hour_rebuild(
+    tmp_path, monkeypatch
+):
+    """The `card is None` arm has to branch on context like the gaps arm does.
+
+    Unbranched it said "cannot be listed" about an already-listed repo, and offered
+    `package --container` — the 2.5-4h cold build — as the only way out of a routine
+    update, never mentioning the one-command `unpublish` its sibling arm offers. Every
+    bundle staged before card sections meets this on its next ordinary push."""
+    order = _push_hub(monkeypatch, listed=True)
+    res = runner.invoke(cli.app, ["push", str(_staged(tmp_path))])   # no card block
+    assert res.exit_code != 0
+    assert order == []
+    assert "re-pushing would leave raahem/qwen listed" in res.output
+    assert "packaged before model cards" in res.output
+    assert "tt-model unpublish raahem/qwen" in res.output
+    assert "cannot be listed" not in res.output      # it IS listed
+
+
+def test_the_package_warning_names_each_missing_section():
+    from tt_kernel.container_cli import card_gap_warning
+
+    assert card_gap_warning([]) is None
+    one = card_gap_warning(["limitations"])
+    assert one.startswith("the model card has no card.limitations")
+    assert one.endswith("refused without it")
+    both = card_gap_warning(["performance", "limitations"])
+    assert "card.performance or card.limitations" in both
+    assert both.endswith("refused without them")
+
+
+@pytest.mark.parametrize(("card", "warned"), [(_GAPPED, True), (_COMPLETE, False)])
+def test_package_emits_the_card_warning_at_its_call_site(
+    tmp_path, monkeypatch, capsys, card, warned
+):
+    """The test above is pure, so it proved only that the STRING is right.
+
+    Replacing the call in package_container with `pass` left the whole suite green: the
+    warning could have been deleted, moved after an early return, or had its condition
+    inverted and CI would not have noticed. This drives the real function with the build
+    stubbed out."""
+    from types import SimpleNamespace
+
+    out = _staged(tmp_path, card=card)
+    m = ContainerManifest.model_validate({**json.loads(json.dumps(BASE)), "card": card})
+    staged = SimpleNamespace(
+        manifest=m, ctx=tmp_path, out=out, image="x:y", built={},
+        metal=SimpleNamespace(sha="a" * 40, branch="main", dirty=False, mode="local",
+                              pushed=True),
+        code_tree=["models/common"], code_skipped=[],
+    )
+    monkeypatch.setattr(container_cli, "stage", lambda *a, **k: staged)
+    monkeypatch.setattr(container_cli, "run_build", lambda *a, **k: None)
+    monkeypatch.setattr(container_cli, "finalize", lambda *a, **k: out)
+
+    container_cli.package_container(str(tmp_path / "tt-model.yaml"))
+    printed = capsys.readouterr().out
+    assert ("the model card has no card." in printed) is warned, printed
