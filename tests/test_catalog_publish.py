@@ -71,6 +71,9 @@ def test_publish_reports_through_the_phase_body_not_raw_echo(monkeypatch):
     what console.py adds and secho cannot: a `!`/`✓` marker in a two-space gutter, and
     padding that every wrapped continuation line keeps.
     """
+    # `publish` reads the published manifest before touching visibility (the card gate);
+    # this test predates that, so give it a repo with no manifest so the gate steps aside.
+    monkeypatch.setattr(hub, "fetch_manifest", _no_manifest)
     monkeypatch.setattr(hub, "is_private", lambda repo_id: True)
     monkeypatch.setattr(hub, "set_visibility", lambda repo_id, private: None)
     monkeypatch.setattr(hub, "set_catalog_listing", lambda repo_id, listed: None)
