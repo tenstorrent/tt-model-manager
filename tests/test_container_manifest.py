@@ -586,3 +586,20 @@ def test_the_example_mentions_every_kind():
 
     text = _example_text()
     assert not [k for k in KINDS if k not in text]
+
+
+def test_the_example_card_text_does_not_restate_what_the_card_generates():
+    """The example is the template authors copy, so what it demonstrates is what the
+    catalog fills up with.
+
+    `card.quickstart` lands directly under the generated Quickstart, which already prints
+    the commands, the port and the endpoint — and .claude/skills/tt-model-yaml/SKILL.md
+    says not to restate them. An example that does teaches every future author to
+    hand-write prose the generator owns and then keep it in step: the live `changh95/*`
+    cards each carry their own "Run with tt-cli" and "not an OpenAI API" paragraphs,
+    which `## Using it` now emits too."""
+    text = _example_text()
+    card_block = text[text.index("\ncard:"):]
+    for generated in ("127.0.0.1", "tt serve", "tt-model serve", "tt model pull",
+                      "tt-model pull"):
+        assert generated not in card_block, generated

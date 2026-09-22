@@ -181,6 +181,11 @@ card:
   # omit it and the card jumps straight from the title to the hardware sentence.
   description: >
     A 7B instruct model for general chat and code, served on Blackhole via vLLM.
+  # Extra Markdown appended under the generated Quickstart. The commands, the port and
+  # the endpoint are generated around this, so do NOT restate them (see
+  # .claude/skills/tt-model-yaml/SKILL.md): write only what the tool cannot derive --
+  # here, the prompt convention this particular model expects.
   quickstart: |
-    ### Use with your client
-    Point it at `http://127.0.0.1:20000` once the server is up (or the port `tt-model serve` printed).
+    ### Prompting
+    This checkpoint expects the ChatML template; most OpenAI clients apply it for you,
+    but a raw completion call has to include the `<|im_start|>` turns itself.
