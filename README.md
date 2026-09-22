@@ -35,8 +35,10 @@ tt-model serve <org>/<model>         # pull and install if needed, then launch t
 tt-model curl "hello"                # send a chat completion to the running model
 ```
 
-New here? [docs/E2E_RECIPE.md](docs/E2E_RECIPE.md) is the copy-paste, end-to-end recipe. It
-walks through the five steps in order:
+New here? There is a copy-paste, end-to-end recipe per package format:
+[docs/E2E_RECIPE_V5.1.md](docs/E2E_RECIPE_V5.1.md) for a v5.1 container package (the
+supported path) and [docs/E2E_RECIPE_V6.md](docs/E2E_RECIPE_V6.md) for a v6 thin bundle. Both
+walk through the same five steps in order:
 
 1. Package a model you have brought up.
 2. Push the bundle to the HF Hub.
@@ -63,7 +65,8 @@ kinds. Both are served with the same `tt-model serve` command.
 
 | Page | What it covers |
 |---|---|
-| [docs/E2E_RECIPE.md](docs/E2E_RECIPE.md) | Step-by-step: bring-up, package, push, pull, serve, verify, with troubleshooting |
+| [docs/E2E_RECIPE_V5.1.md](docs/E2E_RECIPE_V5.1.md) | Step-by-step for a v5.1 container package: bring-up, `tt-model.yaml`, package, push, pull, serve, verify, with troubleshooting |
+| [docs/E2E_RECIPE_V6.md](docs/E2E_RECIPE_V6.md) | Step-by-step for a v6 thin bundle: bring-up, package-thin, push, pull, serve, verify, with troubleshooting |
 | [docs/cli.md](docs/cli.md) | Every `tt-model` command with its common flags |
 | [docs/publishing.md](docs/publishing.md) | push vs. public vs. publish, the community catalog, how compatibility is checked |
 | [docs/container_packages.md](docs/container_packages.md) | v5.1 container packages: `tt-model.yaml`, serving, how the container runs, and design notes |

@@ -8,7 +8,8 @@ This is the copy-paste recipe for the **v6 thin** path. Take a model you have br
 install folder is needed to run it.
 
 > Scope: **v6 thin bundles only.** These build their own engine and venv from pip pins. A
-> consumer needs only a Tenstorrent card, its firmware, and SFPI.
+> consumer needs only a Tenstorrent card, its firmware, and SFPI. For the v5.1 container path,
+> which ships the platform as an OCI image instead, see [E2E_RECIPE_V5.1.md](E2E_RECIPE_V5.1.md).
 
 > **This path is gated on an upstream publish.** It depends on the **models wheel**,
 > `tt-metal-models`, which packages the whole `models/` tree (including `tt_transformers`) for pip

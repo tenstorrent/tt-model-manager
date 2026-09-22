@@ -129,7 +129,8 @@ this file (draft PR, one concern, regression test, no pushes to `main`).
 For the **container (v5.1)** path this repo ships two skills (under `.claude/skills/`, mirrored
 for Codex under `.codex/skills/`): `tt-model-yaml` authors the manifest from a validated
 bring-up; `tt-model-package-test` builds it, serves it on hardware, proves the API works (tool
-calling included), and pushes. Prefer them over improvising the flow.
+calling included), and pushes. Prefer them over improvising the flow. The copy-paste recipe for
+this path is [docs/E2E_RECIPE_V5.1.md](docs/E2E_RECIPE_V5.1.md).
 
 There is one **venv-based authoring path**, also self-contained (a consumer needs only a card
 and firmware):
@@ -139,7 +140,7 @@ and firmware):
   `tt-metal-models` publishing (`tt-metal#54478`) and `tt_transformers` being broken out; the
   generated `requirements.txt` ships with a TODO pin until then. Design:
   [docs/thin_packages.md](docs/thin_packages.md); copy-paste recipe:
-  [docs/E2E_RECIPE.md](docs/E2E_RECIPE.md).
+  [docs/E2E_RECIPE_V6.md](docs/E2E_RECIPE_V6.md).
 
 ### The canonical sequence
 
@@ -210,6 +211,7 @@ Beyond those:
 
 Prefer a clear, actionable message over a silent workaround. If `pull` refuses (glibc,
 interpreter, or arch), the fix is to **repackage on the right OS** rather than to force past the gate.
-Consult the Troubleshooting table in [docs/E2E_RECIPE.md](docs/E2E_RECIPE.md). If the
+Consult the Troubleshooting table in [docs/E2E_RECIPE_V6.md](docs/E2E_RECIPE_V6.md) (v6) or
+[docs/E2E_RECIPE_V5.1.md](docs/E2E_RECIPE_V5.1.md) (container). If the
 `tt-metal-models` pin cannot resolve yet, that is the expected gate. The path is not runnable until
 `tt-metal#54478` publishes; see [docs/thin_packages.md](docs/thin_packages.md).
