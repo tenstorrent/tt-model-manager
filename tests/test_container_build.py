@@ -1215,6 +1215,39 @@ def test_a_vllm_card_still_says_openai_compatible():
     assert "an OpenAI-compatible server" in _card()
 
 
+def test_a_diffusion_profile_table_omits_the_capacity_columns():
+    """`max_num_seqs`/`max_model_len` configure a continuous-batching engine a dit server
+    does not have, so a diffusion card rendered them as two columns of empty cells."""
+    from tt_kernel.container_manifest import ContainerManifest
+
+    raw = json.loads(json.dumps(BASE))
+    raw["kind"] = "tt-dit-server"
+    raw["runtime"] = {"app": "models.tt_dit.server.flux2.app:app"}
+    raw["serve"] = {"port": 8000}
+    raw["serve_profiles"] = [
+        {"name": "p150x4", "hardware": "p150x4", "mesh_device": "P150x4"},
+        {"name": "p300x2", "hardware": "p300x2", "mesh_device": "P300x2"},
+    ]
+    raw["default_profile"] = "p150x4"
+    card = build.render_model_card(ContainerManifest.model_validate(raw), _built())
+    assert "## Serve profiles" in card
+    assert "max_num_seqs" not in card
+    assert "max_model_len" not in card
+    assert "| profile | hardware | mesh |" in card
+
+
+def test_an_llm_profile_table_keeps_the_capacity_columns():
+    profiles = [
+        {"name": "p150x2", "hardware": "p150x2", "mesh_device": "P150x2",
+         "max_num_seqs": 8, "max_model_len": 65536},
+        {"name": "p150x4", "hardware": "p150x4", "mesh_device": "P150x4",
+         "max_num_seqs": 32, "max_model_len": 131072},
+    ]
+    card = _card(serve_profiles=profiles, default_profile="p150x4")
+    assert "| profile | hardware | mesh | max_num_seqs | max_model_len |" in card
+    assert "| 32 | 131072 |" in card
+
+
 def test_every_kind_describes_the_server_it_starts():
     """The card reads SERVER_DESC off the launcher, so a new kind that forgets it would
     render an AttributeError rather than a card."""
