@@ -409,7 +409,17 @@ def classify_hub_error(exc: BaseException, repo_id: str, *, weights: bool = Fals
     (``GatedRepoError``, ``EntryNotFoundError``), then status code, then message text last.
     A status code alone can't tell a missing repo from a missing file — both 404 — which is
     why ``EntryNotFoundError`` is checked before the 404 branch below rather than after it.
+
+    Class checks use ``isinstance``, never the class NAME. huggingface_hub raises
+    SUBCLASSES for the cases it can be specific about — 1.x answers a missing file with
+    ``RemoteEntryNotFoundError`` and a cache miss under offline mode with
+    ``LocalEntryNotFoundError``, both deriving from ``EntryNotFoundError`` — so a name
+    comparison stops matching the moment the library gets more precise, with no error
+    anywhere: the branch simply falls through to the repo-level 404 and tells the user
+    their repo does not exist when only one file inside it is missing.
     """
+    from huggingface_hub.utils import EntryNotFoundError, LocalEntryNotFoundError
+
     subject = "weights repo" if weights else "bundle"
     name = type(exc).__name__
     text = str(exc)
@@ -418,7 +428,10 @@ def classify_hub_error(exc: BaseException, repo_id: str, *, weights: bool = Fals
 
     # Offline / DNS / TLS beats everything: an unreachable Hub also can't confirm a repo,
     # and "you are offline" is the more useful half of that pair.
-    if (name in ("LocalEntryNotFoundError", "OfflineModeIsEnabled")
+    # LocalEntryNotFoundError first, and it must stay first: it is also an
+    # EntryNotFoundError, so the missing-file branch below would otherwise claim an
+    # offline read is a repo with no manifest.
+    if (isinstance(exc, LocalEntryNotFoundError) or name == "OfflineModeIsEnabled"
             or any(k in low for k in ("no such host", "dial tcp", "i/o timeout",
                                       "tls handshake", "connection refused",
                                       "connection error", "max retries exceeded",
@@ -444,7 +457,7 @@ def classify_hub_error(exc: BaseException, repo_id: str, *, weights: bool = Fals
     # render "this repo ships no manifest" as "no such repo, or no access" — the type is
     # the only thing that tells the two apart. Bundles only: a weights repo is never
     # expected to carry a manifest, so for weights this is left to the 404 branch below.
-    if not weights and (name == "EntryNotFoundError" or MANIFEST_NAME in text):
+    if not weights and (isinstance(exc, EntryNotFoundError) or MANIFEST_NAME in text):
         return {
             "cause": "not a tt-model bundle",
             "detail": f"The repo exists but has no {MANIFEST_NAME}, so there is nothing for tt-model "
