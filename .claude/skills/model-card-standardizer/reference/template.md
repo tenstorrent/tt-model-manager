@@ -23,11 +23,13 @@ Two decisions from code review (2026-09-18):
   invariant 1 ("tt-model alone must do the whole job; never introduce a step
   needing tt-cli") is binding, so a card that names only `tt` would violate
   it; the second fence is what keeps that invariant literally true.
-- Whitelist status is NOT a repo tag. A tag lives in the author's own README
-  frontmatter, which any author can edit on the Hub, so it cannot be a review
-  signal. It is an allowlist in a Tenstorrent-controlled HF dataset repo
-  (`tenstorrent/tt-model-whitelist`, `whitelist.json`), written by
-  `tt-model whitelist` and read by `tt model list --community`.
+- Whitelist status is NOT a repo tag, and it is not a field on this card at
+  all. A tag lives in the author's own README frontmatter, which any author can
+  edit on the Hub, so it could never be a review signal. Reviewing a bundle
+  copies it into the Tenstorrent HF organisation instead: a model under
+  `Tenstorrent/` has been reviewed by definition, because only the DX team can
+  write there. Your own repo is never touched, and the copy credits you in its
+  first line.
 -->
 
 ---
@@ -36,13 +38,18 @@ tags:
   - <topology-tag>          # e.g. p150, p300x2 — one per supported profile
   - tt-model-cache
   - tt-model-catalog
-  #                          NO whitelist tag here: review status lives in Tenstorrent's allowlist
-  #                          (dataset repo tenstorrent/tt-model-whitelist), never in the author's frontmatter.
+  #                          NO whitelist tag here: a reviewed model is one Tenstorrent has
+  #                          copied into its own org, never something an author marks themselves.
   - <runtime-tag>           # e.g. vllm-plugin, tt-dit-server — as applicable
   - <domain-tags>           # e.g. robotics, vla, tts, 3d-reconstruction — optional, aids discovery
+# NOTE: this block is the RENDERED card's frontmatter, which is flat because that is
+# what the Hub indexes. In your tt-model.yaml you write it NESTED and the renderer
+# flattens it:  card: {license: {id: apache-2.0, name: ..., link: ...}}
+# `name`/`link` are emitted only beside `id: other`; the authoring model rejects an
+# unknown key, so copying these three lines into the yaml verbatim will not load.
 license: <spdx-id-or-"other">          # omit only if the weights are genuinely unrestricted
-license_name: <name>                    # required if license: other
-license_link: <url-to-upstream-license>
+license_name: <name>                    # emitted only when license is "other"
+license_link: <url-to-upstream-license> # emitted only when license is "other"
 pipeline_tag: <hf-pipeline-tag>         # e.g. text-generation, image-to-3d, robotics, text-to-speech
 base_model:
   - <upstream-hf-repo-id>

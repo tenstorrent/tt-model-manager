@@ -75,9 +75,8 @@ violates one of these is wrong even if tests pass:
    ```
 5. If the change touches the serve/device path, validate on hardware (see
    `docs/self_contained_packages.md` → Testing) — package → pull → serve → `curl`.
-6. Commit messages: imperative subject, a short body explaining *why*, and end with a
-   `Co-Authored-By: Claude <model name> <noreply@anthropic.com>` trailer naming the model
-   that wrote it (e.g. `Claude Opus 4.8`).
+6. Commit messages: imperative subject, a short body explaining *why*, and end with:
+   `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
 7. Open a **draft PR**; body = what/why + the test evidence (e.g. "full suite: N passed") +
    a link to the tracking issue if one applies.
 

@@ -50,13 +50,16 @@ author-fixable. Don't carry a stale verdict forward.
 
 Read `reference/template.md` in this skill directory — the template proposed
 in [DEVSTACK-447 comment 670207](https://tenstorrent.atlassian.net/browse/DEVSTACK-447).
-**Status: PROPOSED**, pending sign-off on the open questions logged there
-(should license become a manifest-required field; who retrofits the existing
-~50 catalog cards). Two questions were settled by code review on 2026-09-18
-and are recorded in the template's own status note: `tt-cli` is ready but the
-card shows both flows (AGENTS.md invariant 1), and whitelist status is an
-allowlist in a Tenstorrent-controlled dataset repo, not a repo tag. Check the
-ticket for movement before treating any section as settled fact.
+**Status: PROPOSED**, pending sign-off on the open questions logged there.
+`license` is under an explicit A/B/C vote on that ticket (stays optional /
+required to list publicly / required to package at all), and who retrofits the
+existing ~50 catalog cards is still unassigned — so treat both as unsettled.
+
+Two questions are settled and recorded in the template's own status note: the
+card shows both consumer flows with `tt` first (AGENTS.md invariant 1), and
+whitelist status is not a card concern at all — a reviewed model is one copied
+into the Tenstorrent HF org. Check the ticket for movement before treating any
+other section as settled fact.
 
 Then identify the input:
 
@@ -78,17 +81,27 @@ checking. Classify each as:
 - **Generator-owned** — missing or wrong, and current code cannot express it
   per-card. Cite the exact line you checked.
 
-As of this skill's writing, generator-owned gaps are:
+Most of what this skill originally listed as generator-owned has since been
+built (PRs #129 and #133–#135). `CardSpec` now carries `description`,
+`quickstart`, `architecture`, `status`, `intended_use`, `out_of_scope_use`,
+`usage`, `performance`, `limitations`, `risks`, `licensing`, `related`,
+`license`, `pipeline_tag` and `base_model`, and the renderer emits *At a
+glance*, *Intended use*, *Quickstart*, *Serve profiles*, *Using it*,
+*Licensing*, *Risks and safety considerations*, *Related packages*, *Feedback*
+and *Provenance*. So a missing section is now usually **author-fixable**, not a
+generator gap — which inverts the default this skill started with.
+
+What is still genuinely generator-owned:
 
 | Template section | What the generator does today |
 | --- | --- |
-| Quickstart command | Hardcodes `tt-model pull` / `tt-model serve` only. The fix in flight adds the `tt` fence FIRST and keeps a `tt-model` fence (AGENTS.md invariant 1) — a card with only one of the two is wrong either way |
-| Serve profiles columns | Hardcodes `max_num_seqs` / `max_model_len` for every `kind`, even non-LLM ones |
-| At a glance, Intended use, Expected performance, Limitations, Risks and safety, Licensing, Changelog, Related packages, Feedback | No dedicated `CardSettings` field exists for any of these — none gets its own heading unless the author manually writes one inside `card.quickstart`. Feedback specifically should point at the bundle's HF Discussions page (the one channel that reaches its author), describe `tt report issue` as being for `tt` tooling problems (it files against tenstorrent/tt-cli), and never mention `tt report feedback` (a stub that exits UNSUPPORTED) |
-| `tt_perf_summary` frontmatter, Model CI v0 row | Not emitted by `render_model_card()` at all |
-| Whitelist status | Not a card concern at all: it lives in Tenstorrent's allowlist (`tenstorrent/tt-model-whitelist` dataset repo, written by `tt-model whitelist`). A `tt-whitelisted` tag in a card's frontmatter means nothing — anyone can add one to their own repo — and the renderer must never emit one |
+| `tt_perf_summary` frontmatter | Not emitted at all. Deferred until the perf-target schema is settled |
+| Model CI v0 row | Not emitted at all. Deferred until DEVSTACK-430 produces a result worth citing |
+| Changelog | No field and no section. `render_model_card()` rewrites the card wholesale on every build, so there is no history to draw on |
+| Whitelist status | Not a card concern at all: a reviewed model is one Tenstorrent has copied into its own HF org (`tt-model whitelist` does the copy), so the repo it sits in *is* the signal. A `tt-whitelisted` tag in a card's frontmatter means nothing — anyone can add one to their own repo — and the renderer must never emit one |
 
 Verify this table against the live source each time — don't trust it blindly.
+It has already gone stale once, when the PR stack above landed.
 
 ## Step 3 — Interview for the author-fixable gaps
 
