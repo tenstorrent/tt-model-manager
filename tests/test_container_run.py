@@ -314,6 +314,32 @@ def test_the_plugin_kind_hands_the_mesh_over_in_the_environment():
     assert env["HF_MODEL"] == "org/Weights-7B"
 
 
+def test_plugin_serve_argv_pins_the_weights_revision():
+    """`pull` fetches exactly weights.revision; the launch must load that same snapshot.
+
+    Regression: with only the repo id on the command line, vLLM (offline in the container)
+    resolved `refs/main` of the shared HF cache, which on a box with another revision of the
+    same weights cached was a different -- and incomplete -- snapshot.
+    """
+    rev = "f5d08274bafd880402bd16f5e3e6c514136ec06c"
+    m = _wire(weights={"repo": "org/Weights-7B", "revision": rev})
+    p = m.container.resolve_profile()
+    argv = launcher_for("vllm-plugin").serve_argv(m, p)
+    assert argv[:3] == ["vllm", "serve", "org/Weights-7B"]
+    assert argv[3:7] == ["--revision", rev, "--tokenizer-revision", rev]
+    # an author's own --revision in serve.args comes later, so argparse's last-wins keeps it
+    m2 = _wire(weights={"repo": "org/Weights-7B", "revision": rev},
+               serve={**BASE["serve"], "args": [["--revision", "author-pin"]]})
+    argv2 = launcher_for("vllm-plugin").serve_argv(m2, m2.container.resolve_profile())
+    assert argv2.index("author-pin") > argv2.index(rev)
+
+
+def test_plugin_serve_argv_without_a_pin_adds_no_revision_flags():
+    m = _wire()
+    argv = launcher_for("vllm-plugin").serve_argv(m, m.container.resolve_profile())
+    assert "--revision" not in argv and "--tokenizer-revision" not in argv
+
+
 def test_fork_serve_argv_golden():
     m = _wire(**FORK)
     p = m.container.resolve_profile()
