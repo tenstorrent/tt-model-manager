@@ -104,6 +104,10 @@ class BundledPlatform(BaseModel):
     install_script: Optional[str] = None  # e.g. "install.sh"
     run_script: Optional[str] = None  # e.g. "run.sh"
     firmware_min: Optional[str] = None  # minimum card firmware/driver version, informational
+    vllm_overrides: Optional[str] = None  # bundle-relative override file (opencv/numpy pins)
+    # applied when installing vLLM's own deps — ttnn needs numpy<2, vLLM's requirements want
+    # opencv-python-headless>=4.13 (numpy>=2 only); see packaging._VLLM_OVERRIDES_TEMPLATE. Set
+    # whenever vllm_wheel is present — mirrors Deps.vllm.overrides on the v6 thin schema.
 
     @property
     def wheels(self) -> List[WheelArtifact]:
@@ -348,6 +352,50 @@ class ServeProfile(ServeSettings):
     description: Optional[str] = None
 
 
+class LicenseSpec(BaseModel):
+    """What the weights may be used for — the standard HF model-card license fields.
+
+    Not tt-model's own licence: the terms come with the weights (and sometimes with
+    vendored upstream code), and a reader has to know them before they pull 100 GB.
+    Rendered into the card's frontmatter under the names the Hub itself indexes, so
+    ``huggingface_hub``'s ``ModelInfo`` surfaces them without anyone parsing markdown.
+    """
+
+    id: str  # an SPDX id, or "other"
+    name: Optional[str] = None  # required when `id` is "other" — what to call it
+    link: Optional[str] = None  # where the terms actually are
+
+
+class CardSpec(BaseModel):
+    """Author-written model-card prose, carried onto the wire.
+
+    Permissive (no ``extra="forbid"``) for the same reason :class:`Capabilities` is: a
+    wire manifest written by a NEWER tt-model must stay readable by an older one, and a
+    card section it does not know how to render is not a reason to refuse a bundle. The
+    authoring side (``container_manifest.CardSettings``) forbids extras, so a typo in a
+    hand-written YAML is still caught where it can be fixed.
+
+    Present on the wire so `publish` can check a pushed bundle's card without the
+    author's ``tt-model.yaml``, which never leaves their machine.
+    """
+
+    description: Optional[str] = None
+    quickstart: Optional[str] = None
+    architecture: Optional[str] = None
+    status: Optional[str] = None
+    intended_use: Optional[str] = None
+    out_of_scope_use: Optional[str] = None
+    usage: Optional[str] = None
+    performance: Optional[str] = None
+    limitations: Optional[str] = None
+    risks: Optional[str] = None
+    licensing: Optional[str] = None
+    related: Optional[str] = None
+    license: Optional[LicenseSpec] = None
+    pipeline_tag: Optional[str] = None
+    base_model: Optional[List[str]] = None
+
+
 class ContainerSpec(BaseModel):
     """The v5.1 block: the model's platform as an OCI image plus how to launch it.
 
@@ -366,6 +414,9 @@ class ContainerSpec(BaseModel):
     code_dir: Optional[str] = None  # browsable copy of what is inside the image, e.g. "code"
     verify: List[str] = Field(default_factory=list)  # build-time assertions run in the image
     built: Dict[str, object] = Field(default_factory=dict)  # pinned provenance from `package`
+    # None for a bundle published before cards were carried on the wire — callers must
+    # treat that as "cannot tell", never as "the author wrote nothing".
+    card: Optional[CardSpec] = None
 
     def profile_names(self) -> List[str]:
         return [p.name for p in self.serve_profiles]

@@ -10,6 +10,7 @@ imagined.
 """
 
 import pytest
+from huggingface_hub import utils as _hf_errors
 from typer.testing import CliRunner
 
 from tt_kernel import MANIFEST_NAME
@@ -24,9 +25,23 @@ class _Resp:
 
 
 def _exc(name, message, status=None):
-    """Build a stand-in that looks like the huggingface_hub exception of that name."""
-    cls = type(name, (Exception,), {})
-    e = cls(message)
+    """Build a stand-in for the huggingface_hub exception of that name.
+
+    The REAL class when huggingface_hub ships one, because ``classify_hub_error``
+    branches with ``isinstance``: a same-named fake would still be routed by the message
+    heuristics and the test would pass while the type evidence went unexercised. Falls
+    back to a fabricated class for names the installed version does not define, so this
+    file keeps covering exceptions from other hub versions.
+    """
+    cls = getattr(_hf_errors, name, None)
+    if not (isinstance(cls, type) and issubclass(cls, BaseException)):
+        cls = type(name, (Exception,), {})
+    try:
+        e = cls(message)
+    except TypeError:
+        # 1.x errors that demand a response kwarg; build without running __init__.
+        e = cls.__new__(cls)
+        Exception.__init__(e, message)
     if status is not None:
         e.response = _Resp(status)
     return e
@@ -130,6 +145,46 @@ def test_a_real_missing_manifest_404_is_not_reported_as_a_missing_repo():
             f"{MANIFEST_NAME}.")
     d = classify_hub_error(_exc("EntryNotFoundError", real, 404), "x/y")
     assert d["cause"] == "not a tt-model bundle"
+
+
+def test_the_subclass_hf_actually_raises_for_a_missing_file_is_recognised():
+    """huggingface_hub 1.x does not raise ``EntryNotFoundError`` for a missing file — it
+    raises ``RemoteEntryNotFoundError``, a subclass. Matching on the class NAME therefore
+    stopped matching with no error anywhere: the branch fell through to the repo-level
+    404 and told the user their repo did not exist when only one file in it was missing.
+
+    The message here deliberately carries neither the manifest filename nor a network
+    keyword, so the class is the only evidence available — which is the point.
+    """
+    # Only `huggingface_hub.errors` exports the subclass; production imports the BASE
+    # class from `.utils` (the >=0.23 floor has no `.errors` module) and relies on
+    # isinstance to cover it, which is exactly what this asserts.
+    cls = None
+    try:
+        from huggingface_hub import errors as _hf_errors_mod
+
+        cls = getattr(_hf_errors_mod, "RemoteEntryNotFoundError", None)
+    except ImportError:
+        pass
+    if cls is None:  # pre-1.x: the base class is what gets raised, covered above
+        pytest.skip("this huggingface_hub has no RemoteEntryNotFoundError")
+    exc = cls.__new__(cls)
+    Exception.__init__(exc, "404 Client Error. (Request ID: Root=1-deadbeef;0001)")
+    exc.response = _Resp(404)
+    d = classify_hub_error(exc, "x/y")
+    assert d["cause"] == "not a tt-model bundle"
+
+
+def test_an_offline_cache_miss_still_beats_the_missing_file_branch():
+    """``LocalEntryNotFoundError`` is ALSO an ``EntryNotFoundError``, so the offline
+    branch has to be tested first or an offline read reports "this repo ships no
+    manifest". Message carries no network keyword, so only the class ordering can save
+    it."""
+    exc = _exc("LocalEntryNotFoundError", "An error happened while trying to locate the "
+                                          "file on the Hub and we cannot find the "
+                                          "requested files in the local cache.")
+    d = classify_hub_error(exc, "x/y")
+    assert d["cause"] == "cannot reach the Hub"
 
 
 # ------------------------------------------------------- the same taxonomy, for weights

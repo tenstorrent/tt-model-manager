@@ -559,12 +559,20 @@ def _example_text() -> str:
 
 
 def test_the_example_mentions_every_manifest_field():
-    from tt_kernel.container_manifest import ContainerManifest, ImageSettings, Source
+    from tt_kernel.container_manifest import (
+        CardSettings,
+        ContainerManifest,
+        ImageSettings,
+        Source,
+    )
     from tt_kernel.manifest import ServeProfile, ServeSettings
 
     text = _example_text()
     fields = set()
-    for model in (ContainerManifest, Source, ImageSettings, ServeSettings, ServeProfile):
+    # CardSettings is in the list because its fields ARE the card template: a section
+    # the annotated example never mentions is one no author will know to write.
+    for model in (ContainerManifest, Source, ImageSettings, ServeSettings, ServeProfile,
+                  CardSettings):
         fields |= set(model.model_fields)
     # aliased / internal names that never appear verbatim in a manifest
     fields -= {"schema_version"}
@@ -586,3 +594,147 @@ def test_the_example_mentions_every_kind():
 
     text = _example_text()
     assert not [k for k in KINDS if k not in text]
+
+
+def test_the_example_card_text_does_not_restate_what_the_card_generates():
+    """The example is the template authors copy, so what it demonstrates is what the
+    catalog fills up with.
+
+    `card.quickstart` lands directly under the generated Quickstart, which already prints
+    the commands, the port and the endpoint — and .claude/skills/tt-model-yaml/SKILL.md
+    says not to restate them. An example that does teaches every future author to
+    hand-write prose the generator owns and then keep it in step: the live `changh95/*`
+    cards each carry their own "Run with tt-cli" and "not an OpenAI API" paragraphs,
+    which `## Using it` now emits too."""
+    text = _example_text()
+    card_block = text[text.index("\ncard:"):]
+    for generated in ("127.0.0.1", "tt serve", "tt-model serve", "tt model pull",
+                      "tt-model pull"):
+        assert generated not in card_block, generated
+
+
+# -- the card block ------------------------------------------------------------------
+# The authored sections are the template. The wire copy is what `publish` reads, since
+# the authoring YAML never leaves the author's machine.
+
+
+def _with_card(**card):
+    raw = json.loads(json.dumps(BASE))
+    raw["card"] = card
+    return ContainerManifest.model_validate(raw)
+
+
+def test_every_card_section_is_optional():
+    """BASE declares no card at all, and must stay valid: the sections are a template
+    to fill in, not a wall to climb before a first local build."""
+    m = ContainerManifest.model_validate(json.loads(json.dumps(BASE)))
+    assert m.card is None
+
+
+def test_a_misspelled_card_section_is_refused_at_load():
+    """`limitiations:` would otherwise publish a card silently missing the section —
+    caught here, where the author can still fix it."""
+    with pytest.raises(Exception) as exc:
+        _with_card(limitiations="none")
+    assert "limitiations" in str(exc.value)
+
+
+def test_a_license_called_other_must_say_which_one():
+    with pytest.raises(Exception) as exc:
+        _with_card(license={"id": "other"})
+    assert "card.license.name" in str(exc.value)
+    # ...and it loads once named
+    m = _with_card(license={"id": "other", "name": "Fish Audio Research License"})
+    assert m.card.license.name == "Fish Audio Research License"
+
+
+def test_the_card_is_carried_onto_the_wire():
+    """`publish` runs against a pushed repo, where the only artifact is the wire
+    manifest — the authoring YAML stayed on the author's machine."""
+    m = _with_card(performance="fast", limitations="none")
+    wire = m.to_wire(image_tag="t", tt_metal_version="0.1", tt_kernel_version="0.1")
+    assert wire.container.card.performance == "fast"
+    assert wire.container.card.limitations == "none"
+
+
+def test_a_wire_manifest_without_a_card_still_loads():
+    """Bundles published before cards rode on the wire must stay readable."""
+    m = ContainerManifest.model_validate(json.loads(json.dumps(BASE)))
+    wire = m.to_wire(image_tag="t", tt_metal_version="0.1", tt_kernel_version="0.1")
+    assert wire.container.card is None
+    assert Manifest.model_validate(json.loads(wire.model_dump_json())).container.card is None
+
+
+def test_the_wire_card_tolerates_a_section_this_version_does_not_know():
+    """The authoring side forbids extras so a typo is caught; the WIRE side must not,
+    or a bundle published by a newer tt-model would be unreadable by an older one."""
+    from tt_kernel.manifest import CardSpec
+
+    spec = CardSpec.model_validate({"performance": "fast", "future_section": "hello"})
+    assert spec.performance == "fast"
+
+
+def test_a_license_display_name_is_refused_at_load():
+    """`license` is validated by the Hub SERVER-SIDE on the README commit — i.e. inside
+    `push`, after the multi-hour build. A human-readable name would sail through every
+    client-side check and be rejected there, with an error tt-model did not write."""
+    with pytest.raises(Exception) as exc:
+        _with_card(license={"id": "Apache 2.0 (see LICENSE)"})
+    assert "repositories-licenses" in str(exc.value)
+    # the Hub's actual identifier shapes all load
+    for good in ("apache-2.0", "mit", "cc-by-nc-sa-4.0", "openrail++", "lppl-1.3c", "llama2"):
+        assert _with_card(license={"id": good}).card.license.id == good
+    # ...and "other" needs a name, but is otherwise the escape hatch
+    assert _with_card(license={"id": "other", "name": "Custom"}).card.license.id == "other"
+
+
+def test_a_folded_licence_id_is_normalised_not_quietly_broken(tmp_path):
+    """`id: >` is a folded scalar, which YAML terminates with a newline — and the shipped
+    example uses `>` for five neighbouring card fields, so this is the likely spelling,
+    not a contrived one.
+
+    Unnormalised, "other\\n" passed the shape check (Python's `$` matches before a
+    trailing newline) and then failed every `== "other"` comparison: the author's licence
+    name and link were silently dropped, the "a bare other tells a reader nothing" rule
+    was skipped, and a multi-line scalar went into the one frontmatter field the Hub
+    validates server-side on commit — after the build."""
+    raw = json.loads(json.dumps(BASE))
+    raw["card"] = {
+        "license": {"id": "other\n", "name": "Fish Audio Research License\n",
+                    "link": "https://example.invalid/LICENSE\n"},
+        "pipeline_tag": "text-to-image\n",
+        "base_model": ["org/Upstream-A\n"],
+    }
+    m = load_container_manifest(_write(tmp_path, raw))
+    assert m.card.license.id == "other"
+    assert m.card.license.name == "Fish Audio Research License"
+    assert m.card.license.link == "https://example.invalid/LICENSE"
+    assert m.card.pipeline_tag == "text-to-image"
+    assert m.card.base_model == ["org/Upstream-A"]
+
+
+def test_a_folded_bare_other_still_hits_the_needs_a_name_rule():
+    """The normalisation must not become a way around the rule it exposed."""
+    with pytest.raises(Exception) as exc:
+        _with_card(license={"id": "other\n", "name": "  \n  "})
+    assert "needs a card.license.name" in str(exc.value)
+def test_publish_gaps_names_the_missing_required_sections():
+    from tt_kernel.container_manifest import card_publish_gaps
+
+    assert card_publish_gaps(_with_card(description="x").card) == [
+        "performance", "limitations"]
+    assert card_publish_gaps(_with_card(performance="fast").card) == ["limitations"]
+    assert card_publish_gaps(
+        _with_card(performance="fast", limitations="none").card) == []
+    # whitespace is not a section — the same definition the renderer's placeholder uses
+    assert card_publish_gaps(
+        _with_card(performance="   ", limitations="none").card) == ["performance"]
+
+
+def test_publish_gaps_judges_nothing_when_there_is_no_card_on_the_wire():
+    """A bundle from before cards were carried says nothing about its sections; that is
+    not the same as saying they are missing. Whether that exempts the bundle is the
+    caller's decision (publish: yes; push --publish: no), not this function's."""
+    from tt_kernel.container_manifest import card_publish_gaps
+
+    assert card_publish_gaps(None) == []

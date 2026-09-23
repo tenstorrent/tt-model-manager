@@ -68,6 +68,15 @@ SIGKILL_EXIT_CODE = "137"
 #: seconds) but finite, so a wedged reset container cannot hang `tt-model stop` forever.
 RESET_TIMEOUT_S = 180
 
+#: How long `serve` WATCHES the container for the launcher's ready line before it stops
+#: watching. It bounds the watch, not the container: on expiry the container keeps booting
+#: and the user is pointed at `tt-model logs -f` / `tt-model stop`. It is long because
+#: everything after `docker run` is on this clock -- a cold JIT (~10 min), a large multi-chip
+#: load, and, with `--no-weights` / `--local-only`, a multi-hundred-GB weight download inside
+#: the container on whatever link the box has. `TT_MODEL_READY_TIMEOUT=<seconds>` overrides
+#: it (see ``ready_timeout_s``); `--detach` skips the wait entirely.
+READY_TIMEOUT_S = 4 * 3600
+
 
 class ContainerError(RuntimeError):
     """A docker operation that must not proceed. The message is user-facing."""
@@ -1094,6 +1103,27 @@ def logs(name: str, follow: bool = False) -> int:
     return _run(argv).returncode
 
 
+def ready_timeout_s() -> int:
+    """``READY_TIMEOUT_S``, or ``TT_MODEL_READY_TIMEOUT`` (whole seconds, > 0) when set.
+
+    Resolved by ``serve`` BEFORE ``docker run`` so a typo in the variable fails fast instead
+    of after a container has been started. The legacy ``TT_KERNEL_`` spelling is honoured by
+    ``compat.env`` like every other ``TT_MODEL_*`` variable.
+    """
+    raw = compat.env("TT_MODEL_READY_TIMEOUT")
+    if raw is None or not raw.strip():
+        return READY_TIMEOUT_S
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        raise ContainerError(
+            f"TT_MODEL_READY_TIMEOUT must be a whole number of seconds, got {raw!r}"
+        ) from None
+    if value <= 0:
+        raise ContainerError(f"TT_MODEL_READY_TIMEOUT must be > 0 seconds, got {value}")
+    return value
+
+
 @dataclass(frozen=True)
 class ReadyResult:
     """Why the wait ended. ``ready`` alone cannot say WHY it failed, and "the server did
@@ -1105,15 +1135,16 @@ class ReadyResult:
     elapsed_s: float = 0.0  # how long the wait took, for the ready line
 
 
-def wait_ready(name: str, probe: str, timeout_s: int = 1800, on_line=None) -> ReadyResult:
+def wait_ready(name: str, probe: str, timeout_s: int = READY_TIMEOUT_S,
+               on_line=None) -> ReadyResult:
     """Follow the container's logs until the launcher's ready line appears.
 
     ``on_line(text)`` sees every line (tqdm ``\r`` fragments arrive as separate lines:
     the pipe is read in text mode with universal newlines). It is how the caller turns
     the stream into progress without this module knowing anything about rendering.
 
-    The generous default timeout is not padding: a cold boot JIT-compiles kernels, which
-    is the ~10-minute cost the mounted TT_METAL_CACHE exists to avoid paying twice.
+    The default deadline is ``READY_TIMEOUT_S`` (see its comment for why it is hours, not
+    minutes); callers that honour ``TT_MODEL_READY_TIMEOUT`` pass ``ready_timeout_s()``.
     """
     import queue
     import threading
