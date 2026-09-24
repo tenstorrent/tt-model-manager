@@ -9,6 +9,7 @@ tagged ``tt-model-cache`` so ``search`` can filter for it.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -260,6 +261,15 @@ REVIEW_REVIEWER_KEY = "tt_reviewed_by"
 REVIEW_DATE_KEY = "tt_reviewed_at"
 _REVIEW_KEYS = (REVIEW_SOURCE_KEY, REVIEW_REVISION_KEY, REVIEW_REVIEWER_KEY, REVIEW_DATE_KEY)
 
+# Markers bracketing the attribution block in a reviewed copy's card body. They render as
+# nothing on the Hub and make the block findable, so re-recording a review REPLACES it
+# rather than stacking a second one — `whitelist` on an already-copied source resumes by
+# calling `annotate_review` again, every time.
+ATTRIBUTION_MARKER = "tt-whitelist-attribution"
+_ATTRIBUTION_RE = re.compile(
+    rf"<!-- {ATTRIBUTION_MARKER} -->.*?<!-- /{ATTRIBUTION_MARKER} -->\s*", re.DOTALL
+)
+
 
 def duplicate_into_org(source_repo_id: str, target_repo_id: str) -> str:
     """Server-side copy of a bundle into the Tenstorrent org. Returns the new repo URL.
@@ -299,6 +309,30 @@ def read_review(repo_id: str) -> Optional[dict]:
     return {k: getattr(card.data, k, None) for k in _REVIEW_KEYS}
 
 
+def _attribution_block(
+    source: str, revision: Optional[str], reviewer: str, reviewed_at: str
+) -> str:
+    """The credit line that OPENS a reviewed copy's card.
+
+    It leads with the community author, and it goes at the top, because that is the whole
+    bargain: the copy earns the Tenstorrent org's traffic, so the person whose work it is
+    is the first thing a reader sees rather than a footnote under the fold.
+    """
+    owner = source.split("/", 1)[0]
+    at = f" at `{revision[:9]}`" if revision else ""
+    # "that revision" has no antecedent when the Hub reported no sha.
+    snapshot = "a snapshot of that revision" if revision else "a point-in-time snapshot"
+    return (
+        f"<!-- {ATTRIBUTION_MARKER} -->\n"
+        f"> **Published by [{owner}](https://huggingface.co/{owner})** as "
+        f"[`{source}`](https://huggingface.co/{source}).\n"
+        f"> Tenstorrent reviewed it{at} ({reviewer}, {reviewed_at[:10]}) and copied it here. "
+        f"This is {snapshot} — later commits to the original are not covered by this "
+        "review.\n"
+        f"<!-- /{ATTRIBUTION_MARKER} -->\n\n"
+    )
+
+
 def annotate_review(
     repo_id: str,
     *,
@@ -312,6 +346,11 @@ def annotate_review(
     The record lives in the artifact rather than in a side index, so it cannot drift out
     of step with what it describes, and tt-cli reads the source key straight off the
     listing response.
+
+    The attribution block is PREPENDED, not appended: the team agreed the community
+    author is credited in the card's top line. It is also replaced rather than added to,
+    so the resume path (re-running ``whitelist`` on a source already copied) re-records
+    the review instead of stacking a second credit under the first.
 
     ``card.data`` is mutated in place for the reason :func:`tag_repo` documents: building
     a fresh block drops every other frontmatter field the author set (``license``,
@@ -327,14 +366,8 @@ def annotate_review(
     setattr(card.data, REVIEW_REVISION_KEY, revision)
     setattr(card.data, REVIEW_REVIEWER_KEY, reviewer)
     setattr(card.data, REVIEW_DATE_KEY, reviewed_at)
-    card.text = card.text.rstrip() + (
-        "\n\n## Reviewed by Tenstorrent\n\n"
-        f"This is a Tenstorrent copy of [`{source}`](https://huggingface.co/{source}), "
-        "packaged and published by its author. It was reviewed"
-        + (f" at `{revision[:9]}`" if revision else "")
-        + f" by {reviewer} on {reviewed_at[:10]}, and is a snapshot of that revision — "
-        "later commits to the original are not covered by this review.\n"
-    )
+    body = _ATTRIBUTION_RE.sub("", card.text).lstrip()
+    card.text = _attribution_block(source, revision, reviewer, reviewed_at) + body
     card.push_to_hub(repo_id, repo_type=_REPO_TYPE)
 
 

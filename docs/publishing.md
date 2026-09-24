@@ -134,8 +134,13 @@ What the commands guarantee:
   source and writes only the new repo. A review costs one request and moves no bundle data, even
   for a multi-GB image.
 - **The copy is a snapshot.** It records the source repo and the exact revision it was copied at,
-  in its own card frontmatter, plus an attribution line naming the original. Later commits to the
-  original are *not* covered by the review, and `Tenstorrent/...` does not track upstream.
+  in its own card frontmatter. Later commits to the original are *not* covered by the review, and
+  `Tenstorrent/...` does not track upstream.
+- **The author is credited in the card's top line.** A whitelisted copy opens with a block naming
+  the community author and linking both their profile and their original repo, above the model's
+  own heading. That is the bargain: the copy earns this org's traffic, so the credit goes where a
+  reader lands rather than under the fold. Re-recording a review replaces that block, so resuming
+  an interrupted `whitelist` never stacks a second credit on the first.
 - **The whitelist is a subset of the catalog.** `whitelist` refuses a repo that is not listed
   (listing is the author's decision — it will never `publish` on their behalf) and refuses a
   private one. The copy is then listed explicitly rather than relying on it inheriting the tag,

@@ -545,9 +545,59 @@ def test_annotate_review_writes_the_keys_tt_cli_reads(monkeypatch):
     assert pushed["data"]["license"] == "apache-2.0"
     # and the body gains the attribution, keeping what was there
     assert "body" in pushed["text"]
-    assert "Reviewed by Tenstorrent" in pushed["text"]
     assert "me/listed" in pushed["text"]
     assert "snapshot" in pushed["text"]          # later commits are not covered
+
+
+def test_annotate_review_credits_the_author_in_the_cards_top_line(monkeypatch):
+    """The team's bargain for whitelisting: the copy earns the Tenstorrent org's traffic,
+    so the community author is credited where a reader lands, not under the fold."""
+    pushed = _fake_card(monkeypatch, text="# Qwen3-32B\n\nthe author's own words")
+    hub.annotate_review(f"{TT_ORG}/Qwen3-32B", source="someauthor/foo", revision="d" * 40,
+                        reviewer="sam", reviewed_at="2026-09-22T12:00:00Z")
+    body = pushed["text"]
+    first = body.split("\n", 1)[0]
+    assert first == f"<!-- {hub.ATTRIBUTION_MARKER} -->"
+    # the author, and their profile, come before the model's own heading
+    credit, heading = body.index("someauthor"), body.index("# Qwen3-32B")
+    assert credit < heading
+    assert "https://huggingface.co/someauthor" in body
+    assert "the author's own words" in body      # nothing of theirs is displaced
+
+
+def test_annotate_review_replaces_its_own_block_rather_than_stacking(monkeypatch):
+    """`whitelist` resumes by re-annotating an already-copied source, so this runs again
+    on a card it wrote. A second credit under the first would be the visible bug."""
+    pushed = _fake_card(monkeypatch, text="# Qwen3-32B\n\nbody")
+    hub.annotate_review(f"{TT_ORG}/Qwen3-32B", source="someauthor/foo", revision="a" * 40,
+                        reviewer="sam", reviewed_at="2026-09-22T12:00:00Z")
+
+    # feed the already-annotated card back in, as the Hub would on the resume run
+    second = _fake_card(monkeypatch, text=pushed["text"])
+    hub.annotate_review(f"{TT_ORG}/Qwen3-32B", source="someauthor/foo", revision="b" * 40,
+                        reviewer="nate", reviewed_at="2026-09-23T12:00:00Z")
+    body = second["text"]
+    assert body.count(hub.ATTRIBUTION_MARKER) == 2       # one open, one close. Not four.
+    assert body.count("# Qwen3-32B") == 1
+    assert "bbbbbbbbb" in body and "aaaaaaaaa" not in body   # the newer review, only
+    assert "nate" in body and "sam" not in body
+
+
+def test_annotate_review_omits_the_revision_when_the_hub_gave_none(monkeypatch):
+    """A review with no recorded sha is still a valid statement about the bundle; it just
+    must not print an empty backtick pair where the commit should be."""
+    pushed = _fake_card(monkeypatch)
+    hub.annotate_review(f"{TT_ORG}/Qwen3-32B", source="someauthor/foo", revision=None,
+                        reviewer="sam", reviewed_at="2026-09-22T12:00:00Z")
+    block = hub._ATTRIBUTION_RE.search(pushed["text"]).group(0)
+    assert "at `" not in block                   # no empty backticks where a sha would be
+    assert "someauthor/foo" in block             # the credit still stands without one
+
+    # and the sha IS shown, shortened, when the Hub reported one
+    with_sha = _fake_card(monkeypatch)
+    hub.annotate_review(f"{TT_ORG}/Qwen3-32B", source="someauthor/foo", revision="d" * 40,
+                        reviewer="sam", reviewed_at="2026-09-22T12:00:00Z")
+    assert "at `" + "d" * 9 + "`" in hub._ATTRIBUTION_RE.search(with_sha["text"]).group(0)
 
 
 def test_annotate_review_refuses_rather_than_publishing_an_empty_readme(monkeypatch):
