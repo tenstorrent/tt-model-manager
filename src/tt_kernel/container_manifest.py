@@ -348,7 +348,7 @@ _HUB_LICENSE_ID_RE = re.compile(r"[a-z0-9][a-z0-9.+-]*")
 #: Card sections a bundle must carry before it can be listed in the public catalog.
 #: Both are things only the author knows and a consumer cannot infer: what the model
 #: scores and how fast it is, and where it falls short. A listing without them is the
-#: state the catalog is already full of — see DEVSTACK-447.
+#: state the catalog is already full of.
 REQUIRED_CARD_SECTIONS = ("performance", "limitations")
 
 
