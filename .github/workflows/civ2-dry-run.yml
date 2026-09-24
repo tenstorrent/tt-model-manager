@@ -88,12 +88,11 @@ jobs:
       - name: Test request
         id: curl
         run: |
-          # The runner routes HTTP through a proxy; without this, Python's urllib sends
-          # the request for localhost to the proxy instead of the local server.
+          # No no_proxy workaround: tt-model itself must bypass the runner's proxy for localhost.
           echo "::group::proxy settings"; env | grep -i '_proxy=' || echo "no proxy vars"; echo "::endgroup::"
-          export NO_PROXY="${NO_PROXY:+$NO_PROXY,}localhost,127.0.0.1"
-          export no_proxy="${no_proxy:+$no_proxy,}localhost,127.0.0.1"
-          echo "direct probe:"; curl -sS --noproxy '*' --max-time 10 http://127.0.0.1:20000/v1/models | head -c 400; echo
+          [ -n "${http_proxy:-$HTTP_PROXY}" ] || { echo "::error::No proxy set, so this run can't test the proxy fix"; exit 1; }
+          case ",${no_proxy},${NO_PROXY}," in *localhost*|*127.0.0.1*)
+            echo "::error::no_proxy already covers localhost, so this run can't test the proxy fix"; exit 1;; esac
           start=$(date +%s)
           out="$(uv run tt-model curl "What is the capital of France? Answer in one word.")"
           echo "FIRST_REPLY_S=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
