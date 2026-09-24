@@ -83,5 +83,6 @@ Flags per format: [self_contained_packages.md](self_contained_packages.md) (v5),
 
 ```bash
 tt-model rm      you/mymodel                        # remove an installed bundle and its index entry
+tt-model rm      --all [--include-weights]          # remove every installed bundle (asks first; -y to skip)
 tt-model version                                    # print the installed tt-model version
 ```

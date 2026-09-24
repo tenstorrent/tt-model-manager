@@ -1828,7 +1828,12 @@ def unpublish(
 # ------------------------------------------------------------------------------ rm
 @app.command(rich_help_panel="Maintenance")
 def rm(
-    repo_id: str = typer.Argument(..., help="Installed bundle as namespace/name."),
+    repo_id: Optional[str] = typer.Argument(None, help="Installed bundle as namespace/name."),
+    all_installed: bool = typer.Option(
+        False, "--all", help="Remove EVERY installed bundle (what `tt-model list` shows) "
+        "instead of one. Asks first unless --yes."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="With --all: skip the confirmation."),
     keep_cache: bool = typer.Option(
         False, "--keep-cache", help="For a container package: keep the host caches — JIT "
         "kernels AND converted weights — so a later pull of the same model boots fast "
@@ -1841,7 +1846,7 @@ def rm(
         "can be tens of gigabytes to re-download, so this is off by default."
     ),
 ) -> None:
-    """Remove a locally installed bundle and its index entry.
+    """Remove a locally installed bundle and its index entry — or all of them with --all.
 
     For a container (v5.1) package this removes the containers, the docker image, the
     pulled manifest, both host caches (JIT kernels and converted weights) and the
@@ -1850,11 +1855,55 @@ def rm(
 
     Weights are kept unless ``--include-weights``: they are shared with everything else on
     the host and are a pointer rather than part of the package.
-    """
-    entry = localdb.get(repo_id)
-    if not entry:
-        raise _err(f"{repo_id} is not recorded as installed.")
 
+    ``--all`` walks every installed bundle and applies the same removal to each; one
+    bundle failing does not stop the rest, and the failures are listed at the end.
+    """
+    if all_installed and repo_id:
+        raise _err("Give either a bundle id or --all, not both.")
+    if not all_installed:
+        if not repo_id:
+            raise _err("Give a bundle id, or --all to remove every installed bundle.")
+        entry = localdb.get(repo_id)
+        if not entry:
+            raise _err(f"{repo_id} is not recorded as installed.")
+        _rm_one(repo_id, entry, keep_cache=keep_cache, include_weights=include_weights)
+        return
+
+    entries = localdb.all_entries()
+    if not entries:
+        console.note("nothing is installed", marker="○")
+        return
+    console.note(f"{len(entries)} installed bundle(s):", marker="•")
+    for e in entries:
+        console.hint(e["repo_id"])
+    if not yes and not typer.confirm(
+        "Remove all of them" + (" and their weights" if include_weights else "") + "?",
+        default=False,
+    ):
+        raise _err("Aborted; nothing removed.")
+
+    failed: List[str] = []
+    for e in entries:
+        rid = e["repo_id"]
+        try:
+            _rm_one(rid, e, keep_cache=keep_cache, include_weights=include_weights)
+        except typer.Exit:
+            failed.append(rid)
+        except Exception as exc:  # one broken bundle must not shield the rest
+            typer.secho(f"{rid}: {exc}", fg=typer.colors.RED, err=True)
+            failed.append(rid)
+    done = len(entries) - len(failed)
+    if failed:
+        raise _err(
+            f"Removed {done} of {len(entries)}; failed: {', '.join(failed)}. "
+            "Fix the cause and re-run `tt-model rm <id>` for each."
+        )
+    console.milestone(f"removed all {done} installed bundle(s)")
+
+
+def _rm_one(repo_id: str, entry: dict, *, keep_cache: bool, include_weights: bool) -> None:
+    """Remove ONE recorded bundle. Raises ``typer.Exit`` (already reported) on failure."""
     # --- container (v5.1) --------------------------------------------------------------
     # Checked FIRST: a container entry has no install_dir, so the venv branch below would
     # drop the index entry and report success while leaving ~10 GB of image on disk.
