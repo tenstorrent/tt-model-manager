@@ -713,18 +713,53 @@ def test_ready_card_suggests_a_curl_that_actually_parses(capsys):
 
 def test_stop_reports_a_clean_shutdown(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(container, "is_running", lambda name: True)
-    monkeypatch.setattr(container, "stop", lambda name, image=None: True)
+    monkeypatch.setattr(container, "stop",
+                        lambda name, image=None: container.StopOutcome(True, "not_needed"))
     container_cli.stop_container(_manifest(tmp_path))
     out = capsys.readouterr().out
     assert "stopped 1" in out
     assert "mesh" not in out.lower()
 
 
-def test_stop_warns_loudly_when_a_kill_forced_a_mesh_reset(tmp_path, monkeypatch, capsys):
+def _stub_stop(monkeypatch, reset):
     monkeypatch.setattr(container, "is_running", lambda name: True)
-    monkeypatch.setattr(container, "stop", lambda name, image=None: False)
+    monkeypatch.setattr(container, "stop",
+                        lambda name, image=None: container.StopOutcome(False, reset))
+
+
+def test_a_reset_that_ran_is_reported_without_promising_the_next_boot_is_safe(
+        tmp_path, monkeypatch, capsys):
+    """#107: even a tt-smi -r that returned success is NOT a guarantee — a force-kill can
+    leave the device wedged until a host reboot. Say the reset ran, name the symptom + the
+    real remedy, and never say 'the next boot is safe'."""
+    _stub_stop(monkeypatch, "ran")
     container_cli.stop_container(_manifest(tmp_path))
-    assert "mesh was left dirty" in capsys.readouterr().out
+    out = " ".join(capsys.readouterr().out.split())  # console wraps; compare unwrapped
+    assert "the next boot is safe" not in out
+    assert "tt-smi -r ran" in out
+    assert "could only pin" in out and "reboot" in out and "issue #107" in out
+
+
+def test_a_failed_reset_says_the_mesh_is_still_dirty_and_to_reboot(tmp_path, monkeypatch, capsys):
+    """The old code reported a failed reset exactly like a successful one. If tt-smi -r did
+    NOT complete, the mesh is definitely still dirty — say reboot, not 'a reset was attempted'."""
+    _stub_stop(monkeypatch, "failed")
+    container_cli.stop_container(_manifest(tmp_path))
+    out = " ".join(capsys.readouterr().out.split())  # console wraps; compare unwrapped
+    assert "did not complete" in out and "still dirty" in out
+    assert "Reboot the HOST" in out
+    assert "the next boot is safe" not in out
+
+
+def test_a_skipped_reset_does_not_claim_a_reset_was_attempted(tmp_path, monkeypatch, capsys):
+    """When a sibling reclaimed the chips the reset is deliberately NOT run. The old message
+    said 'a reset was attempted with tt-smi' — false. Say it was skipped and why."""
+    _stub_stop(monkeypatch, "skipped")
+    container_cli.stop_container(_manifest(tmp_path))
+    out = " ".join(capsys.readouterr().out.split())  # console wraps; compare unwrapped
+    assert "NOT reset" in out and "another container" in out
+    assert "attempted" not in out.lower()
+    assert "the next boot is safe" not in out
 
 
 def test_stopping_nothing_says_so_rather_than_failing(tmp_path, monkeypatch, capsys):
@@ -781,7 +816,8 @@ def test_stop_without_profile_stops_only_what_is_running_and_says_so(
         tmp_path, monkeypatch, capsys):
     m = _two_containers(tmp_path, monkeypatch, running={"tt-model-my-model-p150x2"})
     stopped = []
-    monkeypatch.setattr(container, "stop", lambda name, image=None: stopped.append(name) or True)
+    monkeypatch.setattr(container, "stop",
+                        lambda name, image=None: stopped.append(name) or container.StopOutcome(True))
     container_cli.stop_container(m)
     assert stopped == ["tt-model-my-model-p150x2"]
     assert "stopped 1" in capsys.readouterr().out

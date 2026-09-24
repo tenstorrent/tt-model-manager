@@ -69,14 +69,24 @@ violates one of these is wrong even if tests pass:
    ```
    pytest            # expected: all pass (no hardware, no network)
    ```
-5. If the change touches the serve or device path, validate on hardware (see
-   `docs/thin_packages.md`, Testing it in the lab, or the `tt-model-package-test` skill for a
-   container package): package, pull, serve, `curl`.
-6. Commit messages: imperative subject, a short body explaining *why*, and end with a
-   `Co-Authored-By` trailer naming the assistant that produced the change, for example
-   `Co-Authored-By: <assistant name> <noreply@anthropic.com>`.
-7. Open a **draft PR**. The body states what and why, the test evidence (for example "full
-   suite: N passed"), and a link to the tracking issue if one applies.
+5. If the change touches the serve/device path, validate on hardware (see
+   `docs/thin_packages.md` → Testing, or the `tt-model-package-test` skill for a container
+   package) — package → pull → serve → `curl`.
+6. Commit messages: imperative subject and a body explaining *why* — the rationale that
+   doesn't belong in a code comment goes here. **No AI attribution**: no `Co-Authored-By`
+   trailer, no "Generated with Claude Code", no mention of Claude or Anthropic, in commits
+   or PRs.
+7. Open a **draft PR**; body = what/why + the test evidence (e.g. "full suite: N passed") +
+   a link to the tracking issue if one applies. Keep it **brief, in plain, simple English**:
+   a few short sentences and bullets, no jargon or walls of text.
+
+## Code style
+- **Comments are brief.** One line stating what isn't obvious from the code; no paragraphs,
+  no restating the code, no history ("used to…", "now…"). The *why* in depth goes in the
+  commit message.
+- **Code is effective and clear, not verbose.** No speculative abstractions, redundant
+  checks, or defensive branches for cases that can't happen. Match the surrounding code.
+- Docstrings: one line unless the contract genuinely needs more.
 
 ## Reuse, don't reinvent
 `hub.py` (HF push/pull and catalog listing), `runtime.py` (`download_weights`,
