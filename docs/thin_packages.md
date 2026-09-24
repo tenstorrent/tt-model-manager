@@ -1,25 +1,26 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc. -->
-# Thin (v6) model packages — DRAFT
+# Thin (v6) model packages: DRAFT
 
 > **Status: draft / scaffold.** This reflects the plan in **issue #29**. It becomes fully installable
 > once the **models wheel** is published. That work is in progress upstream as **`tt-metal-models`**
-> — [tenstorrent/tt-metal#54478](https://github.com/tenstorrent/tt-metal/pull/54478) — which packages
-> the whole `models/` tree (**including `tt_transformers`**) for pip/apt/dnf and **pins `ttnn` exactly**
-> (`tt-metal-models==X` ⇒ `ttnn==X`). So a thin bundle pins **one** dep (`tt-metal-models`) and the
-> matching `ttnn` comes transitively — it likely subsumes a separate "TTTv2" wheel. Until it lands,
-> the generated `requirements.txt` pins `ttnn` directly (it's on PyPI). See #29 for the full design.
+> ([`tenstorrent/tt-metal#54478`](https://github.com/tenstorrent/tt-metal/pull/54478)), which
+> packages the whole `models/` tree (**including `tt_transformers`**) for pip, apt, and dnf and
+> **pins `ttnn` exactly** (`tt-metal-models==X` implies `ttnn==X`). So a thin bundle pins **one**
+> dep (`tt-metal-models`) and the matching `ttnn` comes transitively. It likely subsumes a separate
+> "TTTv2" wheel. Until `tt-metal#54478` merges, the generated `requirements.txt` pins `ttnn` directly
+> (it is on PyPI). See #29 for the full design.
 >
 > **Don't want to wait for the PyPI publish?** The packaging code already exists on the PR's branch
 > (`knauth/tt-metal-models-packaging`). Build the wheel yourself from that branch (matched to the
-> `ttnn` version you're serving with), pin `tt-metal-models==<that version>` in `requirements.txt`,
-> and pass the wheel to `package-thin --models-wheel ./tt_metal_models-<version>-*.whl`. It's staged
+> `ttnn` version you are serving with), pin `tt-metal-models==<that version>` in `requirements.txt`,
+> and pass the wheel to `package-thin --models-wheel ./tt_metal_models-<version>-*.whl`. It is staged
 > into `wheels/` and added to `install.sh`'s `--find-links`, so the pin resolves from the bundled
-> wheel instead of the (not yet published) index — no other change to the flow below.
+> wheel instead of the not-yet-published index, with no other change to the flow below.
 
-A **thin (v6) bundle** keeps the self-contained wall between models — its own uv-managed venv — but
-builds that venv from **pip dependency pins + a tiny models wheel** instead of embedding the full
-platform. There is **no embedded `ttnn` wheel and no `metal/` tree**.
+A **thin (v6) bundle** keeps the self-contained boundary between models (its own uv-managed venv)
+but builds that venv from **pip dependency pins plus a small models wheel** instead of embedding the
+full platform. There is **no embedded `ttnn` wheel and no `metal/` tree**.
 
 ## What a thin bundle contains
 ```
@@ -32,80 +33,81 @@ platform. There is **no embedded `ttnn` wheel and no `metal/` tree**.
                               # integration) + any generic_op custom-op wheel [+ optional prebuilt vLLM wheel]
   vllm_models/<name>/vllm_metadata.json   # EXTRA_MODELS_DIR contract (arch -> main_class)
   install.sh  run.sh
-  # weights: NOT embedded — HF pointer in the manifest
+  # weights: NOT embedded. Hugging Face (HF) pointer in the manifest
 ```
 
 ## Manifest `deps` block (schema 6)
-- `python` — pinned interpreter (uv provisions it into the bundle)
-- `requirements` — the pins file (default `requirements.txt`) — ttnn / tt-metal-models only
-- `wheels` — bundle-relative wheels installed **by path** (vllm-tt-plugin, then any generic_op wheels)
-- `wheels_dir` — the dir holding them (`wheels`), also put on `--find-links`
-- `vllm` — the empty-target vLLM install step (below): `version`, `target_device` (`empty`),
+- `python`: pinned interpreter (uv provisions it into the bundle)
+- `requirements`: the pins file (default `requirements.txt`), `ttnn` / `tt-metal-models` only
+- `wheels`: bundle-relative wheels installed **by path** (`vllm-tt-plugin`, then any `generic_op` wheels)
+- `wheels_dir`: the dir holding them (`wheels`), also put on `--find-links`
+- `vllm`: the empty-target vLLM install step (below): `version`, `target_device` (`empty`),
   `overrides` (the pins file), `common_requirements` (optional bundled copy, else fetched),
   `wheel` (optional prebuilt empty-target wheel). `None` for a non-vLLM model.
-- `model_dir` — where `model.py` lives (default the bundle root) → PYTHONPATH at serve
+- `model_dir`: where `model.py` lives (default the bundle root), used as PYTHONPATH at serve
 
 ## Install / serve
-`install.sh` builds the venv with uv (`uv venv --relocatable --python <pin>`), then installs in a
-**load-bearing order**:
+`install.sh` builds the venv with uv (`uv venv --relocatable --python <pin>`), then installs in
+this order. The order matters:
 
-1. **Engine + models** — `uv pip install -r requirements.txt` (ttnn, and once published
-   `tt-metal-models`). This lands `torch` + `numpy<2` FIRST so vLLM's deps resolve against them.
-2. **vLLM core (empty target)** — this is **not** a pip pin. It is **stock upstream vLLM built with
+1. **Engine and models**: `uv pip install -r requirements.txt` (ttnn, and once published
+   `tt-metal-models`). This lands `torch` and `numpy<2` FIRST so vLLM's deps resolve against them.
+2. **vLLM core (empty target)**: this is **not** a pip pin. It is **stock upstream vLLM built with
    `VLLM_TARGET_DEVICE=empty`** (NOT the CUDA `vllm` on PyPI), exactly mirroring the plugin's
    [`docs/install-vllm-tt.sh`](https://github.com/tenstorrent/vllm-tt-plugin/blob/main/docs/install-vllm-tt.sh):
-   - `uv pip install --override vllm-overrides.txt -r <vLLM v0.25.1 common.txt>` — the overrides pin
-     `opencv-python-headless==4.11.0.86` + `numpy>=1.24.4,<2` so ttnn's `numpy<2` is not bumped
-     (opencv is vLLM's only numpy-2 puller and no TT-registered model uses its video path). The
-     upstream `common.txt` is fetched from the pinned tag unless a copy is bundled.
-   - `VLLM_TARGET_DEVICE=empty uv pip install --no-deps --no-binary vllm vllm==0.25.1` — builds vLLM
+   - `uv pip install --override vllm-overrides.txt -r <vLLM v0.25.1 common.txt>`. The overrides pin
+     `opencv-python-headless==4.11.0.86` and `numpy>=1.24.4,<2` so ttnn's `numpy<2` is not bumped
+     (opencv is vLLM's only numpy-2 puller and no Tenstorrent-registered model uses its video
+     path). The upstream `common.txt` is fetched from the pinned tag unless a copy is bundled.
+   - `VLLM_TARGET_DEVICE=empty uv pip install --no-deps --no-binary vllm vllm==0.25.1` builds vLLM
      from source. (Or, if a prebuilt empty-target wheel is bundled, `uv pip install --no-deps <wheel>`.)
-   The `tt` platform is supplied by the plugin at runtime; `VLLM_TARGET_DEVICE` is a **build-time**
-   var only, never set at serve.
-3. **Plugin + custom ops** — `uv pip install [--find-links wheels] <vllm-tt-plugin + generic_op wheels>`,
-   installed by path AFTER vLLM. The plugin's `pyproject` omits `vllm` on purpose, so this never
-   re-resolves (and never clobbers) the empty-target build.
+   The `tt` platform is supplied by the plugin at runtime. `VLLM_TARGET_DEVICE` is a **build-time**
+   var only and is not set at serve.
+3. **Plugin and custom ops**: `uv pip install [--find-links wheels] <vllm-tt-plugin + generic_op wheels>`,
+   installed by path AFTER vLLM. The plugin's `pyproject` omits `vllm`, so this step
+   does not re-resolve or clobber the empty-target build.
 
 `run.sh` wires the engine env (`LD_PRELOAD` of `_ttnncpp.so`, `TT_METAL_HOME` at the installed
-`ttnn`, `EXTRA_MODELS_DIR`, hermetic caches under the folder) and launches vLLM — `PYTHONPATH=$HERE`
-so `model.py` imports. `tt-model pull` / `serve` route a thin bundle through the same install/serve
-path as a v5 fat one.
+`ttnn`, `EXTRA_MODELS_DIR`, hermetic caches under the folder) and launches vLLM with
+`PYTHONPATH=$HERE` so `model.py` imports. `tt-model pull` and `serve` route a thin bundle through
+the generated `install.sh` and `run.sh`.
 
-> **Why vLLM is a build, not a pin:** the plugin runs against a vLLM compiled for an *empty* device
+> **Why vLLM is built at install rather than pinned:** the plugin runs against a vLLM compiled for an *empty* device
 > target so it can inject the `tt` platform out-of-tree. The PyPI `vllm` wheel is CUDA-built and
 > would break that. A resolvable `vllm` pin anywhere (requirements, or the plugin's own deps) would
-> silently uninstall the empty build and pull the CUDA wheel — which is exactly why the plugin's
-> `pyproject` omits `vllm` and why we install it in its own `--no-deps` step.
+> silently uninstall the empty build and pull the CUDA wheel. That is why the plugin's `pyproject`
+> omits `vllm` and why vLLM is installed in its own `--no-deps` step.
 
 > **On `run.sh`:** the serving launcher is a generated `run.sh`, and `tt-model serve` runs
-> `bash <bundle>/run.sh`. It's a shell wrapper (not Python in `serve`) on purpose: `LD_PRELOAD` of
-> `_ttnncpp.so` must be set **before** the interpreter starts, so it can't be done from inside
-> tt-model's own process. `run.sh` also makes the bundle runnable without tt-model (`bash run.sh`);
-> `tt-model serve` is the managed wrapper. The author doesn't write it — `package`/`package-thin`
-> generate it; the author writes `model.py`.
+> `bash <bundle>/run.sh`. It is a shell wrapper rather than Python inside `serve` because
+> `LD_PRELOAD` of `_ttnncpp.so` must be set **before** the interpreter starts, so it cannot be done
+> from inside `tt-model`'s own process. `run.sh` also makes the bundle runnable without `tt-model`
+> (`bash run.sh`); `tt-model serve` is the managed wrapper. The author does not write it.
+> `package-thin` generates it; the author writes `model.py`.
 
-## Serving front end — `deps.kind` picks vLLM or a direct ASGI app
+## Serving front end: `deps.kind` picks vLLM or a direct ASGI app
 
-The engine + bundle + install are **modality-agnostic** and shared. The one modality-specific layer
-is the **serving front end**, picked by `deps.kind` (default `"vllm"`, the only behavior v6 had
-before this field existed) — placed inside the `Deps` block rather than a new top-level `serve.kind`
-(an earlier revision of this doc anticipated the latter) to match how the v5.1 CONTAINER schema
-already scopes its own `kind` inside its own schema-specific block (`ContainerSpec.kind`, see
-`launchers.py`), not as a separate manifest field.
+The engine, bundle, and install are **modality-agnostic** and shared. The one modality-specific
+layer is the **serving front end**, picked by `deps.kind` (default `"vllm"`, the only behavior v6
+had before this field existed). It sits inside the `Deps` block rather than as a new top-level
+`serve.kind` (an earlier revision of this doc anticipated the latter) to match how the v5.1
+CONTAINER schema already scopes its own `kind` inside its own schema-specific block
+(`ContainerSpec.kind`, see `launchers.py`) rather than as a separate manifest field.
 
 - `"vllm"`: `run.sh` launches vLLM's OpenAI server; `vllm_metadata.json` / `EXTRA_MODELS_DIR`
-  registers `Manifest.entrypoint` (arch + `module:Class`) with the plugin. Needs `deps.vllm` (the
+  registers `Manifest.entrypoint` (arch and `module:Class`) with the plugin. Needs `deps.vllm` (the
   empty-target vLLM build step) and `Manifest.entrypoint`.
-- `"tt-dit-server"`: for a model with no tokens/KV-cache/continuous batching (diffusion,
-  vision-language-action, ...) — nothing for vLLM to do. `run.sh` serves `deps.app` (a
-  `"module:attribute"` ASGI target) directly with uvicorn instead; no vLLM step regardless of
-  `--vllm`/`--no-vllm`, no `vllm_metadata.json`, no `Manifest.entrypoint`. Mirrors what the
-  same-named v5.1 CONTAINER kind already does (`launchers.TtDitServerLauncher`) — an author who has
-  published a `tt-dit-server` container recognizes the same term and shape here.
+- `"tt-dit-server"`: for a model with no tokens, key-value (KV) cache, or continuous batching
+  (diffusion, vision-language-action, and similar), where vLLM has nothing to do. `run.sh` serves
+  `deps.app` (a `"module:attribute"` Asynchronous Server Gateway Interface (ASGI) target) directly
+  with uvicorn instead. There is no vLLM step regardless of `--vllm`/`--no-vllm`, no
+  `vllm_metadata.json`, and no `Manifest.entrypoint`. This mirrors what the same-named v5.1
+  CONTAINER kind already does (`launchers.TtDitServerLauncher`), so an author who has published a
+  `tt-dit-server` container recognizes the same term and shape here.
 
 ```mermaid
 flowchart TB
-  subgraph shared1["SHARED — same v6 bundle for every model type"]
+  subgraph shared1["SHARED: same v6 bundle for every model type"]
     w["Pointer to weights"] --- man["Manifest (deps.kind + config)"] --- mp["model.py / app.py"] --- venv["uv venv: ttnn + tt-metal-models + generic_op"]
   end
   shared1 --> fork{{"manifest: deps.kind ?"}}
@@ -115,92 +117,106 @@ flowchart TB
     l1["run.sh → vLLM OpenAI server"] --> l2["vllm_metadata.json (EXTRA_MODELS_DIR)"] --> l3["model.py = generator adapter"] --> l4["POST /v1/chat/completions"]
   end
   subgraph other["Diffusion / vision-language-action / ..."]
-    o1["run.sh → uvicorn deps.app"] --> o2["app.py brings its own ASGI API"] --> o3["app.py = pipeline (e.g. UNet/VAE, or a vision+LLM stack)"] --> o4["whatever routes app.py declares"]
+    o1["run.sh → uvicorn deps.app"] --> o2["app.py brings its own ASGI API"] --> o3["app.py = pipeline (for example UNet/VAE, or a vision+LLM stack)"] --> o4["whatever routes app.py declares"]
   end
-  llm --> eng["SHARED ENGINE — ttnn + generic_op on the TT card (+ SFPI, firmware)"]
+  llm --> eng["SHARED ENGINE: ttnn + generic_op on the Tenstorrent card (+ SFPI, firmware)"]
   other --> eng
 ```
 
 The **model code** itself (diffusion pipeline, or anything else) lives in `tt-metal-models` or the
-author's own bundled `app.py`, not in tt-model — the engine already runs it; tt-model only renders
-the install/serve scripts.
+author's own bundled `app.py` rather than in `tt-model`. The engine already runs it; `tt-model` only
+renders the install and serve scripts.
 
-## Box prerequisites
-A TT **card**, its **firmware/driver**, and **SFPI** (SFPI is a separate, externally-managed box
-dependency — provisioned by tt-cli, or installed by the user on a bare box; it is **not** in `ttnn`
-and **not** in the venv). No separate tt-metal install — the tt-metal runtime rides inside `ttnn`.
+## Host prerequisites
+A Tenstorrent PCIe **card**, its **firmware and driver**, and **SFPI** (the SFPU programming
+interface compiler). SFPI is a separate, externally managed host dependency, provisioned by
+`tt-cli` or installed by the user on a bare host. It is **not** in `ttnn` and **not** in the venv.
+No separate TT-Metalium™ install is needed; the TT-Metalium runtime rides inside `ttnn`.
 
-## Author a thin bundle — from a "works on my box" model
+## Author a thin bundle from a model that works on your host
 
-A thin package is not the engine; it's a thin description of *your* model plus the recipe to rebuild
-its venv anywhere. "Making the package" = capturing the exact recipe your working box used.
+A thin package is not the engine. It is a thin description of *your* model plus the recipe to
+rebuild its venv anywhere. Making the package means capturing the exact recipe your working host
+used.
 
-### What "working on my box" must already include → where it lands
-| You have (working box) | Becomes (in the package) |
+### What "working on your host" must already include, and where it lands
+| You have (working host) | Becomes (in the package) |
 |---|---|
-| `model.py` — your runner, built on the `tt_transformers` blocks (from `tt-metal-models`) and/or calling `ttnn.generic_op` for custom ops | shipped at the bundle root |
-| the **exact dep versions** you ran with — `tt-metal-models==…` (pulls the matching `ttnn`) | `requirements.txt` pins |
+| `model.py`, your runner, built on the `tt_transformers` blocks (from `tt-metal-models`) and/or calling `ttnn.generic_op` for custom ops | shipped at the bundle root |
+| the **exact dep versions** you ran with: `tt-metal-models==…` (pulls the matching `ttnn`) | `requirements.txt` pins |
 | the **`vllm-tt-plugin`** wheel (the vLLM integration) | `wheels/`, installed by path |
-| the **vLLM** you served with — stock upstream, built `VLLM_TARGET_DEVICE=empty` | `install.sh` step (`deps.vllm`); optionally a prebuilt wheel via `--vllm-wheel` |
+| the **vLLM** you served with: stock upstream, built `VLLM_TARGET_DEVICE=empty` | `install.sh` step (`deps.vllm`); optionally a prebuilt wheel via `--vllm-wheel` |
 | *(if you wrote custom ops)* a **`generic_op` wheel** you built | `wheels/`, installed by path |
-| the **serving entrypoint** — the HF architecture name + the `module:Class` the vLLM plugin loads | `vllm_metadata.json` (`arch` → `main_class`) |
-| the **weights** (an HF repo id) + the **serving knobs** you validated (mesh, max_num_seqs, block_size) | manifest pointer + `resources`/`mesh` |
+| the **serving entrypoint**: the HF architecture name and the `module:Class` the vLLM plugin loads | `vllm_metadata.json` (`arch` to `main_class`) |
+| the **weights** (an HF repo id) and the **serving knobs** you validated (mesh, max_num_seqs, block_size) | manifest pointer + `resources`/`mesh` |
 
-The key discipline: **pin what actually worked** — `pip freeze` in your working venv gives the real
-`tt-metal-models` (and, until it lands, `ttnn`) version to put in `requirements.txt`.
+Pin the versions that actually worked: `pip freeze` in your working venv gives the real
+`tt-metal-models` (and, until it publishes, `ttnn`) version to put in `requirements.txt`.
 
 ### Steps
-1. **Make `model.py` importable by its class path.** Class `QwenForCausalLM` in `model.py` → the
-   entrypoint is `model:QwenForCausalLM` (module = filename without `.py`; at serve time `PYTHONPATH`
+1. **Make `model.py` importable by its class path.** Class `QwenForCausalLM` in `model.py` gives the
+   entrypoint `model:QwenForCausalLM` (module = filename without `.py`; at serve time `PYTHONPATH`
    is the bundle root).
-2. **Write `requirements.txt`** with the versions your box ran — **ttnn / tt-metal-models only**:
+2. **Write `requirements.txt`** with the versions your host ran, **`ttnn` / `tt-metal-models` only**:
    ```
    # tt-metal-models==<X>       # the models tree (incl. tt_transformers); pins ttnn==<X> exactly
-   #                            # (upstream tt-metal#54478) — pulls the matching ttnn transitively
-   ttnn==0.77.0                 # engine (PyPI today; pin directly until tt-metal-models lands)
+   #                            # (upstream tt-metal#54478). Pulls the matching ttnn transitively
+   ttnn==0.77.0                 # engine (on PyPI; pin directly until tt-metal-models publishes)
    ```
    **Do NOT put `vllm` in `requirements.txt`.** vLLM is installed by `install.sh` as stock upstream
    vLLM built `VLLM_TARGET_DEVICE=empty` (the [`vllm-tt-plugin`](https://github.com/tenstorrent/vllm-tt-plugin)
-   recipe) — a resolvable `vllm` pin would pull the CUDA wheel and clobber that build. SFPI + firmware
-   are external box deps — also **not** in `requirements.txt`. (Omit `--requirements` and `package-thin`
-   writes this as a template with the `tt-metal-models` TODO pin.)
+   recipe). A resolvable `vllm` pin would pull the CUDA wheel and clobber that build. SFPI and
+   firmware are external host deps and are also **not** in `requirements.txt`. (Omit
+   `--requirements` and `package-thin` writes this as a template with the `tt-metal-models` TODO pin.)
 3. **Ship the `vllm-tt-plugin` wheel** with `--plugin-wheel`. vLLM core builds from source at install
-   by default; to avoid that (hermetic, faster), build a wheel once with
+   by default. To avoid that (hermetic, faster), build a wheel once with
    `VLLM_TARGET_DEVICE=empty pip wheel --no-deps vllm==0.25.1` and pass it via `--vllm-wheel`.
 4. **(Custom ops only)** `model.py` calls `ttnn.generic_op(...)`; ship your built wheel with `--ops-wheel`.
-5. **(Optional, before tt-metal-models publishes)** built your own `tt-metal-models` wheel from
-   `knauth/tt-metal-models-packaging`? Ship it with `--models-wheel` — it's staged for `--find-links`,
+5. **(Optional, before `tt-metal-models` publishes)** if you built your own `tt-metal-models` wheel from
+   `knauth/tt-metal-models-packaging`, ship it with `--models-wheel`. It is staged for `--find-links`,
    not installed by path, so `requirements.txt` still just pins `tt-metal-models==<version>`.
 6. **Run `package-thin`:**
    ```bash
    tt-model package-thin <org>/<model> \
      --model-py ./model.py \
-     --requirements ./requirements.txt \      # ttnn/tt-metal-models pins (or omit for the #29 template)
-     --plugin-wheel ./wheels/vllm_tt_plugin-*.whl \   # vllm-tt-plugin (the vLLM integration)
-     --vllm-wheel ./wheels/vllm-0.25.1-*.whl \  # optional: prebuilt empty-target vLLM (else built at install)
-     --ops-wheel ./wheels/my_model_ops-*.whl \  # optional: your generic_op wheel (repeatable)
-     --models-wheel ./wheels/tt_metal_models-*.whl \  # optional: local tt-metal-models, ahead of publish
+     --requirements ./requirements.txt \
+     --plugin-wheel ./wheels/vllm_tt_plugin-*.whl \
+     --vllm-wheel ./wheels/vllm-0.25.1-*.whl \
+     --ops-wheel ./wheels/my_model_ops-*.whl \
+     --models-wheel ./wheels/tt_metal_models-*.whl \
      --arch blackhole \
      --arch-name QwenForCausalLM --main-class model:QwenForCausalLM \
-     --weights Qwen/Qwen3-4B \                # pointer, never embedded
+     --weights Qwen/Qwen3-4B \
      --mesh P150 --max-num-seqs 32 --block-size 64 \
-     --out ./bundle                           # stage locally (omit + pass <org>/<model> to push)
+     --out ./bundle
    ```
-7. **Result** — the bundle layout shown above (`model.py` + `requirements.txt` + `vllm-overrides.txt`
-   + `wheels/` [vllm-tt-plugin + ops (+ optional vLLM wheel + optional local models wheel)]
-   + `vllm_models/<name>/vllm_metadata.json` + manifest + `install.sh`/`run.sh`; no `metal/`, no
+
+   | Flag | Meaning |
+   |---|---|
+   | `--requirements` | `ttnn` / `tt-metal-models` pins. Omit it to have `package-thin` write a template `requirements.txt` |
+   | `--plugin-wheel` | `vllm-tt-plugin` (the vLLM integration) |
+   | `--vllm-wheel` | *(optional)* prebuilt empty-target vLLM; otherwise built at install |
+   | `--ops-wheel` | *(optional, repeatable)* your generic_op wheel |
+   | `--models-wheel` | *(optional)* local `tt-metal-models` wheel, ahead of publish |
+   | `--weights` | pointer to the weights. The weights are not embedded |
+   | `--out ./bundle` | stage locally. Omit it and pass `<org>/<model>` to push |
+
+7. **Result**: the bundle layout shown above (`model.py`, `requirements.txt`, `vllm-overrides.txt`,
+   `wheels/` [`vllm-tt-plugin` + ops (+ optional vLLM wheel + optional local models wheel)],
+   `vllm_models/<name>/vllm_metadata.json`, manifest, `install.sh`/`run.sh`; no `metal/`, no
    embedded ttnn wheel, no vLLM fork).
-8. **Round-trip** — on any card + firmware + SFPI box: `tt-model pull <org>/<model>` builds the venv
-   (ttnn/models + empty-target vLLM + plugin) and fetches the weights; `tt-model serve <org>/<model>`
-   launches it.
+8. **Round-trip**: on any host with a card, firmware, and SFPI, `tt-model pull <org>/<model>` builds
+   the venv (ttnn/models, empty-target vLLM, plugin) and fetches the weights;
+   `tt-model serve <org>/<model>` launches it.
 
-**Required from you:** `model.py` + a `requirements.txt` of real pins + *(optional)* a `generic_op`
-wheel + the entrypoint (`--arch-name`/`--main-class`) + a weights repo id. Everything else is generated.
+**Required from you:** `model.py`, a `requirements.txt` of real pins, *(optional)* a `generic_op`
+wheel, the entrypoint (`--arch-name`/`--main-class`), and a weights repo id. Everything else is
+generated.
 
-## Testing it in the lab (today)
+## Testing it in the lab
 1. `tt-model package-thin ... --out /tmp/thin`
-2. Edit `/tmp/thin/requirements.txt` — pin the real `ttnn` now, and `tt-metal-models` once tt-metal#54478 publishes.
-3. `bash /tmp/thin/install.sh` — builds the venv (ttnn → empty-target vLLM → plugin). Needs SFPI on
-   the box; the default vLLM step builds from source (needs a C/C++ toolchain + network for
+2. Edit `/tmp/thin/requirements.txt`: pin the real `ttnn` now, and `tt-metal-models` once `tt-metal#54478` publishes.
+3. `bash /tmp/thin/install.sh` builds the venv (ttnn, then empty-target vLLM, then plugin). Needs SFPI
+   on the host. The default vLLM step builds from source (needs a C/C++ toolchain and network for
    `common.txt`). Pass `--vllm-wheel` at package time to install a prebuilt empty-target wheel instead.
-4. `bash /tmp/thin/run.sh` (serves), then `curl` the endpoint — or `tt-model pull`/`serve` from HF.
+4. `bash /tmp/thin/run.sh` (serves), then `curl` the endpoint. Or use `tt-model pull`/`serve` from HF.

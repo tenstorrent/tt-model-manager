@@ -14,8 +14,9 @@ tt-model login                                    # reuses huggingface_hub's tok
 ```bash
 tt-model serve you/mymodel                         # install if needed, then launch the OpenAI server
 tt-model serve you/mymodel --print                 # print the exact launch command + env instead of running it
-tt-model serve you/mymodel --local-only            # require an installed bundle; never hit the Hub
-tt-model serve you/mymodel -- --extra vllm-arg     # anything after the id is passed through to vLLM
+tt-model serve you/mymodel --local-only            # require an installed bundle; do not hit the Hub
+tt-model serve you/mymodel --port 8001             # serve's own option; see the pass-through rule below
+tt-model serve you/mymodel --extra vllm-arg        # anything serve does not own is passed through to vLLM
 
 tt-model curl "hello"                              # send a chat completion to the running model
 tt-model curl "write a haiku" --temperature 0.7 --max-tokens 200
@@ -26,24 +27,29 @@ tt-model logs you/mymodel                          # container packages: show th
 ```
 
 `tt-model serve <id>` is the one-command path. For an already-installed bundle it runs the
-bundle's `run.sh` directly from that bundle's own venv — the host toolchain is irrelevant
-because the bundle ships or builds its own. For a bundle that isn't installed yet, `serve`
+bundle's `run.sh` directly from that bundle's own venv. The host toolchain does not matter,
+because the bundle ships or builds its own. For a bundle that is not installed yet, `serve`
 downloads it, runs its `install.sh` to build the per-model venv, then serves. `run.sh` wires the
 engine env and launches the OpenAI-compatible vLLM server. Repeat invocations skip the install
 and go straight to launch. For a v5.1 container package, `serve` runs the image instead (see
-[container_packages.md](container_packages.md), "Consuming and serving").
+[container_packages.md](container_packages.md#consuming-and-serving)).
+
+**Pass-through rule.** `--port`, `--print`, `--local-only`, `--force`, `--arch`, `--profile`,
+`--detach`, `--no-weights`, `--refresh`, `--no-update-check`, and `--device-id` are `serve`'s
+own options and can appear before or after the bundle id. Anything else after the id passes through to vLLM unchanged. This rule is the
+same for every package format.
 
 `serve` also compares the installed revision to the Hub's tip and prints a non-blocking
-advisory if a newer one exists; skip it with `--no-update-check`, `--local-only`, or a pinned
+advisory if a newer one exists. Skip it with `--no-update-check`, `--local-only`, or a pinned
 `@revision`.
 
 ### Checking it answers
 
 `tt-model curl` builds the chat-completions request for whatever is being served, so
-verifying a bring-up doesn't mean hand-writing JSON and matching the model id exactly. The
-model id comes from the running server (`GET /v1/models`); with nothing serving yet,
+verifying a bring-up does not mean hand-writing JSON and matching the model id exactly. The
+model id comes from the running server (`GET /v1/models`). With nothing serving yet,
 `--print` falls back to the installed bundle's weights id so it still emits something
-pasteable. Any option the command doesn't reserve (`--print`, `--model`, `--base-url`) goes
+pasteable. Any option the command does not reserve (`--print`, `--model`, `--base-url`) goes
 straight into the request body, so the whole vLLM sampling surface is available.
 
 ## Get models
@@ -60,14 +66,13 @@ tt-model list                                       # locally installed bundles,
 tt-model profiles you/mymodel                       # container packages: serve profiles + the default
 ```
 
-A plain `tt-model pull <id>` reinstalls a stale bundle in place and reuses an up-to-date one;
+A plain `tt-model pull <id>` reinstalls a stale bundle in place and reuses an up-to-date one.
 `--force` is not the update path. The compatibility verdict printed by `pull`/`info` is
 described in [publishing.md](publishing.md#how-compatibility-is-checked).
 
 ## Publish models
 
 ```bash
-tt-model package      you/mymodel ...               # author + push a v5 fat bundle
 tt-model package      --container tt-model.yaml     # build a v5.1 container package (stages a dir)
 tt-model package-thin you/mymodel ...               # author + push a v6 thin bundle (BETA, unsupported)
 tt-model push         build/mymodel                 # push a staged v5.1 container package (repo id from its manifest)
@@ -75,9 +80,11 @@ tt-model publish      you/mymodel                   # list a public bundle in th
 tt-model unpublish    you/mymodel                   # delist (repo untouched)
 ```
 
-Flags per format: [self_contained_packages.md](self_contained_packages.md) (v5),
-[container_packages.md](container_packages.md) (v5.1), [thin_packages.md](thin_packages.md)
-(v6). Visibility and catalog rules: [publishing.md](publishing.md).
+`push` accepts only a staged v5.1 container directory. `package-thin` pushes a v6 bundle itself
+when given a positional `<org>/<name>`; there is no separate push step for that format.
+
+Flags per format: [container_packages.md](container_packages.md) (v5.1) and
+[thin_packages.md](thin_packages.md) (v6). Visibility and catalog rules: [publishing.md](publishing.md).
 
 ## Maintenance
 
