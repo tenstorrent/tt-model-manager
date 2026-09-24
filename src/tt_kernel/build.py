@@ -1116,7 +1116,7 @@ def _card_at_a_glance(m: ContainerManifest) -> List[str]:
     """A scannable fact table, derived wherever the manifest already knows the answer.
 
     Only rows that have a value: a row reading "unknown" is worse than a shorter table.
-    Deliberately no Model CI row — until that gate exists (DEVSTACK-430) any value would
+    Deliberately no Model CI row — until that gate exists any value would
     be a claim frozen at build time that no consumer could refresh.
     """
     card = m.card

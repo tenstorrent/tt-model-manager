@@ -2365,7 +2365,7 @@ def test_a_partial_cache_still_warns_under_no_weights(tmp_path, monkeypatch, cap
     container_cli.ensure_weights(_manifest(tmp_path, weights={"repo": "org/w"}), "org/m",
                                  no_weights=True)
     out = capsys.readouterr().out
-    # DEVSTACK-470: an interrupted fetch is a different state from one that never started,
+    # An interrupted fetch is a different state from one that never started,
     # with a different fix (resume). "Not in your local HF cache" misread it.
     assert "a download was interrupted" in out
     assert "104.0 GB is on disk" in out          # Rich may wrap the rest of the line
@@ -2504,7 +2504,7 @@ def test_a_traversing_revision_counts_no_bytes(tmp_path, monkeypatch):
     assert container_cli._bytes_on_disk(_wref(revision="../../../etc")) == 0
 
 
-# --------------------------------------------- a pinned weights path is a gate (DEVSTACK-470)
+# ----------------------------------------------------------- a pinned weights path is a gate
 #
 # Some packages pin the weights' snapshot path straight into the serve env
 # (MISTRAL4_WEIGHTS_DIR=/hf/hub/models--org--w/snapshots/...) and the loader opens it
