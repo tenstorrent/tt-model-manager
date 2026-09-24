@@ -23,7 +23,6 @@ jobs:
       MODEL: Adartras/qwen3.6-a3b-blackhole
       TT_MODEL_READY_TIMEOUT: "7200"
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      RESULTS: ${{ runner.temp }}/results.md
     steps:
       - uses: actions/checkout@v4
 
@@ -32,6 +31,9 @@ jobs:
       - name: Preflight (devices, docker, disk)
         id: preflight
         run: |
+          # The `runner` context isn't available in job-level env, so the path is set here.
+          export RESULTS="$RUNNER_TEMP/results.md"
+          echo "RESULTS=$RESULTS" >> "$GITHUB_ENV"
           cat > "$RUNNER_TEMP/disk.sh" <<'EOF'
           #!/usr/bin/env bash
           label="$1"
