@@ -1,5 +1,5 @@
-# Test branch only (MINFRA-1863): serve one real container package on a CIv2 Blackhole
-# runner and record how much of the runner's 100 GB disk it uses. Not meant to merge.
+# Test branch only (MINFRA-1863): serve real container packages on a CIv2 Blackhole
+# runner and record how much of the runner's disk each uses. Not meant to merge.
 # Push-triggered because workflow_dispatch only exists once a workflow is on main, and a
 # push trigger keeps fork PRs of this public repo off the self-hosted runner.
 name: civ2-dry-run
@@ -17,10 +17,20 @@ concurrency:
 
 jobs:
   dry-run:
+    name: dry-run (${{ matrix.model }})
     runs-on: tt-ubuntu-2204-p150b-stable
     timeout-minutes: 240
+    # One board at a time on the shared runner pool; a failure doesn't cancel the rest.
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        model:
+          - mando2222/llama-3.2-3b-blackhole-v51
+          - stisiTT/gemma-4-12b-it-p150
+          - Adartras/qwen3.6-a3b-blackhole
     env:
-      MODEL: Adartras/qwen3.6-a3b-blackhole
+      MODEL: ${{ matrix.model }}
       TT_MODEL_READY_TIMEOUT: "7200"
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
