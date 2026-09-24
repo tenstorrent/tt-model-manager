@@ -1,9 +1,9 @@
 ---
 name: model-card-standardizer
-description: Check a tt-model card — an authored tt-model.yaml's `card` fields, a locally built package's README.md, or an already-published HF repo's README — against the proposed DEVSTACK-447 model-card template, separate what the model's author can fix from what the `render_model_card` generator itself hardcodes, and interview the author to draft the missing free-text sections as ready-to-paste `card.quickstart` markdown. Use for "does this model card follow the template", "review/standardize this model card", "help me write the card for this model", or "check this repo against DEVSTACK-447". Advisory only — never pushes to HF, never edits a published repo, and only edits a local tt-model.yaml's `card:` block after showing the diff and getting confirmation.
+description: Check a tt-model card — an authored tt-model.yaml's `card` fields, a locally built package's README.md, or an already-published HF repo's README — against the proposed model-card template, separate what the model's author can fix from what the `render_model_card` generator itself hardcodes, and interview the author to draft the missing free-text sections as ready-to-paste `card.quickstart` markdown. Use for "does this model card follow the template", "review/standardize this model card", "help me write the card for this model", or "check this repo against the template". Advisory only — never pushes to HF, never edits a published repo, and only edits a local tt-model.yaml's `card:` block after showing the diff and getting confirmation.
 ---
 
-# Standardize a tt-model card against the DEVSTACK-447 template
+# Standardize a tt-model card against the proposed template
 
 ## Read this first: what actually generates a card
 
@@ -41,17 +41,17 @@ something a model's author can edit per package:
    the right order.
 
 **Re-read both of those before relying on anything below.** This skill was
-written against a specific snapshot of the code; DEVSTACK-447 may have since
+written against a specific snapshot of the code; later work may have since
 added dedicated `CardSettings` fields or changed the hardcoded command, in
 which case some "generator-owned" gaps listed here may already be fixed or
 author-fixable. Don't carry a stale verdict forward.
 
 ## Step 1 — Get the template and figure out what you're checking
 
-Read `reference/template.md` in this skill directory — the template proposed
-in [DEVSTACK-447 comment 670207](https://tenstorrent.atlassian.net/browse/DEVSTACK-447).
-**Status: PROPOSED**, pending sign-off on the open questions logged there.
-`license` is under an explicit A/B/C vote on that ticket (stays optional /
+Read `reference/template.md` in this skill directory — the template as the
+DX team proposed it. **Status: PROPOSED**, pending sign-off on the open
+questions the team logged internally.
+`license` is under an explicit A/B/C vote (stays optional /
 required to list publicly / required to package at all), and who retrofits the
 existing ~50 catalog cards is still unassigned — so treat both as unsettled.
 
@@ -96,7 +96,7 @@ What is still genuinely generator-owned:
 | Template section | What the generator does today |
 | --- | --- |
 | `tt_perf_summary` frontmatter | Not emitted at all. Deferred until the perf-target schema is settled |
-| Model CI v0 row | Not emitted at all. Deferred until DEVSTACK-430 produces a result worth citing |
+| Model CI v0 row | Not emitted at all. Deferred until the model CI gate exists and produces a result worth citing |
 | Changelog | No field and no section. `render_model_card()` rewrites the card wholesale on every build, so there is no history to draw on |
 | Whitelist status | Not a card concern at all: a reviewed model is one Tenstorrent has copied into its own HF org (`tt-model whitelist` does the copy), so the repo it sits in *is* the signal. A `tt-whitelisted` tag in a card's frontmatter means nothing — anyone can add one to their own repo — and the renderer must never emit one |
 
@@ -129,8 +129,8 @@ Two lists, and be exact:
 
 - **Author-fixable** — what you drafted, and which manifest field it goes in.
 - **Generator-owned** — what needs a `tt-model-manager` code change, each
-  with the file:line you checked. Point these at DEVSTACK-447 (or a follow-up
-  ticket) rather than treating them as resolved just because you found them.
+  with the file:line you checked. Hand these to the team as follow-up work
+  rather than treating them as resolved just because you found them.
 
 ## Notes
 

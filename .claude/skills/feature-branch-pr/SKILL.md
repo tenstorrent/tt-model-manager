@@ -34,6 +34,11 @@ is wrong even if tests pass.
   distribution, weights-as-pointer, supported schemas, console.py-only
   output, rendered install.sh/run.sh). If the requested change would break
   one, stop and tell the user instead of implementing it.
+- **Public GitHub is public** (AGENTS.md): no AI attribution anywhere, and
+  nothing from internal channels — no Jira keys, no Slack / Confluence /
+  Google Docs links, no channel names, no quoted colleagues — in commits, PR
+  text, code comments, or docs. Say *why* in your own words instead.
+  `tests/test_public_hygiene.py` fails the suite on the common patterns.
 
 ## Workflow checklist
 
@@ -47,8 +52,8 @@ Copy this and tick as you go:
 - [ ] 5. Run the full offline suite (pytest)
 - [ ] 6. Clean up instrumentation
 - [ ] 7. Stage only intended files
-- [ ] 8. Commit (imperative + why + trailer)
-- [ ] 9. Push + open a draft PR against main
+- [ ] 8. Commit (imperative + why, no attribution)
+- [ ] 9. Push + open a draft PR against main (summary + how to test + evidence)
 - [ ] 10. Return to the original branch
 ```
 
@@ -142,8 +147,12 @@ No wheels or large binaries in git, no local scratch dirs, no `.env`.
 ### 8. Commit
 
 Imperative subject (this repo uses Conventional-Commits-style subjects:
-`fix(hub): …`, `feat(serve): …`, `docs: …`), a short body explaining *why*,
-and — per AGENTS.md — end with the trailer:
+`fix(hub): …`, `feat(serve): …`, `docs: …`) and a short body explaining
+*why*. **No attribution**: no `Co-Authored-By` trailer naming an assistant,
+no "Generated with …" line, no mention of the model or tool. If your tool
+appends one on its own, amend it out before pushing
+(`.claude/settings.json` already disables Claude Code's). No internal ticket
+keys or links either — the reason goes in the body in plain words.
 
 ```
 fix(serve): repair a pulled package whose image was deleted
@@ -151,34 +160,71 @@ fix(serve): repair a pulled package whose image was deleted
 A pulled v5.1 package whose container image was removed from the local
 daemon failed to serve with an opaque docker error. Re-pull the image by
 digest when it is missing instead.
-
-Co-Authored-By: Claude <model name> <noreply@anthropic.com>
 ```
 
 (Name the model that actually wrote the commit, e.g. `Claude Opus 4.8`.)
 
 ### 9. Push and open a draft PR against main
 
+Write the body to a scratch file first so the fences survive, then:
+
 ```bash
 git push -u origin <branch>
 gh pr create --draft --base main \
   --title "<type>(<scope>): <human, specific subject>" \
-  --body "<what/why + test evidence + tracking issue link if any>"
+  --body-file <scratch>/pr-body.md
 ```
 
-PR body: a few plain sentences on what changed and why, the test evidence
-(e.g. "full suite: 142 passed"), hardware validation result if applicable,
-and a link to the tracking issue if one applies. Short and human — no walls
-of text. Example:
+The body has three parts, in this order — the same shape as
+[.github/pull_request_template.md](../../../.github/pull_request_template.md):
 
-```
+1. **Summary** — one to three plain sentences: what changed and why. Very
+   short; the details are in the diff and the commit body.
+2. **How to test** — numbered terminal steps a human reviewer runs as-is,
+   each with its expected result. Start from a fresh checkout of the branch,
+   include setup (`uv sync --locked --extra test`), the command that shows
+   the change, and how to tell it worked. For a bug fix, the first step
+   reproduces the bug on `main` where practical. If a step needs hardware,
+   say which.
+3. **Evidence** — what *you* ran: "full offline suite: N passed", the
+   hardware validation result or "not run on hardware", and a public GitHub
+   issue link if one applies.
+
+No AI attribution footer and no internal ticket keys or links (AGENTS.md,
+"Public GitHub is public"). Example:
+
+````
+## Summary
 Serving a pulled v5.1 package failed with an opaque docker error when the
-local image had been deleted. Re-pull the image by digest when missing.
+local image had been deleted. `serve` now re-pulls the image by digest when
+it is missing.
 
+## How to test
+1. Set up and pull a package:
+   ```bash
+   uv sync --locked --extra test
+   uv run tt-model pull <org>/<name>
+   ```
+   Expected: `pull` finishes and `tt-model list` shows the package.
+2. Delete the image, then serve:
+   ```bash
+   docker image rm <image-ref>
+   uv run tt-model serve <org>/<name> --detach
+   ```
+   Expected: the boot checklist shows an image pull step and ends in a ready
+   card. On `main` this fails with a docker "No such image" error.
+3. Confirm the API answers:
+   ```bash
+   curl -s localhost:8000/v1/models
+   ```
+   Expected: JSON listing the model id.
+
+## Evidence
 - Regression test in tests/test_serve.py (fails before, passes after)
 - Full offline suite: 142 passed
+- Steps 2-3 run on a p150 box
 - Fixes #51
-```
+````
 
 **Leave the PR as a draft and leave merging to a human** unless the user
 explicitly tells you otherwise.
@@ -203,5 +249,10 @@ git checkout "$ORIG"
   didn't create.
 - **Don't** push to `main`, open the PR ready-for-review by default, or
   merge your own PR.
+- **Don't** add AI attribution (co-author trailers, "Generated with"
+  footers) or internal ticket keys / Slack / Confluence / Docs links anywhere
+  on GitHub.
+- **Don't** open a PR whose body lacks numbered terminal steps a human can
+  run to test it, or whose summary runs past a few sentences.
 - **Don't** silently truncate or skip integrity checks / version gates to
   make something pass.

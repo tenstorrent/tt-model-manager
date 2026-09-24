@@ -75,10 +75,36 @@ violates one of these is wrong even if tests pass:
    ```
 5. If the change touches the serve/device path, validate on hardware (see
    `docs/self_contained_packages.md` → Testing) — package → pull → serve → `curl`.
-6. Commit messages: imperative subject, a short body explaining *why*, and end with:
-   `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
-7. Open a **draft PR**; body = what/why + the test evidence (e.g. "full suite: N passed") +
-   a link to the tracking issue if one applies.
+6. Commit messages: imperative subject, a short body explaining *why*. **No AI attribution**:
+   no `Co-Authored-By` trailer naming an assistant, no "Generated with …" footer, no mention
+   of the model or tool anywhere in the commit (see
+   [Public GitHub is public](#public-github-is-public)).
+7. Open a **draft PR**. Body = a **very short summary** (one to three sentences: what changed
+   and why), then **How to test**: numbered, copy-pasteable terminal steps a human reviewer
+   runs to see the change, each with its expected result, then the test evidence (e.g. "full
+   suite: N passed"). `.github/pull_request_template.md` has this shape. Link a public GitHub
+   issue if one applies, never an internal ticket.
+
+## Public GitHub is public
+This repo, its code, docs, commits, PRs, issues, and review comments, is public. Two rules
+follow. They apply to everything an agent writes here and to anything else it publishes, such
+as a Hugging Face model card:
+
+- **No AI attribution.** The author of a change is the human running the tool. No
+  `Co-Authored-By` trailer naming an assistant, no "Generated with …" footer, no crediting of
+  Claude, Cursor, Copilot, Codex, or any other agent in commits, PR titles or bodies, code
+  comments, or docs. Naming a tool *as tooling* is fine (`.claude/skills/` is read by Claude
+  Code); crediting it as an author is not. `.claude/settings.json` turns off Claude Code's
+  built-in attribution; if a tool adds its own footer, delete it before pushing.
+- **No internal communication.** Nothing from Slack, Jira, Confluence, Google Docs, email, or
+  meetings appears on GitHub: no ticket keys, no links to internal systems, no channel names,
+  no quoted or paraphrased colleague messages, no internal hostnames. Put the *reason* for a
+  change in your own words in the commit body and PR summary; that is all a public reader
+  needs. If the team needs traceability, link from the internal ticket to the PR, never the
+  other way round. Public GitHub issues in this org are fine to link.
+
+`tests/test_public_hygiene.py` greps the tracked text files for the common patterns, so a
+leaked ticket key or attribution trailer fails the offline suite.
 
 ## Reuse, don't reinvent
 `hub.py` (HF push/pull + catalog listing), `runtime.py` (`download_weights`,
@@ -116,6 +142,8 @@ benefit from it.
 - Don't vendor `torch`/`vllm`/`transformers` — they are pip deps.
 - Don't commit wheels or other large binaries to git (LFS on push only).
 - Don't push to `main` or self-merge.
+- Don't put AI attribution, internal ticket keys, or Slack / Confluence / Docs links anywhere on
+  GitHub (see [Public GitHub is public](#public-github-is-public)).
 - Don't silently truncate or skip integrity checks / version gates.
 
 ---

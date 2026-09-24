@@ -33,7 +33,12 @@ We accept bug fixes and new functionality through Pull Requests (PRs).
 2. Make your changes in the branch
 3. Run tests to ensure they pass: `pytest`
 4. Commit your changes with clear, descriptive commit messages
-5. Push your branch and submit a PR
+5. Push your branch and submit a PR. The PR template asks for a short summary and
+   numbered terminal steps a reviewer can run to test the change; fill in both.
+
+This repository is public. Keep internal ticket keys and links (Jira, Slack, Confluence,
+Google Docs) and AI-assistant attribution out of commits, PR text, comments, and docs;
+state the reason for a change in your own words instead.
 
 ### Review Process
 

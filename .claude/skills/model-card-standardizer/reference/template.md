@@ -1,10 +1,8 @@
 <!--
-Status: PROPOSED, not finalized. Scoped in a comment on DEVSTACK-447
-(https://tenstorrent.atlassian.net/browse/DEVSTACK-447, comment id 670207),
-derived from surveying 10 of the ~50 live tt-model catalog cards plus the
-GA freeze doc. Four open questions were logged on that ticket (tt-cli
+Status: PROPOSED, not finalized. Scoped by the DX team, derived from surveying 10 of the ~50 live tt-model catalog cards plus the
+GA freeze doc. Four open questions were logged internally (tt-cli
 readiness, license-as-manifest-field, where whitelist status lives, who
-retrofits the existing catalog) — re-check the ticket before treating any
+retrofits the existing catalog) — re-check with the team before treating any
 section below as settled. Do not silently drift this file out of sync with
 the ticket; if the ticket's template changes, update this file to match.
 
