@@ -158,8 +158,6 @@ daemon failed to serve with an opaque docker error. Re-pull the image by
 digest when it is missing instead.
 ```
 
-(Name the model that actually wrote the commit, e.g. `Claude Opus 4.8`.)
-
 ### 9. Push and open a draft PR against main
 
 ```bash
