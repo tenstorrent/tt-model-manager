@@ -26,7 +26,8 @@ jobs:
       max-parallel: 1
       matrix:
         model:
-          - mando2222/llama-3.2-3b-blackhole-v51
+          - stisiTT/smollm2-135m-instruct-p150
+          - stisiTT/llama-3.2-3b-blackhole-v51
           - stisiTT/gemma-4-12b-it-p150
           - Adartras/qwen3.6-a3b-blackhole
     env:
@@ -87,8 +88,19 @@ jobs:
           echo "PULL_S=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
           "$RUNNER_TEMP/disk.sh" "after pull"
 
+      # The same checks the author's `docker build` ran: every image keeps /ctx/verify.sh,
+      # generated from the launcher's checks plus the manifest's own `verify:` list.
+      - name: Package's own checks (verify.sh)
+        id: verify
+        run: |
+          img="$(uv run python -c "import sys; from tt_kernel import container, container_cli; m = container_cli.load_pulled(sys.argv[1]); print(container.image_ref(m))" "$MODEL")"
+          echo "image: $img"
+          docker run --rm --network none --entrypoint bash "$img" /ctx/verify.sh
+
+      # Serve even if verify failed, so one run still reports how far the model gets.
       - name: Serve (returns once the engine is ready)
         id: serve
+        if: ${{ !cancelled() && steps.pull.outcome == 'success' }}
         run: |
           start=$(date +%s)
           uv run tt-model serve "$MODEL" --no-update-check
@@ -97,18 +109,29 @@ jobs:
 
       - name: Test request
         id: curl
+        if: ${{ !cancelled() && steps.serve.outcome == 'success' }}
         run: |
           # No no_proxy workaround: tt-model itself must bypass the runner's proxy for localhost.
           echo "::group::proxy settings"; env | grep -i '_proxy=' || echo "no proxy vars"; echo "::endgroup::"
           [ -n "${http_proxy:-$HTTP_PROXY}" ] || { echo "::error::No proxy set, so this run can't test the proxy fix"; exit 1; }
           case ",${no_proxy},${NO_PROXY}," in *localhost*|*127.0.0.1*)
             echo "::error::no_proxy already covers localhost, so this run can't test the proxy fix"; exit 1;; esac
+          # Thinking off and temperature 0, so a reasoning model answers inside the token
+          # budget and the answer is deterministic. Templates without the flag ignore it.
           start=$(date +%s)
-          out="$(uv run tt-model curl "What is the capital of France? Answer in one word.")"
+          out="$(uv run tt-model curl "What is the capital of France? Answer in one word." \
+            --max-tokens 256 --temperature 0 --chat-template-kwargs '{"enable_thinking": false}')"
           echo "FIRST_REPLY_S=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
           echo "$out"
-          [ -n "$(echo "$out" | tr -d '[:space:]')" ] || { echo "::error::Empty reply"; exit 1; }
-          { echo; echo '**Reply:**'; echo '```'; echo "$out" | head -40; echo '```'; } >> "$RUNNER_TEMP/reply.md"
+          answer="$(printf '%s' "$out" | python3 -c 'import json, sys
+          d = json.load(sys.stdin)["choices"][0]
+          print((d["message"].get("content") or "").strip(), "| finish:", d["finish_reason"])')"
+          { echo; echo "**Answer:** \`$answer\`"; } >> "$RUNNER_TEMP/reply.md"
+          echo "answer: $answer"
+          case "$(printf '%s' "${answer%% | finish:*}" | tr '[:upper:]' '[:lower:]')" in
+            *paris*) echo "REPLY_OK=yes" >> "$GITHUB_ENV" ;;
+            *) echo "::error::Expected an answer containing 'Paris', got: $answer"; exit 1 ;;
+          esac
 
       - name: Logs and stop
         if: always()
@@ -129,8 +152,9 @@ jobs:
             echo "|---|---|---|"
             echo "| Preflight | ${{ steps.preflight.outcome }} | |"
             echo "| Pull + weights | ${{ steps.pull.outcome }} | ${PULL_S:-n/a} s |"
+            echo "| Package's own checks | ${{ steps.verify.outcome }} | |"
             echo "| Serve to ready | ${{ steps.serve.outcome }} | ${BOOT_S:-n/a} s |"
-            echo "| Test request | ${{ steps.curl.outcome }} | ${FIRST_REPLY_S:-n/a} s |"
+            echo "| Test request (answer contains Paris) | ${{ steps.curl.outcome }} | ${FIRST_REPLY_S:-n/a} s |"
             echo
             if [ -f "$RESULTS" ]; then cat "$RESULTS"; fi
             if [ -f "$RUNNER_TEMP/reply.md" ]; then cat "$RUNNER_TEMP/reply.md"; fi
