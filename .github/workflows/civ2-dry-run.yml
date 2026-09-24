@@ -41,7 +41,11 @@ jobs:
           echo "::group::disk after: $label"
           df -h "$GITHUB_WORKSPACE" "$HOME" "$droot" 2>/dev/null
           du -sh "${HF_HOME:-$HOME/.cache/huggingface}" 2>/dev/null || true
-          (du -sh "$droot" 2>/dev/null || sudo -n du -sh "$droot" 2>/dev/null) || echo "docker root not readable: $droot"
+          # Docker here uses the containerd snapshotter, so image layers live under
+          # /var/lib/containerd, not the Docker root dir.
+          for d in "$droot" /var/lib/containerd; do
+            sudo -n du -sh "$d" 2>/dev/null || du -sh "$d" 2>/dev/null || echo "not readable: $d"
+          done
           echo "::endgroup::"
           used="$(df -BG --output=used "$HOME" | tail -1 | tr -dc 0-9)"
           avail="$(df -BG --output=avail "$HOME" | tail -1 | tr -dc 0-9)"
@@ -84,6 +88,12 @@ jobs:
       - name: Test request
         id: curl
         run: |
+          # The runner routes HTTP through a proxy; without this, Python's urllib sends
+          # the request for localhost to the proxy instead of the local server.
+          echo "::group::proxy settings"; env | grep -i '_proxy=' || echo "no proxy vars"; echo "::endgroup::"
+          export NO_PROXY="${NO_PROXY:+$NO_PROXY,}localhost,127.0.0.1"
+          export no_proxy="${no_proxy:+$no_proxy,}localhost,127.0.0.1"
+          echo "direct probe:"; curl -sS --noproxy '*' --max-time 10 http://127.0.0.1:20000/v1/models | head -c 400; echo
           start=$(date +%s)
           out="$(uv run tt-model curl "What is the capital of France? Answer in one word.")"
           echo "FIRST_REPLY_S=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
@@ -113,6 +123,6 @@ jobs:
             echo "| Serve to ready | ${{ steps.serve.outcome }} | ${BOOT_S:-n/a} s |"
             echo "| Test request | ${{ steps.curl.outcome }} | ${FIRST_REPLY_S:-n/a} s |"
             echo
-            [ -f "$RESULTS" ] && cat "$RESULTS"
-            [ -f "$RUNNER_TEMP/reply.md" ] && cat "$RUNNER_TEMP/reply.md"
+            if [ -f "$RESULTS" ]; then cat "$RESULTS"; fi
+            if [ -f "$RUNNER_TEMP/reply.md" ]; then cat "$RUNNER_TEMP/reply.md"; fi
           } >> "$GITHUB_STEP_SUMMARY"
