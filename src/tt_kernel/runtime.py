@@ -87,6 +87,20 @@ DEFAULT_PROMPT = "Say hello in one sentence."
 DEFAULT_MAX_TOKENS = 64
 
 
+def _is_loopback(base_url: str) -> bool:
+    """True when ``base_url`` names this machine, whose server no proxy can reach."""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    host = urlsplit(base_url).hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def list_models(base_url: str, *, timeout: float = 5.0) -> List[str]:
     """The model ids an OpenAI-compatible server currently serves (``GET /v1/models``).
 
@@ -100,8 +114,10 @@ def list_models(base_url: str, *, timeout: float = 5.0) -> List[str]:
     import urllib.request
 
     url = base_url.rstrip("/") + "/v1/models"
+    # urllib honours http_proxy even for localhost unless no_proxy lists it.
+    handlers = [urllib.request.ProxyHandler({})] if _is_loopback(base_url) else []
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 — localhost probe
+        with urllib.request.build_opener(*handlers).open(url, timeout=timeout) as resp:  # noqa: S310
             payload = _json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError):
         return []
@@ -180,6 +196,7 @@ def curl_argv(base_url: str, payload: dict) -> List[str]:
 
     return [
         "curl", "-sS", base_url.rstrip("/") + "/v1/chat/completions",
+        *(["--noproxy", "*"] if _is_loopback(base_url) else []),
         "-H", "Content-Type: application/json",
         "-d", _json.dumps(payload),
     ]
