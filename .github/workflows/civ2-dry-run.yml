@@ -1,0 +1,116 @@
+# Test branch only (MINFRA-1863): serve one real container package on a CIv2 Blackhole
+# runner and record how much of the runner's 100 GB disk it uses. Not meant to merge.
+# Push-triggered because workflow_dispatch only exists once a workflow is on main, and a
+# push trigger keeps fork PRs of this public repo off the self-hosted runner.
+name: civ2-dry-run
+
+on:
+  push:
+    branches: ["stisi/test-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: civ2-dry-run
+  cancel-in-progress: false
+
+jobs:
+  dry-run:
+    runs-on: tt-ubuntu-2204-p150b-stable
+    timeout-minutes: 240
+    env:
+      MODEL: Adartras/qwen3.6-a3b-blackhole
+      TT_MODEL_READY_TIMEOUT: "7200"
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      RESULTS: ${{ runner.temp }}/results.md
+    steps:
+      - uses: actions/checkout@v4
+
+      # No job `container:` on purpose: a v5.1 package runs `docker run` itself, so this
+      # needs the runner's own Docker daemon and /dev/tenstorrent. Fail fast if either is missing.
+      - name: Preflight (devices, docker, disk)
+        id: preflight
+        run: |
+          cat > "$RUNNER_TEMP/disk.sh" <<'EOF'
+          #!/usr/bin/env bash
+          label="$1"
+          droot="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo unknown)"
+          echo "::group::disk after: $label"
+          df -h "$GITHUB_WORKSPACE" "$HOME" "$droot" 2>/dev/null
+          du -sh "${HF_HOME:-$HOME/.cache/huggingface}" 2>/dev/null || true
+          (du -sh "$droot" 2>/dev/null || sudo -n du -sh "$droot" 2>/dev/null) || echo "docker root not readable: $droot"
+          echo "::endgroup::"
+          used="$(df -BG --output=used "$HOME" | tail -1 | tr -dc 0-9)"
+          avail="$(df -BG --output=avail "$HOME" | tail -1 | tr -dc 0-9)"
+          echo "| $label | ${used} GB used | ${avail} GB free |" >> "$RESULTS"
+          EOF
+          chmod +x "$RUNNER_TEMP/disk.sh"
+          printf '| Stage | Home disk used | Home disk free |\n|---|---|---|\n' > "$RESULTS"
+
+          echo "::group::host"; uname -a; nproc; free -g; echo "::endgroup::"
+          ls -l /dev/tenstorrent || { echo "::error::No /dev/tenstorrent on this runner"; exit 1; }
+          docker info || { echo "::error::No usable Docker daemon on the runner. A v5.1 package needs one; ask CI infra whether CIv2 runners expose Docker to the job."; exit 1; }
+          echo "docker root: $(docker info --format '{{.DockerRootDir}}')"
+          "$RUNNER_TEMP/disk.sh" "start"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.26"
+          enable-cache: true
+
+      - name: Install tt-model
+        run: uv sync --locked && uv run tt-model --help > /dev/null
+
+      - name: Pull package and weights
+        id: pull
+        run: |
+          start=$(date +%s)
+          uv run tt-model pull "$MODEL" --with-weights
+          echo "PULL_S=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/disk.sh" "after pull"
+
+      - name: Serve (returns once the engine is ready)
+        id: serve
+        run: |
+          start=$(date +%s)
+          uv run tt-model serve "$MODEL" --no-update-check
+          echo "BOOT_S=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/disk.sh" "after serve"
+
+      - name: Test request
+        id: curl
+        run: |
+          start=$(date +%s)
+          out="$(uv run tt-model curl "What is the capital of France? Answer in one word.")"
+          echo "FIRST_REPLY_S=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
+          echo "$out"
+          [ -n "$(echo "$out" | tr -d '[:space:]')" ] || { echo "::error::Empty reply"; exit 1; }
+          { echo; echo '**Reply:**'; echo '```'; echo "$out" | head -40; echo '```'; } >> "$RUNNER_TEMP/reply.md"
+
+      - name: Logs and stop
+        if: always()
+        run: |
+          echo "::group::server logs (tail)"
+          uv run tt-model logs "$MODEL" 2>&1 | tail -200 || true
+          echo "::endgroup::"
+          uv run tt-model stop "$MODEL" || true
+          [ -x "$RUNNER_TEMP/disk.sh" ] && "$RUNNER_TEMP/disk.sh" "end" || true
+
+      - name: Results summary
+        if: always()
+        run: |
+          {
+            echo "## CIv2 dry run: $MODEL"
+            echo
+            echo "| Step | Outcome | Time |"
+            echo "|---|---|---|"
+            echo "| Preflight | ${{ steps.preflight.outcome }} | |"
+            echo "| Pull + weights | ${{ steps.pull.outcome }} | ${PULL_S:-n/a} s |"
+            echo "| Serve to ready | ${{ steps.serve.outcome }} | ${BOOT_S:-n/a} s |"
+            echo "| Test request | ${{ steps.curl.outcome }} | ${FIRST_REPLY_S:-n/a} s |"
+            echo
+            [ -f "$RESULTS" ] && cat "$RESULTS"
+            [ -f "$RUNNER_TEMP/reply.md" ] && cat "$RUNNER_TEMP/reply.md"
+          } >> "$GITHUB_STEP_SUMMARY"
