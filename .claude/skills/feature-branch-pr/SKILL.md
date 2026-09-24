@@ -81,6 +81,9 @@ happens to be checked out.
   unrelated renames, no dependency bumps "while we're here."
 - If two approaches would both work, take the more minimal one — fewer files,
   fewer lines, less new machinery.
+- **Brief comments, lean code** (AGENTS.md → Code style): one-line comments
+  only where the code isn't self-evident; put the long *why* in the commit
+  message. No verbose or defensive code.
 - **Reuse, don't reinvent**: extend `hub.py`, `runtime.py`, `packaging.py`,
   `manifest.py`, `metal.py`/`device.py`, `localdb.py` rather than adding
   parallel code paths.
@@ -142,8 +145,10 @@ No wheels or large binaries in git, no local scratch dirs, no `.env`.
 ### 8. Commit
 
 Imperative subject (this repo uses Conventional-Commits-style subjects:
-`fix(hub): …`, `feat(serve): …`, `docs: …`), a short body explaining *why*,
-and — per AGENTS.md — end with the trailer:
+`fix(hub): …`, `feat(serve): …`, `docs: …`), a body explaining *why*.
+The rationale belongs here, not in code comments. **No attribution** — no
+`Co-Authored-By` trailer, no "Generated with Claude Code", no mention of
+Claude or Anthropic in commits or the PR:
 
 ```
 fix(serve): repair a pulled package whose image was deleted
@@ -151,11 +156,7 @@ fix(serve): repair a pulled package whose image was deleted
 A pulled v5.1 package whose container image was removed from the local
 daemon failed to serve with an opaque docker error. Re-pull the image by
 digest when it is missing instead.
-
-Co-Authored-By: Claude <model name> <noreply@anthropic.com>
 ```
-
-(Name the model that actually wrote the commit, e.g. `Claude Opus 4.8`.)
 
 ### 9. Push and open a draft PR against main
 
@@ -168,8 +169,8 @@ gh pr create --draft --base main \
 
 PR body: a few plain sentences on what changed and why, the test evidence
 (e.g. "full suite: 142 passed"), hardware validation result if applicable,
-and a link to the tracking issue if one applies. Short and human — no walls
-of text. Example:
+and a link to the tracking issue if one applies. Brief, plain, simple English —
+short sentences, no jargon, no walls of text. Example:
 
 ```
 Serving a pulled v5.1 package failed with an opaque docker error when the
