@@ -21,7 +21,13 @@ import typer
 from typer.core import TyperGroup
 
 from . import console
-from . import MANIFEST_NAME, TT_MODEL_CATALOG_TAG, TT_MODEL_TAG, __version__
+from . import (
+    MANIFEST_NAME,
+    TT_MODEL_CATALOG_TAG,
+    TT_MODEL_TAG,
+    TT_ORG,
+    __version__,
+)
 from . import (
     auth, compat, container, hub, localdb, metal,
     packaging, runtime,
@@ -1822,6 +1828,150 @@ def unpublish(
     console.milestone(
         f"delisted {repo_id} from the community catalog (it drops off on the next crawl) "
         "— the repo and its content are unchanged"
+    )
+    # No whitelist advisory here: a Tenstorrent copy is its own repo, so delisting the
+    # original has no bearing on it. That independence is the point of the design.
+
+
+# --------------------------------------------------------------------- whitelist
+def _review_target(manifest) -> Optional[str]:
+    """The `Tenstorrent/<name>` a bundle would be copied to, or None if undecidable.
+
+    Named after the WEIGHTS repo, not the bundle: that is the team's convention and it
+    yields the canonical model name (`Tenstorrent/Qwen3-32B`) rather than an author's
+    packaging slug (`someone/qwen3-32b-blackhole-v51`).
+    """
+    weights = getattr(manifest, "weights", None)
+    repo = getattr(weights, "repo_id", None)
+    if not repo or "/" not in repo:
+        return None
+    return f"{TT_ORG}/{repo.split('/')[-1]}"
+
+
+@app.command(rich_help_panel="Publish models")
+def whitelist(
+    repo_id: str = typer.Argument(..., help="A LISTED bundle as namespace/name."),
+) -> None:
+    """Copy a reviewed bundle into the Tenstorrent org (DX-team reviewers).
+
+    The whitelist is the curated subset of the community catalog: bundles we have looked
+    at and expect to work on the hardware they claim, so a developer does not have to
+    sift through everything published. Whitelisting IS the copy — a bundle under
+    ``Tenstorrent/`` is reviewed by definition, because only the DX team can write there.
+    An author cannot grant it to themselves, which is what a tag on their own repo could
+    never prevent.
+
+    The copy is server-side, so no bundle data moves, and the author's repo is never
+    touched. The copy records what it came from and is a snapshot of that revision:
+    later commits to the original are not covered.
+
+    The bundle must already be listed (``tt-model publish``) and public. Listing is the
+    AUTHOR's decision and this command never makes it for them.
+    """
+    import datetime as _dt
+
+    state = _hub(lambda: hub.repo_state(repo_id), repo_id, what="Whitelist")
+    if TT_MODEL_CATALOG_TAG not in state.tags:
+        raise _err(
+            f"{repo_id} is not in the community catalog, so it cannot be whitelisted.\n"
+            "  The whitelist is a curated SUBSET of the catalog — listing is the author's\n"
+            "  decision, review is ours. Ask them to run: tt-model publish " + repo_id
+        )
+    if state.private:
+        raise _err(
+            f"{repo_id} is private, so it cannot be whitelisted — a reviewed bundle must be\n"
+            "  one consumers can discover. The author can make it public with: "
+            f"tt-model publish {repo_id}"
+        )
+    me = auth.whoami()
+    if not me:
+        raise _err("Not logged in to Hugging Face — run `tt-model login` first (the copy "
+                   "records who reviewed it).")
+    reviewer = str(me.get("name") or me.get("fullname") or "?")
+    source = state.repo_id or repo_id  # the Hub's own casing, for the recorded source
+
+    manifest = _hub(lambda: hub.fetch_manifest(repo_id, None), repo_id, what="Whitelist")
+    target = _review_target(manifest)
+    if not target:
+        raise _err(
+            f"{repo_id} names no weights repo in its manifest, so there is no name to copy\n"
+            f"  it to — the convention is {TT_ORG}/<the weights repo's name>."
+        )
+
+    if not state.sha:
+        # Not fatal: the review is still a valid statement about the bundle. But say so —
+        # the recorded revision is what tells a later reader which commit was reviewed.
+        console.note(
+            f"the Hub did not report a head commit for {repo_id}, so the copy will record "
+            "no source revision",
+            marker="!", style="warning",
+        )
+
+    # Existing target: either this is a half-finished run to resume, or it is a different
+    # bundle's copy and the name has collided. Never overwrite the latter — a reviewed
+    # artifact someone may be relying on is not ours to replace silently.
+    already = None
+    if _hub(lambda: hub.repo_exists(target), target, what="Whitelist"):
+        review = _hub(lambda: hub.read_review(target), target, what="Whitelist") or {}
+        recorded = review.get(hub.REVIEW_SOURCE_KEY)
+        if recorded and str(recorded).lower() == source.lower():
+            already = recorded
+            console.note(
+                f"{target} already records {source} — re-recording the review rather than "
+                "copying again",
+                marker="○", style="muted",
+            )
+        else:
+            raise _err(
+                f"{target} already exists" + (f", copied from {recorded}" if recorded else "")
+                + f", so {repo_id} cannot take that name.\n"
+                f"  The name comes from the weights repo, so two bundles of the same model\n"
+                f"  collide here. Withdraw the other copy first (tt-model unwhitelist\n"
+                f"  {target}) if it should be replaced, or agree a suffix with the team."
+            )
+
+    if already is None:
+        _hub(lambda: hub.duplicate_into_org(repo_id, target), repo_id, what="Whitelist",
+             consequence=f"nothing was copied into {TT_ORG}")
+    reviewed_at = (
+        _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
+    _hub(lambda: hub.annotate_review(target, source=source, revision=state.sha,
+                                     reviewer=reviewer, reviewed_at=reviewed_at),
+         target, what="Whitelist",
+         consequence=f"{target} exists but carries no review record — re-run to finish")
+    # Explicit rather than relying on the copy inheriting the tag: a source that was
+    # public-but-unlisted would otherwise produce a copy nobody can find.
+    _hub(lambda: hub.set_catalog_listing(target, listed=True), target, what="Whitelist")
+
+    console.milestone(
+        f"{'re-recorded' if already else 'copied'} {source} to {target} as reviewed by "
+        f"Tenstorrent" + (f" (at {state.sha[:9]})" if state.sha else "")
+        + f" — it supersedes {source} in `tt model list --community`; undo with "
+        f"`tt-model unwhitelist {target}`"
+    )
+
+
+@app.command(rich_help_panel="Publish models")
+def unwhitelist(
+    repo_id: str = typer.Argument(..., help=f"A {TT_ORG}/... copy to withdraw."),
+) -> None:
+    """Withdraw a Tenstorrent copy from the catalog. The copy itself is kept.
+
+    Delists rather than deletes: the reviewed snapshot stays where anyone who pinned it
+    can still reach it, and the original reappears in listings. Delete the repo by hand
+    on the Hub if it should be gone entirely.
+    """
+    if repo_id.split("/", 1)[0].lower() != TT_ORG.lower():
+        raise _err(
+            f"{repo_id} is not a {TT_ORG} copy.\n"
+            f"  Pass the copy's id — the {TT_ORG}/... repo shown in `tt model list\n"
+            "  --community` — not the community bundle it was made from."
+        )
+    _hub(lambda: hub.set_catalog_listing(repo_id, listed=False), repo_id, what="Unwhitelist")
+    console.milestone(
+        f"withdrew {repo_id} from the community catalog — the repo and its reviewed "
+        "content are unchanged, and the bundle it was copied from reappears in listings"
     )
 
 
