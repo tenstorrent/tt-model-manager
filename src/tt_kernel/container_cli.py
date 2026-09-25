@@ -16,6 +16,7 @@ looks like the rest of the tool. The modules underneath (``build``, ``container`
 from __future__ import annotations
 
 import errno
+import re
 import shlex
 import shutil
 import tempfile
@@ -179,17 +180,66 @@ def is_package_dir(path: Path) -> Optional[Manifest]:
     return m if m.is_container else None
 
 
+# The generated Quickstart's command lines, anchored on the COMMAND, not the repo that
+# happens to be on them. `render_model_card` emits four (two `tt` CLI, two `tt-model`):
+#     tt model pull <repo>
+#     tt serve <repo>
+#     tt-model pull  <repo> --with-weights
+#     tt-model serve <repo>
+# Anchoring on the old repo instead (an earlier version of this fix) only worked for the
+# FIRST redirected push: `built.repo` never moves, so once the card no longer literally
+# contains it every later push matched nothing and silently did nothing — #109 again, and
+# worse when a plain push after a redirected one left the canonical repo's card naming
+# someone else's repo (thanks @anirudTT for catching this). The command prefix is fixed, so
+# the swap works no matter what repo is currently on the line and is idempotent by nature.
+# The `\S+/\S+` (a `namespace/name`) means a stray prose line like `tt serve is fast` is not
+# mistaken for a command — a repo id always has exactly one slash, prose words do not.
+_QUICKSTART_CMD = re.compile(
+    r"(?m)^(tt model pull |tt serve |tt-model pull  |tt-model serve )(\S+/\S+)"
+)
+
+
+def _repoint_card_quickstart(readme: Path, new_repo: str) -> bool:
+    """Point the card's Quickstart command lines at ``new_repo``; True if the file changed.
+
+    ``render_model_card`` bakes the manifest's repo into those lines at PACKAGE time, before
+    any ``push --repo`` override is known, so a push to a different repo would otherwise
+    publish a card telling the reader to pull a repo that is not there (issue #109). This
+    realigns them with wherever the bytes are actually going.
+
+    It rewrites the generated command lines above; ``card.description`` and an author's
+    appended ``card.quickstart`` are prose that may also name a repo, and those are left
+    alone. A no-op (the lines already name ``new_repo``, or the card is absent) returns False.
+    """
+    if not readme.is_file():
+        return False
+    text = readme.read_text()
+    swapped = _QUICKSTART_CMD.sub(lambda mo: mo.group(1) + new_repo, text)
+    if swapped == text:
+        return False
+    readme.write_text(swapped)
+    return True
+
+
 def push_container(staged_dir: str, manifest: Manifest, repo_id: str) -> None:
     """Upload a staged container package directory to the Hub.
 
-    The caller owns repo creation and visibility (``_ensure_repo`` in the CLI), so this
-    only moves bytes. The model card is already written into the directory by ``package``
-    and carries its own tags, so nothing here rewrites it — ``tag_repo`` would clobber it.
+    The caller owns repo creation and visibility (``_ensure_repo`` in the CLI), so this only
+    moves bytes and does not touch the card's tags — ``tag_repo`` would clobber them. It does
+    repoint the card's Quickstart to ``repo_id`` when a ``push --repo`` sends the package to a
+    repo other than the one it was packaged for, so the published card names where it actually
+    lives rather than the authored source (issue #109).
     """
     out = Path(staged_dir)
     image_dir = out / "image"
     spec = manifest.container
     assert spec is not None
+
+    # Rendered at package time with the manifest's repo; realign it with the real target.
+    # Anchored on the command, not the old repo, so it is correct on every push — including a
+    # plain push after a redirected one, which must restore the canonical repo's own name.
+    if _repoint_card_quickstart(out / "README.md", repo_id):
+        console.note(f"repointed the card's quickstart to {repo_id}", marker="•")
 
     if spec.image.is_hub_hosted:
         if not (image_dir / "oci-layout").is_file():
