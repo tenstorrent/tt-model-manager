@@ -90,5 +90,6 @@ Flags per format: [container_packages.md](container_packages.md) (v5.1) and
 
 ```bash
 tt-model rm      you/mymodel                        # remove an installed bundle and its index entry
+tt-model rm      --all [--include-weights]          # remove every installed bundle (asks first; -y to skip)
 tt-model version                                    # print the installed tt-model version
 ```
