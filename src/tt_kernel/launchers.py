@@ -84,6 +84,25 @@ def _weights_id(m: Manifest) -> str:
     return m.weights.repo_id
 
 
+def _revision_argv(m: Manifest) -> List[str]:
+    """``--revision``/``--tokenizer-revision`` for the weights pin, or nothing.
+
+    ``pull`` downloads exactly ``weights.revision`` (see ``_download_weights``), but vLLM is
+    handed the bare repo id and resolves it itself -- offline inside the container, that means
+    whatever ``refs/main`` in the shared HF cache points at. On a box where another bundle
+    left a different revision of the same repo behind, that is the WRONG snapshot (seen with
+    Qwen3.8-Flash-Next: an older, weight-less snapshot was served and the engine died on a
+    missing safetensors index). Pinning the launch to the same commit the pull fetched keeps
+    "the weights that were validated" and "the weights that load" the same object.
+    Emitted before the author's own args, so an explicit ``--revision`` in ``serve.args``
+    still wins (argparse last-wins).
+    """
+    rev = m.weights.revision if m.weights is not None else None
+    if not rev:
+        return []
+    return ["--revision", rev, "--tokenizer-revision", rev]
+
+
 class VllmPluginLauncher:
     """``kind: vllm-plugin`` — stock vLLM plus the standalone Tenstorrent platform plugin.
 
@@ -338,6 +357,7 @@ class VllmPluginLauncher:
 
     def serve_argv(self, m: Manifest, profile: ServeProfile) -> List[str]:
         argv = ["vllm", "serve", _weights_id(m)]
+        argv += _revision_argv(m)
         if profile.max_model_len is not None:
             argv += ["--max-model-len", str(profile.max_model_len)]
         argv += ["--max-num-seqs", str(profile.max_num_seqs)]
