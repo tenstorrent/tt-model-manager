@@ -2825,3 +2825,59 @@ def test_package_emits_the_card_warning_at_its_call_site(
     container_cli.package_container(str(tmp_path / "tt-model.yaml"))
     printed = capsys.readouterr().out
     assert ("the model card has no card." in printed) is warned, printed
+
+
+def _fake_snapshot(tmp_path, sha="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"):
+    snap = tmp_path / "hf" / "models--org--w" / "snapshots" / sha
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+    return snap
+
+
+def test_a_sha_pinned_download_gets_a_refs_main_pointer(tmp_path, monkeypatch):
+    """snapshot_download(revision=<sha>) leaves snapshots/<sha>/ and no refs/. The container
+    runs offline and names the weights by repo id, and vLLM 0.26 resolves that id through
+    snapshot_download before it parses its arguments, which offline needs refs/main, so the
+    serve died with LocalEntryNotFoundError over a complete cache (changh95/qwen3.8-27b-p150x2,
+    2026 Sep 25)."""
+    snap = _fake_snapshot(tmp_path)
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    monkeypatch.setattr(container_cli, "_download_weights", lambda ref, **kw: snap)
+    container_cli.ensure_weights(
+        _manifest(tmp_path, weights={"repo": "org/w", "revision": snap.name}), "org/m")
+    ref_file = snap.parent.parent / "refs" / "main"
+    assert ref_file.read_text() == snap.name
+
+
+def test_an_existing_refs_main_is_left_alone(tmp_path, monkeypatch):
+    """Which snapshot `main` names is the cache owner's business, not this download's."""
+    snap = _fake_snapshot(tmp_path)
+    refs = snap.parent.parent / "refs"
+    refs.mkdir()
+    (refs / "main").write_text("f" * 40)
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    monkeypatch.setattr(container_cli, "_download_weights", lambda ref, **kw: snap)
+    container_cli.ensure_weights(
+        _manifest(tmp_path, weights={"repo": "org/w", "revision": snap.name}), "org/m")
+    assert (refs / "main").read_text() == "f" * 40
+
+
+def test_already_cached_weights_get_the_pointer_on_the_offline_path(tmp_path, monkeypatch):
+    """`--local-only` and `--no-weights` never download, but the container they launch has
+    the same offline lookup to survive."""
+    snap = _fake_snapshot(tmp_path)
+    monkeypatch.setattr(container_cli, "_cached_locally", lambda ref: snap)
+    monkeypatch.setattr(container_cli, "has_partial_download", lambda ref: False)
+    container_cli.ensure_weights(
+        _manifest(tmp_path, weights={"repo": "org/w", "revision": snap.name}), "org/m",
+        local_only=True)
+    assert (snap.parent.parent / "refs" / "main").read_text() == snap.name
+
+
+def test_a_path_outside_an_hf_cache_layout_gets_no_pointer(tmp_path):
+    """Only a `snapshots/<sha>` directory is a cache entry; anything else is left untouched."""
+    other = tmp_path / "somewhere" / "weights"
+    other.mkdir(parents=True)
+    container_cli._ensure_default_ref(other)
+    assert not (tmp_path / "somewhere" / "refs").exists()
+    assert not (tmp_path / "refs").exists()

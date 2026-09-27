@@ -366,6 +366,31 @@ def _download_weights(ref, *, tqdm_class=None) -> Path:
     ))
 
 
+def _ensure_default_ref(snapshot: Path) -> None:
+    """Give a sha-pinned snapshot a ``refs/main`` pointer when the cache has none.
+
+    ``snapshot_download(revision=<sha>)`` writes ``snapshots/<sha>/`` and nothing under
+    ``refs/``: only a branch or tag revision leaves a ref behind. The container then runs
+    offline (``HF_HUB_OFFLINE=1``) and names the weights by repo id, and every loader that
+    resolves that id through ``snapshot_download`` (vLLM 0.26 does so before it even parses
+    its arguments) needs ``refs/main`` to find the snapshot, so it fails with
+    ``LocalEntryNotFoundError`` although every byte is on disk. Point ``main`` at the pinned
+    sha in that case. An existing ref is left alone: it is somebody else's cache state, and
+    which snapshot ``main`` names is not this function's to change.
+    """
+    snaps = snapshot.parent
+    if snaps.name != "snapshots" or not _safe_revision(snapshot.name):
+        return
+    ref_file = snaps.parent / "refs" / "main"
+    if ref_file.exists():
+        return
+    try:
+        ref_file.parent.mkdir(parents=True, exist_ok=True)
+        ref_file.write_text(snapshot.name)
+    except OSError:
+        return
+
+
 def _cached_locally(ref) -> Optional[Path]:
     """The cached snapshot for this pin, or None when nothing resolves offline.
 
@@ -696,11 +721,13 @@ def ensure_weights(manifest: Manifest, target: Optional[str], *,
         # The one place a local verdict is still needed, because fetching is off the table.
         # `.incomplete` blobs are checked too: a resolvable-but-partial snapshot would
         # otherwise read as present and cost the user the warning.
-        if _cached_locally(ref) is None or has_partial_download(ref):
+        cached = _cached_locally(ref)
+        if cached is None or has_partial_download(ref):
             if pinned and not no_weights:
                 raise _weights_incomplete_error(ref, target, pinned)
             _weights_notice(manifest, target)
         else:
+            _ensure_default_ref(cached)
             console.note(f"weights {ref.repo_id}{at} already on host", marker="•")
         return
 
@@ -717,7 +744,9 @@ def ensure_weights(manifest: Manifest, target: Optional[str], *,
         # `hub.download_bundle` gets. Without it this download writes bars straight to the
         # terminal, on top of whatever else owns the line.
         with console.step(label) as st, hub.progress_bridge(label) as tqdm_class:
-            st.detail(str(_download_weights(ref, tqdm_class=tqdm_class)))
+            snapshot = _download_weights(ref, tqdm_class=tqdm_class)
+            _ensure_default_ref(snapshot)
+            st.detail(str(snapshot))
     except Exception as e:  # noqa: BLE001
         _weights_failed(ref, e, target, pinned=pinned)
 
