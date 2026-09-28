@@ -187,7 +187,7 @@ def test_render_run_sh_prefetches_pinned_target_and_auxiliary_weights():
         weights=WeightsRef(repo="org/model", revision=revision),
         env={"TT_AUXILIARY_WEIGHTS": "org/drafter@dedf8df68adfb1afeaf7b7480c0a0243108177b4"},
     ))
-    assert f'export HF_MODEL_REVISION="${{HF_MODEL_REVISION:-{revision}}}"' in run
+    assert f'export TT_MODEL_WEIGHTS_REVISION="${{TT_MODEL_WEIGHTS_REVISION:-{revision}}}"' in run
     assert "snapshot_download(" in run
     assert '"${TT_AUXILIARY_WEIGHTS:-}"' in run
     assert 'export MODEL_WEIGHTS_DIR="$resolved_hf_model"' in run
