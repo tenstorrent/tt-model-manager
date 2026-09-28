@@ -181,6 +181,19 @@ def test_render_run_sh_single_chip_omits_additional_config():
     assert "--additional-config" not in run
 
 
+def test_render_run_sh_prefetches_pinned_target_and_auxiliary_weights():
+    revision = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    run = packaging.render_run_sh(_run_sh_manifest(
+        weights=WeightsRef(repo="org/model", revision=revision),
+        env={"TT_AUXILIARY_WEIGHTS": "org/drafter@dedf8df68adfb1afeaf7b7480c0a0243108177b4"},
+    ))
+    assert f'export HF_MODEL_REVISION="${{HF_MODEL_REVISION:-{revision}}}"' in run
+    assert "snapshot_download(" in run
+    assert '"${TT_AUXILIARY_WEIGHTS:-}"' in run
+    assert 'export MODEL_WEIGHTS_DIR="$resolved_hf_model"' in run
+    assert run.index("resolved_hf_model=") < run.index('exec "${CMD[@]}"')
+
+
 def test_render_run_sh_no_tool_flags_without_capability():
     """No tool_parser declared => neither flag appears (bare --enable-auto-tool-choice is an error)."""
     run = packaging.render_run_sh(_run_sh_manifest())
@@ -274,6 +287,8 @@ def test_stage_package_layout(tmp_path):
     # HERMETIC INSTALL: the interpreter lives inside the folder; venv is relocatable + copy-linked.
     inst = (staged / "install.sh").read_text()
     assert 'UV_PYTHON_INSTALL_DIR="$HERE/.python"' in inst
+    assert 'UV_PYTHON_BIN_DIR="$HERE/.python/bin"' in inst
+    assert 'UV_CACHE_DIR="$HERE/.uv-cache"' in inst
     assert "uv python install" in inst
     assert "uv venv --relocatable" in inst
     assert "--link-mode=copy" in inst

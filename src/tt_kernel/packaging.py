@@ -444,6 +444,39 @@ printf 'validated SFPI %s[%s] at %s\n' "$sfpi_version" "$sfpi_build" "$selected_
 '''
 
 
+def _render_vllm_metadata_override(overrides_path: str) -> str:
+    """Make vLLM's installed dependency metadata match the intentional TT override.
+
+    vLLM 0.26 declares OpenCV >=4.13, whose wheels require numpy>=2, while TTNN 0.79 requires
+    numpy<2. The empty-target TT runtime deliberately installs OpenCV 4.11 from the authored
+    override file. Reconcile the installed metadata to that exact pin so dependency auditing
+    reflects the runnable environment instead of retaining an impossible upstream GPU constraint.
+    """
+    return f'''"$PYBIN" -I - "$HERE/{overrides_path}" <<'PY'
+import importlib.metadata
+import re
+import sys
+from pathlib import Path
+
+override_lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+opencv = [line.strip() for line in override_lines if line.strip().startswith("opencv-python-headless==")]
+if len(opencv) != 1:
+    raise SystemExit("expected one exact opencv-python-headless pin in the vLLM override file")
+metadata = Path(importlib.metadata.distribution("vllm")._path) / "METADATA"
+text = metadata.read_text(encoding="utf-8")
+text, count = re.subn(
+    r"^Requires-Dist: opencv-python-headless[^\\n]*$",
+    "Requires-Dist: " + opencv[0],
+    text,
+    flags=re.MULTILINE,
+)
+if count != 1:
+    raise SystemExit(f"expected one vLLM OpenCV requirement, found {{count}}")
+metadata.write_text(text, encoding="utf-8")
+print("reconciled vLLM dependency metadata with " + opencv[0])
+PY'''
+
+
 def render_install_sh(manifest: Manifest) -> str:
     """A reproducible, isolated installer built on **uv**.
 
@@ -521,6 +554,9 @@ def render_install_sh(manifest: Manifest) -> str:
             bundled = " ".join(f'"$HERE/{w}"' for w in d.wheels)
             find_links = f'--find-links "$HERE/{d.wheels_dir}" ' if d.wheels_dir else ""
             steps.append(f'{pip} {find_links}{bundled}')
+        if d.vllm is not None and d.vllm.overrides:
+            steps.append(_render_vllm_metadata_override(d.vllm.overrides))
+        steps.append('uv pip check --python "$PYBIN"')
         install = "\n".join(steps)
         deps_note = "v6 thin: ttnn/tt-metal-models (index) + empty-target vLLM + plugin/ops wheels (by path)"
     else:
@@ -601,10 +637,13 @@ if ! command -v uv >/dev/null 2>&1; then
   export PATH="$HERE/.uv:$PATH"
 fi
 
-# Keep the pinned interpreter INSIDE the bundle (not in uv's global ~/.local store), so the venv's
-# python resolves within the folder wall. python-build-standalone (what uv provisions) is
-# relocatable, so a --relocatable venv built against it stays self-contained.
+# Keep the interpreter, its executable links, and uv's potentially large build/download cache
+# INSIDE the bundle rather than silently filling the host's ~/.local and ~/.cache.  The cache is
+# installation-only and may be removed after a successful install; placing it here also makes the
+# installer obey the folder-wall claim above on space-constrained systems.
 export UV_PYTHON_INSTALL_DIR="$HERE/.python"
+export UV_PYTHON_BIN_DIR="$HERE/.python/bin"
+export UV_CACHE_DIR="$HERE/.uv-cache"
 uv python install "$PYVER"
 uv venv --relocatable --python "$PYVER" "$VENV"
 PYBIN="$VENV/bin/python"
@@ -664,14 +703,51 @@ export TT_METAL_VISIBLE_DEVICES
     extra_env = "".join(
         f'export {k}="{v}"\n' for k, v in author_env.items()
     )
-    # The tt_transformers adapter reads HF_MODEL from the env (not vLLM's --model), so export it.
-    hf_export = f'export HF_MODEL="${{HF_MODEL:-{weights}}}"\n' if weights else ""
-    # The pinned weights revision: vLLM gets it as flags, any other server reads it from the env.
+    # The tt_transformers adapter reads HF_MODEL from the env (not vLLM's --model).
+    hf_export = ""
     weights_rev = manifest.weights.revision if manifest.weights else None
-    if weights_rev:
-        hf_export += (
-            f'export {WEIGHTS_REVISION_ENV}="${{{WEIGHTS_REVISION_ENV}:-{weights_rev}}}"\n'
+    if weights:
+        hf_export = (
+            f'export HF_MODEL="${{HF_MODEL:-{weights}}}"\n'
+            f'export {WEIGHTS_REVISION_ENV}="${{{WEIGHTS_REVISION_ENV}:-{weights_rev or ""}}}"\n'
         )
+    weight_prefetch = ""
+    if weights and not is_dit_kind:
+        weight_prefetch = r'''# Resolve pinned weights before vLLM opens the device.
+resolved_hf_model="$("$PYBIN" - "$HF_MODEL" "${TT_MODEL_WEIGHTS_REVISION:-}" "${TT_AUXILIARY_WEIGHTS:-}" <<'PY'
+import os
+import re
+import sys
+from pathlib import Path
+
+from huggingface_hub import snapshot_download
+
+
+def resolve(spec, revision=""):
+    local = Path(spec).expanduser()
+    if local.is_dir():
+        return str(local.resolve())
+    if not revision and "@" in spec:
+        spec, revision = spec.rsplit("@", 1)
+    path = snapshot_download(
+        spec,
+        revision=revision or None,
+        local_files_only=os.environ.get("HF_HUB_OFFLINE") == "1",
+    )
+    if revision and re.fullmatch(r"[0-9a-fA-F]{40}", revision) and Path(path).name != revision:
+        raise SystemExit(f"resolved {spec} to {Path(path).name}, expected {revision}")
+    return path
+
+
+target = resolve(sys.argv[1], sys.argv[2])
+for auxiliary in filter(None, (item.strip() for item in sys.argv[3].split(","))):
+    resolve(auxiliary)
+print(target)
+PY
+)"
+export HF_MODEL="$resolved_hf_model"
+export MODEL_WEIGHTS_DIR="$resolved_hf_model"
+'''
     # The TT vLLM backend REQUIRES a supported batch size and a concrete block_size (its default
     # of 256 / None both fail), so always emit them — from the manifest's resources, with the
     # known-good tt_transformers defaults when unset.
@@ -789,7 +865,7 @@ if [ "${{TT_MODEL_PRINT:-0}}" = "1" ]; then
     "$LD_PRELOAD" "$TT_METAL_HOME" "$EXTRA_MODELS_DIR" "$MESH_DEVICE" "${{HF_MODEL:-}}" "${{CMD[*]}}"
   exit 0
 fi
-exec "${{CMD[@]}}"
+{weight_prefetch}exec "${{CMD[@]}}"
 """
 
 

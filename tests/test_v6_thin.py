@@ -118,6 +118,8 @@ def test_thin_install_sh_builds_venv_from_pins(tmp_path):
     staged, _ = _stage_thin(tmp_path)
     inst = (staged / "install.sh").read_text()
     assert "uv venv --relocatable" in inst and 'UV_PYTHON_INSTALL_DIR="$HERE/.python"' in inst
+    assert 'UV_PYTHON_BIN_DIR="$HERE/.python/bin"' in inst
+    assert 'UV_CACHE_DIR="$HERE/.uv-cache"' in inst
     assert "-r \"$HERE/requirements.txt\"" in inst   # installs from the pins
     assert "--no-index" not in inst                  # thin pulls ttnn/TTTv2 from the index
     assert "wheels/" not in inst                     # no embedded platform wheels
@@ -131,6 +133,18 @@ def test_thin_validates_exact_external_sfpi_before_vllm(tmp_path):
     assert "SFPI mismatch" in inst and "sfpi_version" in inst and "sfpi_build" in inst
     assert 'local_sfpi="$TTNN_DIR/runtime/sfpi"' in inst
     assert "system_sfpi=/opt/tenstorrent/sfpi" in inst
+
+
+def test_thin_reconciles_vllm_override_metadata_then_checks_environment(tmp_path):
+    staged, _ = _stage_thin(tmp_path)
+    inst = (staged / "install.sh").read_text()
+    reconcile = inst.index("reconciled vLLM dependency metadata")
+    plugin_install = inst.index('"$HERE/wheels/vllm_tt_plugin') if "vllm_tt_plugin" in inst else -1
+    check = inst.index('uv pip check --python "$PYBIN"')
+    assert reconcile > plugin_install
+    assert check > reconcile
+    assert "opencv-python-headless==" in inst
+    assert 'distribution("vllm")._path' in inst
 
 
 def test_thin_run_pins_runtime_root_and_revalidates_sfpi(tmp_path):
