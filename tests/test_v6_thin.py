@@ -10,6 +10,9 @@ wheel are published so requirements can pin real versions.
 """
 
 import json
+import shlex
+import subprocess
+import sys
 
 from typer.testing import CliRunner
 
@@ -118,6 +121,56 @@ def test_thin_install_sh_builds_venv_from_pins(tmp_path):
     assert "-r \"$HERE/requirements.txt\"" in inst   # installs from the pins
     assert "--no-index" not in inst                  # thin pulls ttnn/TTTv2 from the index
     assert "wheels/" not in inst                     # no embedded platform wheels
+
+
+def test_thin_validates_exact_external_sfpi_before_vllm(tmp_path):
+    staged, _ = _stage_thin(tmp_path)
+    inst = (staged / "install.sh").read_text()
+    assert inst.index('sfpi-version') > inst.index('-r "$HERE/requirements.txt"')
+    assert inst.index('sfpi-version') < inst.index("VLLM_TARGET_DEVICE=empty")
+    assert "SFPI mismatch" in inst and "sfpi_version" in inst and "sfpi_build" in inst
+    assert 'local_sfpi="$TTNN_DIR/runtime/sfpi"' in inst
+    assert "system_sfpi=/opt/tenstorrent/sfpi" in inst
+
+
+def test_thin_run_pins_runtime_root_and_revalidates_sfpi(tmp_path):
+    staged, _ = _stage_thin(tmp_path)
+    run = (staged / "run.sh").read_text()
+    assert 'export TT_METAL_RUNTIME_ROOT="$TTNN_DIR"' in run
+    assert run.index('export TT_METAL_RUNTIME_ROOT="$TTNN_DIR"') < run.index("sfpi-version")
+    assert run.index("sfpi-version") < run.index("LD_PRELOAD=")
+    assert 'export TT_METAL_CACHE="${TT_METAL_CACHE:-$HERE/.cache}"' in run
+
+
+def test_sfpi_gate_prefers_local_and_rejects_wrong_build(tmp_path):
+    """The rendered gate checks the same local-first path that TT-Metal will select."""
+    from tt_kernel.packaging import _render_sfpi_validation
+
+    ttnn_dir = tmp_path / "ttnn"
+    (ttnn_dir / "tt_metal").mkdir(parents=True)
+    (ttnn_dir / "tt_metal" / "sfpi-version").write_text(
+        "sfpi_version='7.78.0'\nsfpi_build='935'\n"
+    )
+    compiler = ttnn_dir / "runtime" / "sfpi" / "compiler" / "bin" / "riscv-tt-elf-g++"
+    compiler.parent.mkdir(parents=True)
+    (ttnn_dir / "runtime" / "sfpi" / "include").mkdir(parents=True)
+    (ttnn_dir / "runtime" / "sfpi" / "include" / "sfpi_lib.h").write_text("// test\n")
+    compiler.write_text("#!/bin/sh\necho 'riscv-tt-elf-g++ (tenstorrent/sfpi:7.60.0[704]) 15.1.0'\n")
+    compiler.chmod(0o700)
+    script = tmp_path / "gate.sh"
+    script.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        f"PYBIN={shlex.quote(sys.executable)}\nTTNN_DIR={shlex.quote(str(ttnn_dir))}\n"
+        + _render_sfpi_validation(discover_ttnn=False)
+    )
+    wrong = subprocess.run(["bash", str(script)], text=True, capture_output=True)
+    assert wrong.returncode != 0
+    assert "need 7.78.0[935]" in wrong.stderr and str(ttnn_dir / "runtime" / "sfpi") in wrong.stderr
+
+    compiler.write_text("#!/bin/sh\necho 'riscv-tt-elf-g++ (tenstorrent/sfpi:7.78.0[935]) 15.1.0'\n")
+    ok = subprocess.run(["bash", str(script)], text=True, capture_output=True)
+    assert ok.returncode == 0, ok.stderr
+    assert f"validated SFPI 7.78.0[935] at {ttnn_dir}/runtime/sfpi" in ok.stdout
 
 
 def test_thin_ships_plugin_and_ops_as_wheels_by_path(tmp_path):

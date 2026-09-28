@@ -384,6 +384,66 @@ def make_wheel_artifact(src: Path, rel_path: str) -> WheelArtifact:
     )
 
 
+def _render_sfpi_validation(*, discover_ttnn: bool) -> str:
+    """Render the exact SFPI compatibility gate required by an installed TTNN wheel.
+
+    SFPI is intentionally an external host dependency for schema-6 bundles. TT-Metal's runtime
+    selector accepts any compiler found under ``ttnn/runtime/sfpi`` or ``/opt/tenstorrent/sfpi``
+    without checking its version, so validate the same winning path before a JIT compile can fail
+    with opaque missing-API errors. ``PYBIN`` must name the bundle interpreter; ``TTNN_DIR`` may
+    already be available in run.sh.
+    """
+    discover = (
+        """TTNN_DIR="$("$PYBIN" -I -c 'import importlib.util,pathlib;s=importlib.util.find_spec("ttnn");assert s and s.origin;print(pathlib.Path(s.origin).resolve().parent)')"
+"""
+        if discover_ttnn else ""
+    )
+    return discover + r'''sfpi_requirements="$("$PYBIN" -I - "$TTNN_DIR/tt_metal/sfpi-version" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+values = {}
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    match = re.fullmatch(r"(sfpi_(?:version|build))='([0-9.]+)'", line)
+    if match:
+        values[match.group(1)] = match.group(2)
+if set(values) != {"sfpi_version", "sfpi_build"}:
+    raise SystemExit("invalid or incomplete TTNN sfpi-version metadata")
+print(values["sfpi_version"], values["sfpi_build"], sep="\t")
+PY
+)"
+IFS=$'\t' read -r sfpi_version sfpi_build <<<"$sfpi_requirements"
+local_sfpi="$TTNN_DIR/runtime/sfpi"
+system_sfpi=/opt/tenstorrent/sfpi
+if [ -e "$local_sfpi/compiler/bin/riscv-tt-elf-g++" ]; then
+  selected_sfpi="$local_sfpi"
+elif [ -e "$system_sfpi/compiler/bin/riscv-tt-elf-g++" ]; then
+  selected_sfpi="$system_sfpi"
+else
+  printf 'SFPI missing: TTNN requires %s[%s]; install the matching external host package\n' \
+    "$sfpi_version" "$sfpi_build" >&2
+  exit 1
+fi
+gxx="$selected_sfpi/compiler/bin/riscv-tt-elf-g++"
+test -x "$gxx" || { printf 'SFPI compiler is not executable: %s\n' "$gxx" >&2; exit 1; }
+test -r "$selected_sfpi/include/sfpi_lib.h" || {
+  printf 'SFPI headers are incomplete at %s\n' "$selected_sfpi" >&2
+  exit 1
+}
+actual="$($gxx --version | sed -n '1p')"
+case "$actual" in
+  *"tenstorrent/sfpi:${sfpi_version}[${sfpi_build}]"*) ;;
+  *)
+    printf 'SFPI mismatch at %s: need %s[%s], got: %s\n' \
+      "$selected_sfpi" "$sfpi_version" "$sfpi_build" "$actual" >&2
+    exit 1
+    ;;
+esac
+printf 'validated SFPI %s[%s] at %s\n' "$sfpi_version" "$sfpi_build" "$selected_sfpi"
+'''
+
+
 def render_install_sh(manifest: Manifest) -> str:
     """A reproducible, isolated installer built on **uv**.
 
@@ -421,6 +481,9 @@ def render_install_sh(manifest: Manifest) -> str:
         steps.append(
             f'{pip} {req_find_links}--extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{d.requirements}"'
         )
+        # Fail before the expensive vLLM build when the external SFPI compiler does not match the
+        # exact contract carried by the just-installed TTNN wheel.
+        steps.append(_render_sfpi_validation(discover_ttnn=True))
         # (2) vLLM core for the plugin: STOCK upstream vLLM built with VLLM_TARGET_DEVICE=empty (NOT
         # the CUDA `vllm` on PyPI). Mirrors tenstorrent/vllm-tt-plugin docs/install-vllm-tt.sh: install
         # vLLM's common deps under the TT override set (so ttnn's numpy<2 is not bumped by opencv),
@@ -523,8 +586,9 @@ def render_install_sh(manifest: Manifest) -> str:
 # HERMETIC INSTALL: everything the model needs to SERVE ends up UNDER this folder — the pinned
 # interpreter (in .python/), the venv (with package contents copied in), and at serve time the
 # caches/weights (run.sh points HF_HOME/TT_CACHE_PATH/... here). After this runs, serving depends
-# on nothing outside the folder except the TT device + system libc. Only THIS install step reaches
-# the network (to fetch the interpreter and, unless --vendor-deps, the pip deps).
+# on nothing outside the folder except the TT device, system libc, and the exact externally managed
+# SFPI version declared by TTNN. Only THIS install step reaches the network (to fetch the interpreter
+# and, unless --vendor-deps, the pip deps).
 set -euo pipefail
 HERE="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 VENV="${{1:-$HERE/venv}}"
@@ -543,6 +607,7 @@ fi
 export UV_PYTHON_INSTALL_DIR="$HERE/.python"
 uv python install "$PYVER"
 uv venv --relocatable --python "$PYVER" "$VENV"
+PYBIN="$VENV/bin/python"
 {install}
 echo "installed into $VENV (python $PYVER, interpreter under $HERE/.python)"
 """
@@ -684,6 +749,8 @@ PYBIN="$VENV/bin/python"
 # Locate ttnn WITHOUT importing it — importing loads _ttnn.so, which is exactly what needs the
 # LD_PRELOAD below (chicken-and-egg). find_spec resolves the path without executing the module.
 TTNN_DIR="$("$PYBIN" -c 'import importlib.util,os;print(os.path.dirname(importlib.util.find_spec("ttnn").origin))')"
+export TT_METAL_RUNTIME_ROOT="$TTNN_DIR"
+{_render_sfpi_validation(discover_ttnn=False)}
 # _ttnncpp.so lives in ttnn.libs/ for an auditwheel-repaired (portable) wheel, or build/lib/ for a
 # raw one; preload it to avoid the glibc "static TLS block" error on late dlopen.
 # Prefer the auditwheel-vendored copy in *.libs/ (that's the one _ttnn.so actually loads via
@@ -712,6 +779,7 @@ export HF_HOME="${{HF_HOME:-$HERE/.hf}}"                  # HF weights + hub cac
 export TT_CACHE_PATH="${{TT_CACHE_PATH:-$HERE/.tt_cache}}"    # ttnn weight/tensor cache
 export TT_CACHE_HOME="${{TT_CACHE_HOME:-$HERE/.tt_cache}}"    # override upstream's /mnt/... default
 export XDG_CACHE_HOME="${{XDG_CACHE_HOME:-$HERE/.cache}}"     # generic catch-all (triton, etc.)
+export TT_METAL_CACHE="${{TT_METAL_CACHE:-$HERE/.cache}}"     # compiled TT-Metal kernels
 export TRITON_CACHE_DIR="${{TRITON_CACHE_DIR:-$HERE/.cache/triton}}"
 export TORCHINDUCTOR_CACHE_DIR="${{TORCHINDUCTOR_CACHE_DIR:-$HERE/.cache/inductor}}"
 {hf_export}{extra_env}{cmd_line}
