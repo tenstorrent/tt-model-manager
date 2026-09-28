@@ -10,11 +10,12 @@ wheel are published so requirements can pin real versions.
 """
 
 import json
+import subprocess
 
 from typer.testing import CliRunner
 
 from tt_kernel import cli, metal, packaging
-from tt_kernel.manifest import Manifest, Mesh, Resources, WeightsRef, compare
+from tt_kernel.manifest import Capabilities, Manifest, Mesh, Resources, WeightsRef, compare
 
 _runner = CliRunner()
 
@@ -195,6 +196,114 @@ def test_cli_package_thin_stage_only(tmp_path):
     m = Manifest.from_json((out / "tt_kernel_manifest.json").read_text())
     assert m.is_thin and m.arch == "blackhole"
     assert (out / "model.py").is_file() and (out / "requirements.txt").is_file()
+
+
+def test_thin_stages_authored_readme_and_provenance_byte_for_byte(tmp_path):
+    model_py = tmp_path / "runner.py"
+    model_py.write_text("class C: pass\n")
+    readme = tmp_path / "MODEL_CARD.md"
+    readme_bytes = b"---\ntags: [tt-model-cache, blackhole]\n---\n# exact card\n"
+    readme.write_bytes(readme_bytes)
+    provenance = tmp_path / "build-record.json"
+    provenance_bytes = b'{"source":"abc","wheels":{"ops":"def"}}\n'
+    provenance.write_bytes(provenance_bytes)
+
+    staged = tmp_path / "staged"
+    packaging.stage_thin_package(
+        staged,
+        name="exact-docs",
+        arch="blackhole",
+        model_py=model_py,
+        vllm_metadata={"arch": "QwenForCausalLM", "main_class": "runner:C"},
+        tt_kernel_version="0.0.0",
+        readme=readme,
+        provenance=provenance,
+    )
+
+    assert (staged / "README.md").read_bytes() == readme_bytes
+    assert (staged / "PROVENANCE.json").read_bytes() == provenance_bytes
+
+
+def test_thin_run_sh_preserves_revision_config_capabilities_and_safe_argv(tmp_path):
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    staged = tmp_path / "thin"
+    m = packaging.stage_thin_package(
+        staged,
+        name="qwen-v6",
+        arch="blackhole",
+        model_py=model_py,
+        vllm_metadata={"arch": "Qwen3_5ForConditionalGeneration", "main_class": "model:C"},
+        tt_kernel_version="0.0.0",
+        weights=WeightsRef(repo="Qwen/Qwen3.8-27B", revision="1d4bf0f"),
+        mesh=Mesh(devices=4, topology="P150x4", fabric="FABRIC_1D"),
+        resources=Resources(
+            max_num_seqs=8,
+            block_size=64,
+            max_model_len=262144,
+            trace_region_bytes=1073741824,
+            tt_additional_config={"kv_cache_dtype": "bfloat4_b", "nested": {"enabled": True}},
+            extra_args=[
+                "--max-num-batched-tokens", "262144",
+                "--served-model-name", "name with spaces;$(touch /tmp/never)",
+            ],
+        ),
+        capabilities=Capabilities(tool_parser="qwen3_coder", reasoning_parser="qwen3"),
+    )
+    run = (staged / "run.sh").read_text()
+
+    assert m.weights.revision == "1d4bf0f"
+    assert "--revision 1d4bf0f" in run
+    assert "--enable-auto-tool-choice --tool-call-parser qwen3_coder" in run
+    assert "--reasoning_parser qwen3" in run
+    assert '"fabric_config": "FABRIC_1D"' in run
+    assert '"trace_region_size": 1073741824' in run
+    assert '"kv_cache_dtype": "bfloat4_b"' in run
+    assert "'name with spaces;$(touch /tmp/never)'" in run
+    subprocess.run(["bash", "-n", str(staged / "run.sh")], check=True)
+
+
+def test_cli_package_thin_authors_all_v6_launch_fields(tmp_path):
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    readme = tmp_path / "README.input.md"
+    readme.write_text("# Qwen v6\n")
+    provenance = tmp_path / "provenance.input.json"
+    provenance.write_text('{"source":"pinned"}\n')
+    out = tmp_path / "staged"
+    res = _runner.invoke(cli.app, [
+        "package-thin", "--model-py", str(model_py), "--arch", "blackhole",
+        "--arch-name", "Qwen3_5ForConditionalGeneration", "--main-class", "model:C",
+        "--weights", "Qwen/Qwen3.8-27B", "--weights-revision", "1d4bf0f",
+        "--mesh", "P150x4", "--mesh-fabric", "FABRIC_1D", "--device-count", "4",
+        "--trace-region-bytes", "1073741824", "--tool-parser", "qwen3_coder",
+        "--reasoning-parser", "qwen3", "--tt-config-json", '{"kv_cache_dtype":"bfloat4_b"}',
+        "--extra-arg", "--max-num-batched-tokens", "--extra-arg", "262144",
+        "--readme", str(readme), "--provenance", str(provenance), "--out", str(out),
+    ])
+    assert res.exit_code == 0, res.output
+    m = Manifest.from_json((out / "tt_kernel_manifest.json").read_text())
+    assert m.weights.revision == "1d4bf0f"
+    assert m.mesh.fabric == "FABRIC_1D"
+    assert m.resources.trace_region_bytes == 1073741824
+    assert m.resources.tt_additional_config == {"kv_cache_dtype": "bfloat4_b"}
+    assert m.resources.extra_args == ["--max-num-batched-tokens", "262144"]
+    assert m.capabilities.tool_parser == "qwen3_coder"
+    assert m.capabilities.reasoning_parser == "qwen3"
+    assert (out / "README.md").read_bytes() == readme.read_bytes()
+    assert (out / "PROVENANCE.json").read_bytes() == provenance.read_bytes()
+
+
+def test_cli_package_thin_rejects_non_object_tt_config(tmp_path):
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    res = _runner.invoke(cli.app, [
+        "package-thin", "--model-py", str(model_py), "--arch", "blackhole",
+        "--arch-name", "QwenForCausalLM", "--main-class", "model:C",
+        "--tt-config-json", '["not", "an", "object"]', "--out", str(tmp_path / "out"),
+    ])
+    assert res.exit_code == 1
+    assert "JSON object" in res.output
 
 
 def _plain(text: str) -> str:
