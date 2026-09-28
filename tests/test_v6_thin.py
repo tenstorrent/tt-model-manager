@@ -23,7 +23,8 @@ _runner = CliRunner()
 
 
 def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=None,
-                models_wheels=None, vllm_wheel=None, with_vllm=True):
+                models_wheels=None, vllm_wheel=None, with_vllm=True, constraints=None,
+                vllm_common_requirements=None):
     model_py = tmp_path / "model.py"
     model_py.write_text("class QwenForCausalLM:  # the runner\n    pass\n")
     staged = tmp_path / "thin"
@@ -31,9 +32,11 @@ def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=Non
         staged, name="qwen-thin", arch="blackhole", model_py=model_py,
         vllm_metadata={"arch": "QwenForCausalLM", "main_class": "model:QwenForCausalLM"},
         tt_kernel_version="0.0.0", requirements=requirements,
+        constraints=constraints,
         plugin_wheel=plugin_wheel, extra_wheels=extra_wheels,
         models_wheels=models_wheels,
-        vllm_wheel=vllm_wheel, with_vllm=with_vllm,
+        vllm_wheel=vllm_wheel, vllm_common_requirements=vllm_common_requirements,
+        with_vllm=with_vllm,
         weights=WeightsRef(repo="Qwen/Qwen3-4B"), mesh=Mesh(devices=1, topology="P150"),
         resources=Resources(max_num_seqs=32, block_size=64),
     )
@@ -106,6 +109,28 @@ def test_thin_prebuilt_vllm_wheel_installed_by_path_not_built(tmp_path):
     assert f'--no-deps "$HERE/wheels/{vw.name}"' in inst     # installed by path
 
 
+def test_thin_stages_resolved_constraints_and_pinned_vllm_common(tmp_path):
+    constraints = tmp_path / "qualification.lock"
+    constraints.write_text("numpy==1.26.4\nrequests==2.34.2\n")
+    common = tmp_path / "common.txt"
+    common.write_text("requests>=2.26.0\n")
+
+    staged, manifest = _stage_thin(
+        tmp_path,
+        constraints=constraints,
+        vllm_common_requirements=common,
+    )
+
+    assert (staged / "constraints.txt").read_bytes() == constraints.read_bytes()
+    assert (staged / "vllm-common.txt").read_bytes() == common.read_bytes()
+    assert manifest.deps.vllm.common_requirements == "vllm-common.txt"
+    install = (staged / "install.sh").read_text()
+    assert "raw.githubusercontent.com" not in install
+    assert install.count('"${TT_MODEL_CONSTRAINTS_ARGS[@]}"') == 3
+    assert '--constraint "$HERE/constraints.txt"' in install
+    assert '-r "$HERE/vllm-common.txt"' in install
+
+
 def test_thin_no_vllm_skips_the_vllm_step(tmp_path):
     staged, m = _stage_thin(tmp_path, with_vllm=False)
     assert m.deps.vllm is None
@@ -123,6 +148,25 @@ def test_thin_install_sh_builds_venv_from_pins(tmp_path):
     assert "-r \"$HERE/requirements.txt\"" in inst   # installs from the pins
     assert "--no-index" not in inst                  # thin pulls ttnn/TTTv2 from the index
     assert "wheels/" not in inst                     # no embedded platform wheels
+
+
+def test_thin_installer_can_pin_uv_without_new_schema_field(tmp_path):
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    staged = tmp_path / "thin"
+    packaging.stage_thin_package(
+        staged,
+        name="uv-pinned",
+        arch="blackhole",
+        model_py=model_py,
+        vllm_metadata={"arch": "QwenForCausalLM", "main_class": "model:C"},
+        tt_kernel_version="0.0.0",
+        env={"TT_MODEL_UV_VERSION": "0.12.11"},
+    )
+    install = (staged / "install.sh").read_text()
+    assert 'UVVER="0.12.11"' in install
+    assert "https://astral.sh/uv/0.12.11/install.sh" in install
+    assert 'uv $UVVER (x86_64-unknown-linux-gnu)' in install
 
 
 def test_thin_validates_exact_external_sfpi_before_vllm(tmp_path):

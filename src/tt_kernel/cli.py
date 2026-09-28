@@ -712,6 +712,9 @@ def package_thin(
     requirements: Optional[str] = typer.Option(
         None, "--requirements", help="requirements.txt of pip pins (ttnn/TTTv2/models wheel). "
         "Omitted => a #29 template with TODO pins for the not-yet-published wheels."),
+    constraints: Optional[str] = typer.Option(
+        None, "--constraints", help="Optional fully resolved constraints file applied to every "
+        "dependency-resolving install step."),
     plugin_wheel: Optional[str] = typer.Option(
         None, "--plugin-wheel", help="The vllm-tt-plugin wheel — the vLLM integration (we no longer "
         "ship a custom vLLM fork); shipped in wheels/ and installed by path."),
@@ -726,6 +729,9 @@ def package_thin(
         None, "--vllm-wheel", help="Optional PREBUILT empty-target vLLM wheel (stock vLLM built with "
         "VLLM_TARGET_DEVICE=empty — NOT the CUDA vllm, NOT a fork). Ships in wheels/ for a hermetic "
         "install; omit and install.sh builds vLLM from source per the plugin's install-vllm-tt.sh."),
+    vllm_common_requirements: Optional[str] = typer.Option(
+        None, "--vllm-common-requirements", help="Pinned copy of upstream vLLM common.txt. "
+        "Staged into the bundle so installation does not fetch mutable dependency input."),
     vllm_version: str = typer.Option(
         packaging.VLLM_VERSION, "--vllm-version", help="Upstream vLLM tag the plugin builds against "
         "(empty target)."),
@@ -833,6 +839,14 @@ def package_thin(
     resources = Resources(
         max_num_seqs=max_num_seqs, block_size=block_size, max_model_len=max_model_len
     ) if (max_num_seqs or block_size or max_model_len) else None
+    constraints_path = Path(constraints).expanduser() if constraints else None
+    common_path = Path(vllm_common_requirements).expanduser() if vllm_common_requirements else None
+    for label, path in (
+        ("--constraints", constraints_path),
+        ("--vllm-common-requirements", common_path),
+    ):
+        if path is not None and not path.is_file():
+            raise _err(f"{label} {str(path)!r} is not a file.")
     bundle_name = name or (repo_id.split("/")[-1] if repo_id else model_path.stem)
 
     if out:
@@ -845,10 +859,12 @@ def package_thin(
         staged, name=bundle_name, arch=resolved_arch, model_py=model_path,
         kind=kind, vllm_metadata=vmeta, app=asgi_app, tt_kernel_version=__version__,
         requirements=Path(requirements).expanduser() if requirements else None,
+        constraints=constraints_path,
         plugin_wheel=Path(plugin_wheel).expanduser() if plugin_wheel else None,
         extra_wheels=[Path(w).expanduser() for w in (ops_wheel or [])],
         models_wheels=[Path(w).expanduser() for w in (models_wheel or [])],
         vllm_wheel=Path(vllm_wheel).expanduser() if vllm_wheel else None,
+        vllm_common_requirements=common_path,
         vllm_version=vllm_version, with_vllm=with_vllm,
         weights=weights_block, device_count=device_count, mesh=mesh, env=env_map,
         resources=resources, python_version=python_version,

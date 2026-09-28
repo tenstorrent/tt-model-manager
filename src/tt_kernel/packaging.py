@@ -51,8 +51,10 @@ METAL_DIR = "metal"
 INSTALL_SCRIPT = "install.sh"
 RUN_SCRIPT = "run.sh"
 REQUIREMENTS = "requirements.txt"
+CONSTRAINTS = "constraints.txt"
 # Override file for the empty-target vLLM install (pins that keep ttnn's numpy<2 from being bumped).
 VLLM_OVERRIDES = "vllm-overrides.txt"
+VLLM_COMMON_REQUIREMENTS = "vllm-common.txt"
 # Default upstream vLLM tag the vllm-tt-plugin builds against (empty target). Keep in step with the
 # plugin's docs/install-vllm-tt.sh (tenstorrent/vllm-tt-plugin).
 VLLM_VERSION = "0.25.1"
@@ -494,6 +496,12 @@ def render_install_sh(manifest: Manifest) -> str:
 
     Idempotent and path-relative; takes an optional venv path as ``$1`` (default ``./venv``).
     """
+    uv_version = (manifest.env or {}).get("TT_MODEL_UV_VERSION", "")
+    uv_installer = (
+        f"https://astral.sh/uv/{uv_version}/install.sh"
+        if uv_version
+        else "https://astral.sh/uv/install.sh"
+    )
     # --link-mode=copy: copy wheel contents INTO the venv instead of hardlinking them from uv's
     # global cache — the installed folder must not depend on anything outside its own wall.
     if manifest.deps is not None:
@@ -503,7 +511,10 @@ def render_install_sh(manifest: Manifest) -> str:
         # (SFPI is an external box dep, not installed here.) The order is load-bearing — see below.
         d = manifest.deps
         pyver = d.python or "3.12"
-        pip = 'uv pip install --python "$VENV/bin/python" --link-mode=copy'
+        pip = (
+            'uv pip install --python "$VENV/bin/python" --link-mode=copy '
+            '"${TT_MODEL_CONSTRAINTS_ARGS[@]}"'
+        )
         steps: List[str] = []
         # (1) Engine + models FIRST: ttnn (bundles the tt-metal runtime) and, once published,
         # tt-metal-models. This establishes torch + numpy<2 in the venv before vLLM's deps resolve.
@@ -629,11 +640,14 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 VENV="${{1:-$HERE/venv}}"
 PYVER="{pyver}"
+UVVER="{uv_version}"
 
-# uv gives us a pinned interpreter + deterministic installs, independent of the host Python.
-if ! command -v uv >/dev/null 2>&1; then
+# uv provisions the selected interpreter and applies the staged dependency closure. When the
+# bundle declares TT_MODEL_UV_VERSION, reject a different host uv and bootstrap that exact release.
+if ! command -v uv >/dev/null 2>&1 || \
+   {{ [ -n "$UVVER" ] && [ "$(uv --version 2>/dev/null || true)" != "uv $UVVER (x86_64-unknown-linux-gnu)" ]; }}; then
   export UV_INSTALL_DIR="$HERE/.uv"
-  curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
+  curl -LsSf {uv_installer} | sh >/dev/null 2>&1
   export PATH="$HERE/.uv:$PATH"
 fi
 
@@ -647,6 +661,10 @@ export UV_CACHE_DIR="$HERE/.uv-cache"
 uv python install "$PYVER"
 uv venv --relocatable --python "$PYVER" "$VENV"
 PYBIN="$VENV/bin/python"
+TT_MODEL_CONSTRAINTS_ARGS=()
+if [ -f "$HERE/{CONSTRAINTS}" ]; then
+  TT_MODEL_CONSTRAINTS_ARGS=(--constraint "$HERE/{CONSTRAINTS}")
+fi
 {install}
 echo "installed into $VENV (python $PYVER, interpreter under $HERE/.python)"
 """
@@ -861,8 +879,10 @@ export TORCHINDUCTOR_CACHE_DIR="${{TORCHINDUCTOR_CACHE_DIR:-$HERE/.cache/inducto
 {hf_export}{extra_env}{cmd_line}
 # TT_MODEL_PRINT=1 (set by `tt-model serve --print`) echoes the fully-resolved command+env
 if [ "${{TT_MODEL_PRINT:-0}}" = "1" ]; then
-  printf 'LD_PRELOAD=%s TT_METAL_HOME=%s EXTRA_MODELS_DIR=%s MESH_DEVICE=%s HF_MODEL=%s\n  %s\n' \\
-    "$LD_PRELOAD" "$TT_METAL_HOME" "$EXTRA_MODELS_DIR" "$MESH_DEVICE" "${{HF_MODEL:-}}" "${{CMD[*]}}"
+  printf 'LD_PRELOAD=%q TT_METAL_HOME=%q EXTRA_MODELS_DIR=%q MESH_DEVICE=%q HF_MODEL=%q\n ' \\
+    "$LD_PRELOAD" "$TT_METAL_HOME" "$EXTRA_MODELS_DIR" "$MESH_DEVICE" "${{HF_MODEL:-}}"
+  printf ' %q' "${{CMD[@]}}"
+  printf '\n'
   exit 0
 fi
 {weight_prefetch}exec "${{CMD[@]}}"
@@ -1142,10 +1162,12 @@ def stage_thin_package(
     vllm_metadata: Optional[dict] = None,
     app: Optional[str] = None,
     requirements: Optional[Path] = None,
+    constraints: Optional[Path] = None,
     plugin_wheel: Optional[Path] = None,
     extra_wheels: Optional[List[Path]] = None,
     models_wheels: Optional[List[Path]] = None,
     vllm_wheel: Optional[Path] = None,
+    vllm_common_requirements: Optional[Path] = None,
     vllm_version: str = VLLM_VERSION,
     with_vllm: bool = True,
     weights: Optional[WeightsRef] = None,
@@ -1240,6 +1262,12 @@ def stage_thin_package(
             text = _THIN_DIT_REQUIREMENTS_TEMPLATE
         (staged / REQUIREMENTS).write_text(text)
 
+    # An optional fully resolved constraints file freezes the transitive environment without
+    # extending the schema-6 wire format. Older consumers already execute the generated installer,
+    # so the staged artifact remains compatible with unmodified manager releases.
+    if constraints is not None:
+        shutil.copy2(constraints, staged / CONSTRAINTS)
+
     # Bundled wheels -> wheels/, installed BY PATH: the vllm-tt-plugin (the vLLM integration — we
     # ship no custom vLLM fork), then any generic_op custom-op wheels. These are the things not on a
     # pinnable index; ttnn/tt-metal-models still come from requirements.txt.
@@ -1273,7 +1301,16 @@ def stage_thin_package(
             wheels_root.mkdir(exist_ok=True)
             shutil.copy2(vllm_wheel, wheels_root / Path(vllm_wheel).name)
             vllm_rel = f"{WHEELS_DIR}/{Path(vllm_wheel).name}"
-        vllm_spec = Vllm(version=vllm_version, overrides=VLLM_OVERRIDES, wheel=vllm_rel)
+        common_rel: Optional[str] = None
+        if vllm_common_requirements is not None:
+            shutil.copy2(vllm_common_requirements, staged / VLLM_COMMON_REQUIREMENTS)
+            common_rel = VLLM_COMMON_REQUIREMENTS
+        vllm_spec = Vllm(
+            version=vllm_version,
+            overrides=VLLM_OVERRIDES,
+            common_requirements=common_rel,
+            wheel=vllm_rel,
+        )
 
     # vllm_metadata.json in the per-model subfolder under vllm_models/ (EXTRA_MODELS_DIR contract).
     # Only the "vllm" kind registers this way — kind="tt-dit-server" has no vLLM plugin to register
@@ -1333,6 +1370,7 @@ def stage_thin_package(
 
 __all__ = [
     "WHEELS_DIR",
+    "CONSTRAINTS",
     "METAL_DIR",
     "CUSTOM_OPS_DIR",
     "sha256_file",
