@@ -330,6 +330,34 @@ def test_push_replaces_code_and_image_rather_than_merging(monkeypatch, tmp_path)
     assert not any(p == "*" or ".gitattributes" in p for p in seen["delete_patterns"])
 
 
+def test_exact_push_removes_every_remote_file_absent_from_stage(monkeypatch, tmp_path):
+    from tt_kernel import hub
+
+    (tmp_path / "vllm_models" / "new").mkdir(parents=True)
+    (tmp_path / "vllm_models" / "new" / "vllm_metadata.json").write_text("{}")
+    (tmp_path / "README.md").write_text("new")
+    seen = {}
+
+    class _Api:
+        def list_repo_files(self, **kw):
+            return [
+                ".gitattributes",
+                "README.md",
+                "wheels/old.whl",
+                "vllm_models/old/vllm_metadata.json",
+            ]
+
+        def upload_folder(self, **kw):
+            seen.update(kw)
+
+    monkeypatch.setattr(hub, "_api", lambda: _Api())
+    hub.push_folder("you/model", tmp_path, "msg", replace=True)
+    assert seen["delete_patterns"] == [
+        "vllm_models/old/vllm_metadata.json",
+        "wheels/old.whl",
+    ]
+
+
 def test_large_push_prunes_what_the_bundle_stopped_shipping(monkeypatch, tmp_path):
     """The CONTAINER path is push_large_folder, and upload_large_folder has no
     delete_patterns, so it only ever adds. Narrowing an allowlist previously left every
