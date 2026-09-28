@@ -166,7 +166,7 @@ def test_thin_installer_can_pin_uv_without_new_schema_field(tmp_path):
     install = (staged / "install.sh").read_text()
     assert 'UVVER="0.12.11"' in install
     assert "https://astral.sh/uv/0.12.11/install.sh" in install
-    assert 'uv $UVVER (x86_64-unknown-linux-gnu)' in install
+    assert "awk '{print $2}'" in install
 
 
 def test_thin_validates_exact_external_sfpi_before_vllm(tmp_path):
@@ -250,21 +250,19 @@ def test_thin_ships_plugin_and_ops_as_wheels_by_path(tmp_path):
     assert '-r "$HERE/requirements.txt"' in inst
 
 
-def test_thin_models_wheel_resolves_a_local_pin_via_find_links(tmp_path):
-    # A hand-built tt-metal-models wheel, staged ahead of tenstorrent/tt-metal#54478 publishing to
-    # an index: it must NOT be installed by path (it's not in deps.wheels) but must still make the
-    # requirements.txt pin resolvable via --find-links.
+def test_thin_models_wheel_is_installed_by_exact_path(tmp_path):
+    # The staged wheel must win even when an index carries the same package version.
     mw = tmp_path / "tt_metal_models-0.77.0-py3-none-any.whl"; mw.write_bytes(b"PK\x03\x04")
     staged, m = _stage_thin(tmp_path, models_wheels=[mw])
     assert m.deps.models_wheels == [f"wheels/{mw.name}"]
-    assert m.deps.wheels == []                    # not installed by explicit path
+    assert m.deps.wheels == []
     assert m.deps.wheels_dir == "wheels"
     assert (staged / "wheels" / mw.name).is_file()
     inst = (staged / "install.sh").read_text()
-    # find-links now precedes the requirements install, not just the by-path wheel step
     req_line = next(line for line in inst.splitlines() if '-r "$HERE/requirements.txt"' in line)
     assert '--find-links "$HERE/wheels"' in req_line
-    assert f'"$HERE/wheels/{mw.name}"' not in inst  # never named as an explicit install target
+    assert f'"$HERE/wheels/{mw.name}"' in req_line
+    assert inst.index(req_line) < inst.index("VLLM_TARGET_DEVICE=empty")
 
 
 def test_thin_scripts_are_owner_rw_only_not_executable(tmp_path):

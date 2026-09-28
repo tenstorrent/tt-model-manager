@@ -721,10 +721,8 @@ def package_thin(
     ops_wheel: Optional[List[str]] = typer.Option(
         None, "--ops-wheel", help="A generic_op custom-op wheel to ship in wheels/ (repeatable)."),
     models_wheel: Optional[List[str]] = typer.Option(
-        None, "--models-wheel", help="A locally-built wheel that satisfies a requirements.txt pin "
-        "not yet on an index (e.g. a hand-built tt-metal-models wheel from tenstorrent/tt-metal#54478, "
-        "ahead of its publish). Staged in wheels/ and added to --find-links so the pin resolves "
-        "locally instead of failing; NOT installed by path itself. Repeatable."),
+        None, "--models-wheel", help="A qualified model-library wheel staged and installed by "
+        "exact path rather than resolved from an index. Repeatable."),
     vllm_wheel: Optional[str] = typer.Option(
         None, "--vllm-wheel", help="Optional PREBUILT empty-target vLLM wheel (stock vLLM built with "
         "VLLM_TARGET_DEVICE=empty — NOT the CUDA vllm, NOT a fork). Ships in wheels/ for a hermetic "
@@ -879,8 +877,7 @@ def package_thin(
     typer.echo(f"  runner: {model_path.name}   deps: {manifest.deps.requirements}"
                + (f" + {len(manifest.deps.wheels)} bundled wheel(s)" if manifest.deps.wheels else ""))
     if manifest.deps.models_wheels:
-        typer.echo(f"  local pins: {len(manifest.deps.models_wheels)} models wheel(s) "
-                   "resolved via --find-links (not on an index yet)")
+        typer.echo(f"  local pins: {len(manifest.deps.models_wheels)} models wheel(s) installed by path")
     if with_vllm:
         vspec = manifest.deps.vllm
         if vspec and vspec.wheel:

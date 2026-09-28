@@ -536,12 +536,13 @@ def render_install_sh(manifest: Manifest) -> str:
         steps: List[str] = []
         # (1) Engine + models FIRST: ttnn (bundles the tt-metal runtime) and, once published,
         # tt-metal-models. This establishes torch + numpy<2 in the venv before vLLM's deps resolve.
-        # --find-links checks wheels_dir first, so a locally-built wheel there (e.g. a hand-built
-        # tt-metal-models wheel staged ahead of its index publish) satisfies its requirements.txt
-        # pin without a network resolve; anything not present there still falls through to the index.
+        # Install qualified model-library wheels by path in the same transaction as their declared
+        # requirements so an index artifact with the same version cannot replace the tested bytes.
         req_find_links = f'--find-links "$HERE/{d.wheels_dir}" ' if d.wheels_dir else ""
+        model_wheels = " ".join(f'"$HERE/{wheel}"' for wheel in d.models_wheels)
         steps.append(
-            f'{pip} {req_find_links}--extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{d.requirements}"'
+            f'{pip} {req_find_links}--extra-index-url {_PYTORCH_CPU_INDEX} '
+            f'-r "$HERE/{d.requirements}" {model_wheels}'.rstrip()
         )
         # Fail before the expensive vLLM build when the external SFPI compiler does not match the
         # exact contract carried by the just-installed TTNN wheel.
@@ -663,7 +664,7 @@ UVVER="{uv_version}"
 # uv provisions the selected interpreter and applies the staged dependency closure. When the
 # bundle declares TT_MODEL_UV_VERSION, reject a different host uv and bootstrap that exact release.
 if ! command -v uv >/dev/null 2>&1 || \
-   {{ [ -n "$UVVER" ] && [ "$(uv --version 2>/dev/null || true)" != "uv $UVVER (x86_64-unknown-linux-gnu)" ]; }}; then
+   {{ [ -n "$UVVER" ] && [ "$(uv --version 2>/dev/null | awk '{{print $2}}')" != "$UVVER" ]; }}; then
   export UV_INSTALL_DIR="$HERE/.uv"
   curl -LsSf {uv_installer} | sh >/dev/null 2>&1
   export PATH="$HERE/.uv:$PATH"
@@ -1202,9 +1203,8 @@ def stage_thin_package(
     the ``vllm_metadata.json`` (EXTRA_MODELS_DIR contract), generated ``install.sh``/``run.sh``, and
     — in ``wheels/`` — the **bundled wheels installed by path**: the ``vllm-tt-plugin``
     (``--plugin-wheel``, the vLLM integration) and any ``generic_op`` custom-op wheels
-    (``extra_wheels``). ``models_wheels`` are also staged into ``wheels/`` but are NOT installed by
-    path — they only ride along on ``--find-links`` so a ``requirements.txt`` pin that isn't on an
-    index yet (e.g. a hand-built ``tt-metal-models`` wheel, ahead of its publish) still resolves.
+    (``extra_wheels``). ``models_wheels`` are installed by exact path in the requirements
+    transaction so the qualified model-library artifact cannot be replaced by an index candidate.
 
     vLLM core is installed by ``install.sh`` as **stock upstream vLLM built with
     ``VLLM_TARGET_DEVICE=empty``** (the plugin's ``docs/install-vllm-tt.sh`` path — NOT the CUDA
@@ -1298,8 +1298,7 @@ def stage_thin_package(
             shutil.copy2(w, wheels_root / Path(w).name)
             deps_wheels.append(f"{WHEELS_DIR}/{Path(w).name}")
 
-    # Wheels that only need to satisfy a requirements.txt pin locally (not installed by path) — a
-    # locally-built tt-metal-models wheel ahead of its index publish is the motivating case.
+    # Qualified model-library wheels installed by exact path during the requirements transaction.
     models_deps_wheels: List[str] = []
     for w in models_wheels or []:
         wheels_root = staged / WHEELS_DIR
