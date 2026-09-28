@@ -442,7 +442,7 @@ case "$actual" in
     exit 1
     ;;
 esac
-printf 'validated SFPI %s[%s] at %s\n' "$sfpi_version" "$sfpi_build" "$selected_sfpi"
+printf 'validated SFPI %s[%s] at %s\n' "$sfpi_version" "$sfpi_build" "$selected_sfpi" >&2
 '''
 
 
@@ -744,14 +744,16 @@ export TT_METAL_VISIBLE_DEVICES
     hf_export = ""
     weights_rev = manifest.weights.revision if manifest.weights else None
     if weights:
-        hf_export = (
-            f'export HF_MODEL="${{HF_MODEL:-{weights}}}"\n'
-            f'export {WEIGHTS_REVISION_ENV}="${{{WEIGHTS_REVISION_ENV}:-{weights_rev or ""}}}"\n'
-        )
+        hf_export = f'export HF_MODEL="${{HF_MODEL:-{weights}}}"\n'
+        if weights_rev:
+            hf_export += (
+                f'export {WEIGHTS_REVISION_ENV}='
+                f'"${{{WEIGHTS_REVISION_ENV}:-{weights_rev}}}"\n'
+            )
     weight_prefetch = ""
     if weights and not is_dit_kind:
         weight_prefetch = r'''# Resolve pinned weights before vLLM opens the device.
-resolved_hf_model="$("$PYBIN" - "$HF_MODEL" "${TT_MODEL_WEIGHTS_REVISION:-}" "${TT_AUXILIARY_WEIGHTS:-}" <<'PY'
+resolved_hf_model="$("$PYBIN" - "$HF_MODEL" __TT_WEIGHT_REVISION_ARG__ "${TT_AUXILIARY_WEIGHTS:-}" <<'PY'
 import os
 import re
 import sys
@@ -785,6 +787,8 @@ PY
 export HF_MODEL="$resolved_hf_model"
 export MODEL_WEIGHTS_DIR="$resolved_hf_model"
 '''
+        revision_arg = '"${TT_MODEL_WEIGHTS_REVISION:-}"' if weights_rev else '""'
+        weight_prefetch = weight_prefetch.replace("__TT_WEIGHT_REVISION_ARG__", revision_arg)
     # The TT vLLM backend REQUIRES a supported batch size and a concrete block_size (its default
     # of 256 / None both fail), so always emit them — from the manifest's resources, with the
     # known-good tt_transformers defaults when unset.

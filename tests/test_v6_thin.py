@@ -230,7 +230,7 @@ def test_sfpi_gate_prefers_local_and_rejects_wrong_build(tmp_path):
     compiler.write_text("#!/bin/sh\necho 'riscv-tt-elf-g++ (tenstorrent/sfpi:7.78.0[935]) 15.1.0'\n")
     ok = subprocess.run(["bash", str(script)], text=True, capture_output=True)
     assert ok.returncode == 0, ok.stderr
-    assert f"validated SFPI 7.78.0[935] at {ttnn_dir}/runtime/sfpi" in ok.stdout
+    assert f"validated SFPI 7.78.0[935] at {ttnn_dir}/runtime/sfpi" in ok.stderr
 
 
 def test_thin_ships_plugin_and_ops_as_wheels_by_path(tmp_path):

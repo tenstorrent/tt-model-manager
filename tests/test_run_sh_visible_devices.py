@@ -33,7 +33,8 @@ def _bundle(tmp_path, *, devices, env=None, arch="blackhole", descriptor=True):
     # Stand-in venv: `python -c` is real (run.sh's find_spec probe), `python -m ...` reports.
     (b / "venv" / "bin").mkdir(parents=True)
     py = b / "venv" / "bin" / "python"
-    py.write_text(f'#!/bin/bash\n[ "$1" = -c ] && exec {sys.executable} "$@"\n'
+    py.write_text(f'#!/bin/bash\n'
+                  f'{{ [ "$1" = -c ] || [ "$1" = -I ]; }} && exec {sys.executable} "$@"\n'
                   'echo "TVD=${TT_VISIBLE_DEVICES:-} TMVD=${TT_METAL_VISIBLE_DEVICES:-}"\n'
                   'echo "MGD=${TT_MESH_GRAPH_DESC_PATH:-}" >&2\n')
     py.chmod(0o500)  # owner read+execute only: the minimum run.sh needs to exec it
@@ -41,6 +42,19 @@ def _bundle(tmp_path, *, devices, env=None, arch="blackhole", descriptor=True):
     (ttnn / "build" / "lib").mkdir(parents=True)
     (ttnn / "__init__.py").write_text("")
     (ttnn / "build" / "lib" / "_ttnncpp.so").write_text("")
+    (ttnn / "tt_metal").mkdir(exist_ok=True)
+    (ttnn / "tt_metal" / "sfpi-version").write_text(
+        "sfpi_version='7.78.0'\nsfpi_build='935'\n"
+    )
+    sfpi = ttnn / "runtime" / "sfpi"
+    (sfpi / "compiler" / "bin").mkdir(parents=True)
+    (sfpi / "include").mkdir(parents=True)
+    compiler = sfpi / "compiler" / "bin" / "riscv-tt-elf-g++"
+    compiler.write_text(
+        "#!/bin/sh\necho 'riscv-tt-elf-g++ (tenstorrent/sfpi:7.78.0[935]) 15.1.0'\n"
+    )
+    compiler.chmod(0o500)
+    (sfpi / "include" / "sfpi_lib.h").write_text("")
     if descriptor:  # the P150 descriptor a real ttnn wheel ships
         mgd = ttnn / "tt_metal" / "fabric" / "mesh_graph_descriptors"
         mgd.mkdir(parents=True)
