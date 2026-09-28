@@ -1725,6 +1725,109 @@ def test_a_digest_bearing_package_says_nothing_about_it(tmp_path, monkeypatch, c
     assert "no image digest" not in capsys.readouterr().out
 
 
+# ------------------------------------------------------------------ containerd image store
+#
+# docker's image id is the config digest on the classic store and the manifest digest on the
+# containerd store (Docker >= 28 default). A package records the builder's id, so on a host
+# with the other store `have == want` never holds and every pull/serve re-downloaded the
+# multi-GB image with a "different image" note. The id the local daemon assigns at load is
+# recorded and accepted while the package digest is unchanged.
+
+CONFIG_DIGEST = "sha256:" + "c" * 64          # what the classic-store builder recorded
+MANIFEST_ID = "sha256:" + "m" * 64            # what a containerd-store consumer reports
+
+
+def _containerd_pull(tmp_path, monkeypatch, m):
+    """Wire pull_container to a daemon that reports MANIFEST_ID once something is loaded."""
+    from tt_kernel import oci
+
+    state = {"id": None}
+    loads = []
+
+    def fake_load(src, expect_tag=None):
+        loads.append(src)
+        state["id"] = MANIFEST_ID
+
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: state["id"])
+    monkeypatch.setattr(oci, "load", fake_load)
+    monkeypatch.setattr(container_cli.hub, "download_bundle",
+                        lambda repo, rev, dest=None: Path(dest))
+    monkeypatch.setattr(container_cli, "_download_weights", lambda ref, **kw: Path("/w"))
+    return state, loads
+
+
+def test_pull_on_the_containerd_store_records_the_daemons_id_and_skips_the_next_reload(
+        tmp_path, monkeypatch, capsys):
+    from tt_kernel import localdb
+
+    m = _manifest(tmp_path)
+    m.container.image.digest = CONFIG_DIGEST
+    state, loads = _containerd_pull(tmp_path, monkeypatch, m)
+
+    container_cli.pull_container("org/x", None, m, no_weights=True)
+    assert loads == [Path(loads[0])] and len(loads) == 1
+    assert localdb.get("org/x")["image_loaded_id"] == MANIFEST_ID
+    assert localdb.get("org/x")["image_digest"] == CONFIG_DIGEST
+
+    container_cli.pull_container("org/x", None, m, no_weights=True)
+    assert len(loads) == 1                               # not reloaded
+    out = " ".join(capsys.readouterr().out.split())
+    assert "already loaded" in out
+
+
+def test_a_republished_package_still_reloads_on_the_containerd_store(tmp_path, monkeypatch):
+    """The recorded daemon id only vouches for the package digest it was loaded from."""
+    from tt_kernel import localdb
+
+    m = _manifest(tmp_path)
+    m.container.image.digest = "sha256:" + "d" * 64        # republished: new digest
+    localdb.record("org/x", {"repo_id": "org/x", "container": True,
+                             "image": container.image_ref(m),
+                             "image_digest": CONFIG_DIGEST, "image_loaded_id": MANIFEST_ID})
+    state, loads = _containerd_pull(tmp_path, monkeypatch, m)
+    state["id"] = MANIFEST_ID                             # the old image is still loaded
+
+    container_cli.pull_container("org/x", None, m, no_weights=True)
+    assert len(loads) == 1
+
+
+def test_serve_accepts_the_recorded_daemon_id_instead_of_repulling(tmp_path, monkeypatch):
+    from tt_kernel import localdb
+
+    m = _manifest(tmp_path)
+    m.container.image.digest = CONFIG_DIGEST
+    localdb.record("org/m", {"repo_id": "org/m", "container": True,
+                             "image": container.image_ref(m),
+                             "image_digest": CONFIG_DIGEST, "image_loaded_id": MANIFEST_ID})
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: MANIFEST_ID)
+    monkeypatch.setattr(container_cli, "pull_container",
+                        lambda *a, **k: pytest.fail("must not re-pull a loaded image"))
+    ran = []
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: ran.append(argv))
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda mm: None)
+
+    container_cli.serve_container(m, target="org/m")
+    assert ran and ran[0][:2] == ["docker", "run"]
+
+
+def test_describe_pulled_is_ready_with_the_recorded_daemon_id(monkeypatch):
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: MANIFEST_ID)
+    monkeypatch.setattr(container, "run_or_empty", lambda argv: "10737418240")
+    r = container_cli.describe_pulled(
+        {"repo_id": "org/x", "image": "tt-model/x:abc", "arch": "blackhole",
+         "image_digest": CONFIG_DIGEST, "image_loaded_id": MANIFEST_ID})
+    assert r["ready"] is True and r["why"] == ""
+
+
+def test_describe_pulled_still_flags_a_swapped_image(monkeypatch):
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "z" * 64)
+    r = container_cli.describe_pulled(
+        {"repo_id": "org/x", "image": "tt-model/x:abc", "arch": "blackhole",
+         "image_digest": CONFIG_DIGEST, "image_loaded_id": MANIFEST_ID})
+    assert r["ready"] is False and "different build" in r["why"]
+
+
 # ------------------------------------------------------------------ --refresh
 #
 # Opt-in re-pull before serving. The image half only works because a published package

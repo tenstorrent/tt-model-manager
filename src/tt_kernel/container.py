@@ -948,11 +948,13 @@ def remove(name: str, *, force: bool = False) -> bool:
 
 
 def loaded_digest(ref: str) -> Optional[str]:
-    """The config digest of the image currently under ``ref``, or None if it is absent.
+    """docker's id for the image currently under ``ref``, or None if it is absent.
 
     ``image_present`` only answers "is something under this name". With digest tags that is
     usually enough, but a hand-tagged or hand-loaded image can sit under the right name and
-    be the wrong image — so where correctness matters, compare digests.
+    be the wrong image — so where correctness matters, compare ids. The id is the config
+    digest on the classic image store and the manifest digest on the containerd store; see
+    ``container_cli._image_is_current`` for how the two are reconciled.
     """
     r = _run(["docker", "image", "inspect", ref, "--format", "{{.Id}}"],
              capture_output=True, text=True)

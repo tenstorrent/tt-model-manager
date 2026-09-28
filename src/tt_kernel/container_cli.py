@@ -226,6 +226,22 @@ def pull_dir(repo_id: str) -> Path:
     return compat.cache_dir() / "pulled" / repo_id.replace("/", "__")
 
 
+def _image_is_current(have: Optional[str], want: Optional[str], entry: Optional[dict]) -> bool:
+    """Is the image under the tag the one this package records?
+
+    docker's image id is the config digest on the classic store but the manifest digest on
+    the containerd store, so ``have == want`` fails on every containerd host for a package
+    built on a classic one (and vice versa). The id this daemon gave the image when pull
+    loaded it is recorded and accepted too, as long as the package digest is unchanged.
+    """
+    if have is None:
+        return False
+    if want is None or have == want:
+        return True
+    return bool(entry) and entry.get("image_digest") == want \
+        and entry.get("image_loaded_id") == have
+
+
 def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
                    no_weights: bool = False) -> None:
     """Snapshot the repo, load the image into docker, and put weights in the HOST cache."""
@@ -242,6 +258,7 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
     # the previous image while reporting success.
     want = spec.image.digest
     have = container.loaded_digest(ref)
+    prior = localdb.get(repo_id)
     if want is None:
         # Published before digest identity. Everything still works — the comparison below
         # degrades to the old tag-presence test — but the protection this exists to give is
@@ -252,12 +269,12 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
             "detection",
             marker="○",
         )
-    if have is not None and (want is None or have == want):
+    if _image_is_current(have, want, prior):
         console.note(f"image {ref} already loaded", marker="•")
     elif spec.image.is_hub_hosted:
-        if have is not None and want is not None and have != want:
+        if have is not None and want is not None:
             console.note(
-                f"{ref} is loaded but is a different image than this package records "
+                f"{ref} is loaded but is not known to be the image this package records "
                 f"({have[7:19]} vs {want[7:19]}) — reloading",
                 marker="○",
             )
@@ -281,6 +298,8 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
         # "arch=None install=None", which found it but described nothing.
         "arch": manifest.arch,
         "image_digest": spec.image.digest,
+        # what THIS daemon calls the image, for _image_is_current on the next pull/serve
+        "image_loaded_id": container.loaded_digest(ref),
         "profile": spec.resolved_default(),
         "profiles": spec.profile_names(),
     })
@@ -1039,7 +1058,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         ref = container.image_ref(manifest)
         want = spec.image.digest
         have = container.loaded_digest(ref)
-        if have is None or (want is not None and have != want):
+        entry = localdb.get(target) if target else None
+        if not _image_is_current(have, want, entry):
             layout = (Path(source) / "image") if source else None
             if layout and (layout / "oci-layout").is_file():
                 with console.step(f"docker load {ref} (image was not loaded)"):
@@ -1053,7 +1073,6 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                 # Re-fetch rather than dead-ending. This is NOT an update check -- those
                 # stay opt-in behind --refresh -- so it re-pulls the RECORDED revision,
                 # reproducing the image this manifest describes rather than the Hub tip.
-                entry = localdb.get(target) if target else None
                 repairable = (
                     bool(target) and not local_only and spec.image.is_hub_hosted
                     and bool(entry) and not Path(str(target)).exists()
@@ -1354,7 +1373,7 @@ def describe_pulled(entry: dict) -> dict:
     ref = entry.get("image") or "?"
     want = entry.get("image_digest")
     have = container.loaded_digest(ref) if ref != "?" else None
-    loaded = have is not None and (want is None or have == want)
+    loaded = _image_is_current(have, want, entry)
     size = ""
     if loaded:
         out = container.run_or_empty(
