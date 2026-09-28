@@ -189,6 +189,8 @@ def test_thin_reconciles_vllm_override_metadata_then_checks_environment(tmp_path
     assert check > reconcile
     assert "opencv-python-headless==" in inst
     assert 'distribution("vllm")._path' in inst
+    assert "urlsafe_b64encode" in inst and 'record_key = f"{metadata.parent.name}/METADATA"' in inst
+    assert 'lineterminator="\\n"' in inst
 
 
 def test_thin_run_pins_runtime_root_and_revalidates_sfpi(tmp_path):

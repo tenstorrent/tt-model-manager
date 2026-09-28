@@ -455,6 +455,9 @@ def _render_vllm_metadata_override(overrides_path: str) -> str:
     reflects the runnable environment instead of retaining an impossible upstream GPU constraint.
     """
     return f'''"$PYBIN" -I - "$HERE/{overrides_path}" <<'PY'
+import base64
+import csv
+import hashlib
 import importlib.metadata
 import re
 import sys
@@ -475,6 +478,21 @@ text, count = re.subn(
 if count != 1:
     raise SystemExit(f"expected one vLLM OpenCV requirement, found {{count}}")
 metadata.write_text(text, encoding="utf-8")
+record = metadata.parent / "RECORD"
+rows = list(csv.reader(record.read_text(encoding="utf-8").splitlines()))
+record_key = f"{{metadata.parent.name}}/METADATA"
+payload = metadata.read_bytes()
+digest = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).rstrip(b"=").decode()
+matches = 0
+for row in rows:
+    if row and row[0] == record_key:
+        row[1] = "sha256=" + digest
+        row[2] = str(len(payload))
+        matches += 1
+if matches != 1:
+    raise SystemExit(f"expected one vLLM METADATA row in RECORD, found {{matches}}")
+with record.open("w", encoding="utf-8", newline="") as output:
+    csv.writer(output, lineterminator="\\n").writerows(rows)
 print("reconciled vLLM dependency metadata with " + opencv[0])
 PY'''
 
