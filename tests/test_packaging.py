@@ -457,7 +457,9 @@ def test_vendor_dependencies_sequences_around_vllm_wheel(tmp_path, monkeypatch):
     assert any(str(ttnn) == a for a in download_calls[0])
     # (2) vLLM's common deps, opencv line stripped, override pins appended — no --no-deps needed
     # (there's no vllm wheel or its metadata in this call at all)
-    common_req_path = next(a for a in download_calls[1] if a.endswith(".txt") and "-r" not in a)
+    # Exclude the literal option, not paths containing the characters "-r".
+    # GitHub's randomly named temporary directory can legitimately contain that substring.
+    common_req_path = next(a for a in download_calls[1] if a.endswith(".txt") and a != "-r")
     common_text = snapshotted_txt_files[common_req_path]
     assert "opencv-python-headless>=4.13.0" not in common_text
     assert "torch==2.11.0" in common_text
