@@ -270,7 +270,7 @@ class RepoState:
     private: bool
     sha: Optional[str]
     # The Hub's own spelling of the id. The caller typed one on the command line and
-    # casing is not significant there, but the whitelist stores this for humans to read
+    # casing is not significant there, but a verified copy records this for humans to read
     # and for a later drift check to display, so record what the repo is actually called
     # rather than what the reviewer happened to type.
     repo_id: Optional[str] = None
@@ -281,7 +281,7 @@ def repo_state(repo_id: str) -> RepoState:
 
     For a decision, not a description. ``is_listed`` fails to ``False`` by design, which
     is right when the question is "should I preserve a tag across this push" and wrong
-    when the question is "may this repo be whitelisted": a network blip would then read
+    when the question is "may this repo be verified": a network blip would then read
     as "not listed" and produce a confident, false refusal. Callers wrap this in the
     CLI's ``_hub`` so a failure renders as a diagnosis card instead.
     """
@@ -294,21 +294,20 @@ def repo_state(repo_id: str) -> RepoState:
     )
 
 
-# Card frontmatter keys the whitelist writes onto a copy. They are read by tt-cli, which
-# hides a community bundle from its listing once a Tenstorrent copy claims it as a
-# source — so renaming one here silently stops that collapse with no error anywhere. The
-# weekly pin-bump checklist in tt-cli asks the reviewer to diff these.
-REVIEW_SOURCE_KEY = "tt_whitelist_source"
-REVIEW_REVISION_KEY = "tt_whitelist_revision"
-REVIEW_REVIEWER_KEY = "tt_reviewed_by"
-REVIEW_DATE_KEY = "tt_reviewed_at"
-_REVIEW_KEYS = (REVIEW_SOURCE_KEY, REVIEW_REVISION_KEY, REVIEW_REVIEWER_KEY, REVIEW_DATE_KEY)
+# Card frontmatter keys `verify` writes onto a copy. tt-cli reads the source key to link
+# a verified copy to its original, so renaming one here silently drops that link with no
+# error anywhere. The weekly pin-bump checklist in tt-cli asks the reviewer to diff these.
+VERIFIED_SOURCE_KEY = "tt_verified_source"
+VERIFIED_REVISION_KEY = "tt_verified_revision"
+VERIFIED_BY_KEY = "tt_verified_by"
+VERIFIED_AT_KEY = "tt_verified_at"
+_VERIFIED_KEYS = (VERIFIED_SOURCE_KEY, VERIFIED_REVISION_KEY, VERIFIED_BY_KEY, VERIFIED_AT_KEY)
 
 # Markers bracketing the attribution block in a reviewed copy's card body. They render as
 # nothing on the Hub and make the block findable, so re-recording a review REPLACES it
-# rather than stacking a second one — `whitelist` on an already-copied source resumes by
+# rather than stacking a second one — `verify` on an already-copied source resumes by
 # calling `annotate_review` again, every time.
-ATTRIBUTION_MARKER = "tt-whitelist-attribution"
+ATTRIBUTION_MARKER = "tt-verified-attribution"
 _ATTRIBUTION_RE = re.compile(
     rf"<!-- {ATTRIBUTION_MARKER} -->.*?<!-- /{ATTRIBUTION_MARKER} -->\s*", re.DOTALL
 )
@@ -318,7 +317,7 @@ def duplicate_into_org(source_repo_id: str, target_repo_id: str) -> str:
     """Server-side copy of a bundle into the Tenstorrent org. Returns the new repo URL.
 
     ``duplicate_repo`` copies git history and LFS objects on the Hub itself, with no
-    local download/upload — so whitelisting a multi-GB bundle is one request that moves
+    local download/upload — so verifying a multi-GB bundle is one request that moves
     no data. Visibility is inherited from the source, which the caller has already
     established is public, and ``exist_ok=False`` so an existing target is an error the
     caller diagnoses rather than an overwrite of someone else's reviewed copy.
@@ -337,7 +336,7 @@ def duplicate_into_org(source_repo_id: str, target_repo_id: str) -> str:
 def read_review(repo_id: str) -> Optional[dict]:
     """The review keys on a repo's card, or None when it carries no card at all.
 
-    Used to tell "this copy records the bundle I am about to whitelist" (a resumable
+    Used to tell "this copy records the bundle I am about to verify" (a resumable
     half-finished run) from "this copy records a different bundle" (a name collision that
     must not be overwritten). Raises on anything other than a missing card, so a
     transient read failure can never be mistaken for "no review recorded".
@@ -349,7 +348,7 @@ def read_review(repo_id: str) -> Optional[dict]:
         card = ModelCard.load(repo_id)
     except EntryNotFoundError:
         return None
-    return {k: getattr(card.data, k, None) for k in _REVIEW_KEYS}
+    return {k: getattr(card.data, k, None) for k in _VERIFIED_KEYS}
 
 
 def _attribution_block(
@@ -392,7 +391,7 @@ def annotate_review(
 
     The attribution block is PREPENDED, not appended: the team agreed the community
     author is credited in the card's top line. It is also replaced rather than added to,
-    so the resume path (re-running ``whitelist`` on a source already copied) re-records
+    so the resume path (re-running ``verify`` on a source already copied) re-records
     the review instead of stacking a second credit under the first.
 
     ``card.data`` is mutated in place for the reason :func:`tag_repo` documents: building
@@ -405,10 +404,10 @@ def annotate_review(
     from huggingface_hub import ModelCard
 
     card = ModelCard.load(repo_id)  # raises; the CLI renders it as a diagnosis card
-    setattr(card.data, REVIEW_SOURCE_KEY, source)
-    setattr(card.data, REVIEW_REVISION_KEY, revision)
-    setattr(card.data, REVIEW_REVIEWER_KEY, reviewer)
-    setattr(card.data, REVIEW_DATE_KEY, reviewed_at)
+    setattr(card.data, VERIFIED_SOURCE_KEY, source)
+    setattr(card.data, VERIFIED_REVISION_KEY, revision)
+    setattr(card.data, VERIFIED_BY_KEY, reviewer)
+    setattr(card.data, VERIFIED_AT_KEY, reviewed_at)
     body = _ATTRIBUTION_RE.sub("", card.text).lstrip()
     card.text = _attribution_block(source, revision, reviewer, reviewed_at) + body
     card.push_to_hub(repo_id, repo_type=_REPO_TYPE)

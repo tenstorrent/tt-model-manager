@@ -15,7 +15,7 @@ TT_MODEL_TAG = "tt-model-cache"
 # pointers to public HF repos, which remain under their owners' governance.
 TT_MODEL_CATALOG_TAG = "tt-model-catalog"
 
-# The HF organisation that IS the whitelist. Whitelisting copies a reviewed bundle into
+# The HF organisation that holds verified bundles. Verifying copies a reviewed bundle into
 # this namespace, so "has Tenstorrent reviewed this" reduces to "is this repo ours" — a
 # question any consumer can answer from the repo id alone, with no index to fetch and
 # nothing to keep in sync. Write permission here is the gate, and only the DX team has

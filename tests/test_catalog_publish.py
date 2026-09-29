@@ -315,8 +315,8 @@ def test_search_asks_the_hub_for_newest_first(monkeypatch):
     assert seen["filter"] == TT_MODEL_CATALOG_TAG
 
 
-# -- the whitelist ---------------------------------------------------------------------
-# Whitelisting copies a reviewed bundle into the Tenstorrent org. The copy IS the signal:
+# -- verify ----------------------------------------------------------------------------
+# Verifying copies a reviewed bundle into the Tenstorrent org. The copy IS the signal:
 # only the DX team can write that namespace, so an author cannot grant themselves a
 # review, which is what a tag on their own repo could never prevent. The review record
 # lives on the copy's card, so it cannot drift from the artifact it describes.
@@ -332,10 +332,10 @@ def _manifest(weights="Qwen/Qwen3-32B"):
     return type("M", (), {"weights": _W() if weights else None})()
 
 
-def _stub_whitelist(monkeypatch, *, tags=(TT_MODEL_CATALOG_TAG,), private=False,
+def _stub_verify(monkeypatch, *, tags=(TT_MODEL_CATALOG_TAG,), private=False,
                     sha="c" * 40, who={"name": "reviewer"}, repo_id=None,
                     target_exists=False, target_review=None, weights="Qwen/Qwen3-32B"):
-    """Stub every Hub call `whitelist` makes; returns the ordered list of effects.
+    """Stub every Hub call `verify` makes; returns the ordered list of effects.
 
     Order matters and is asserted: a half-finished run (copied but not annotated) is a
     real state the command has to handle, so the tests need to see the sequence.
@@ -358,9 +358,9 @@ def _stub_whitelist(monkeypatch, *, tags=(TT_MODEL_CATALOG_TAG,), private=False,
     return effects
 
 
-def test_whitelist_copies_the_bundle_into_the_org_and_records_the_review(monkeypatch):
-    effects = _stub_whitelist(monkeypatch)
-    res = runner.invoke(cli.app, ["whitelist", "me/listed"])
+def test_verify_copies_the_bundle_into_the_org_and_records_the_review(monkeypatch):
+    effects = _stub_verify(monkeypatch)
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
     assert res.exit_code == 0, res.output
     assert effects == [
         ("copy", "me/listed", f"{TT_ORG}/Qwen3-32B"),
@@ -368,136 +368,139 @@ def test_whitelist_copies_the_bundle_into_the_org_and_records_the_review(monkeyp
         ("list", f"{TT_ORG}/Qwen3-32B", True),
     ]
     assert f"{TT_ORG}/Qwen3-32B" in res.output
+    # the original is kept, not superseded
+    out = " ".join(res.output.split())
+    assert "stays listed as unverified" in out and "supersedes" not in out
 
 
-def test_whitelist_names_the_copy_after_the_weights_repo_not_the_bundle(monkeypatch):
+def test_verify_names_the_copy_after_the_weights_repo_not_the_bundle(monkeypatch):
     """The team's convention, and it is the better name: the canonical model id rather
     than an author's packaging slug (`someone/qwen3-32b-blackhole-v51`)."""
-    effects = _stub_whitelist(monkeypatch, weights="openai/gpt-oss-120b")
-    res = runner.invoke(cli.app, ["whitelist", "tt-hous/gpt-oss-120b-p150x4"])
+    effects = _stub_verify(monkeypatch, weights="openai/gpt-oss-120b")
+    res = runner.invoke(cli.app, ["verify", "tt-hous/gpt-oss-120b-p150x4"])
     assert res.exit_code == 0, res.output
     assert effects[0] == ("copy", "tt-hous/gpt-oss-120b-p150x4", f"{TT_ORG}/gpt-oss-120b")
 
 
-def test_whitelist_records_the_hubs_own_spelling_of_the_source(monkeypatch):
-    effects = _stub_whitelist(monkeypatch, repo_id="Me/Listed")
-    res = runner.invoke(cli.app, ["whitelist", "me/listed"])
+def test_verify_records_the_hubs_own_spelling_of_the_source(monkeypatch):
+    effects = _stub_verify(monkeypatch, repo_id="Me/Listed")
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
     assert res.exit_code == 0, res.output
     assert effects[1][2] == "Me/Listed"
 
 
-def test_whitelist_lists_the_copy_explicitly(monkeypatch):
+def test_verify_lists_the_copy_explicitly(monkeypatch):
     """Not left to tag inheritance: a public-but-unlisted source would otherwise produce
     a copy nobody can find."""
-    effects = _stub_whitelist(monkeypatch)
-    runner.invoke(cli.app, ["whitelist", "me/listed"])
+    effects = _stub_verify(monkeypatch)
+    runner.invoke(cli.app, ["verify", "me/listed"])
     assert ("list", f"{TT_ORG}/Qwen3-32B", True) in effects
 
 
-def test_whitelist_refuses_a_bundle_that_is_not_listed(monkeypatch):
-    effects = _stub_whitelist(monkeypatch, tags=[])
-    res = runner.invoke(cli.app, ["whitelist", "me/unlisted"])
+def test_verify_refuses_a_bundle_that_is_not_listed(monkeypatch):
+    effects = _stub_verify(monkeypatch, tags=[])
+    res = runner.invoke(cli.app, ["verify", "me/unlisted"])
     assert res.exit_code != 0
     assert effects == []
     assert "not in the community catalog" in res.output
 
 
-def test_whitelist_refuses_a_private_bundle(monkeypatch):
-    effects = _stub_whitelist(monkeypatch, private=True)
-    res = runner.invoke(cli.app, ["whitelist", "me/private"])
+def test_verify_refuses_a_private_bundle(monkeypatch):
+    effects = _stub_verify(monkeypatch, private=True)
+    res = runner.invoke(cli.app, ["verify", "me/private"])
     assert res.exit_code != 0
     assert effects == []
     assert "private" in res.output
 
 
-def test_whitelist_needs_a_logged_in_reviewer(monkeypatch):
-    effects = _stub_whitelist(monkeypatch, who=None)
-    res = runner.invoke(cli.app, ["whitelist", "me/listed"])
+def test_verify_needs_a_logged_in_reviewer(monkeypatch):
+    effects = _stub_verify(monkeypatch, who=None)
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
     assert res.exit_code != 0
     assert effects == []
     assert "login" in res.output
 
 
-def test_whitelist_refuses_when_the_manifest_names_no_weights_repo(monkeypatch):
+def test_verify_refuses_when_the_manifest_names_no_weights_repo(monkeypatch):
     """There is no name to copy to — the convention derives it from the weights repo."""
-    effects = _stub_whitelist(monkeypatch, weights=None)
-    res = runner.invoke(cli.app, ["whitelist", "me/listed"])
+    effects = _stub_verify(monkeypatch, weights=None)
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
     assert res.exit_code != 0
     assert effects == []
     assert "no weights repo" in res.output
 
 
-def test_whitelist_refuses_a_name_already_taken_by_another_bundle(monkeypatch):
+def test_verify_refuses_a_name_already_taken_by_another_bundle(monkeypatch):
     """Two bundles of one model collide on the derived name. Never overwrite: the other
     copy is a reviewed artifact someone may be relying on."""
-    effects = _stub_whitelist(
+    effects = _stub_verify(
         monkeypatch, target_exists=True,
-        target_review={hub.REVIEW_SOURCE_KEY: "someone-else/qwen3-32b-p300x2"})
-    res = runner.invoke(cli.app, ["whitelist", "me/listed"])
+        target_review={hub.VERIFIED_SOURCE_KEY: "someone-else/qwen3-32b-p300x2"})
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
     assert res.exit_code != 0
     assert effects == []                     # nothing copied, nothing annotated
     assert "already exists" in res.output
     assert "someone-else/qwen3-32b-p300x2" in res.output
-    assert "unwhitelist" in res.output       # and it names the way out
+    assert "unverify" in res.output       # and it names the way out
 
 
-def test_whitelist_resumes_a_half_finished_run_without_copying_again(monkeypatch):
+def test_verify_resumes_a_half_finished_run_without_copying_again(monkeypatch):
     """If annotate failed after the copy landed, re-running must finish the job rather
     than be permanently blocked by its own half-written state."""
-    effects = _stub_whitelist(
+    effects = _stub_verify(
         monkeypatch, target_exists=True,
-        target_review={hub.REVIEW_SOURCE_KEY: "me/listed"})
-    res = runner.invoke(cli.app, ["whitelist", "me/listed"])
+        target_review={hub.VERIFIED_SOURCE_KEY: "me/listed"})
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
     assert res.exit_code == 0, res.output
     assert [e[0] for e in effects] == ["annotate", "list"]   # no second copy
     assert "re-recording" in res.output
 
 
-def test_whitelist_matches_an_existing_copys_source_case_insensitively(monkeypatch):
-    effects = _stub_whitelist(
+def test_verify_matches_an_existing_copys_source_case_insensitively(monkeypatch):
+    effects = _stub_verify(
         monkeypatch, target_exists=True,
-        target_review={hub.REVIEW_SOURCE_KEY: "Me/Listed"})
-    res = runner.invoke(cli.app, ["whitelist", "me/listed"])
+        target_review={hub.VERIFIED_SOURCE_KEY: "Me/Listed"})
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
     assert res.exit_code == 0, res.output
     assert [e[0] for e in effects] == ["annotate", "list"]
 
 
-def test_whitelist_does_not_confuse_an_unreadable_repo_with_an_unlisted_one(monkeypatch):
+def test_verify_does_not_confuse_an_unreadable_repo_with_an_unlisted_one(monkeypatch):
     """`repo_state` raises rather than failing to False, so a network blip cannot produce
     a confident, false "not in the catalog" refusal."""
-    _stub_whitelist(monkeypatch)
+    _stub_verify(monkeypatch)
     monkeypatch.setattr(hub, "repo_state",
                         lambda rid: (_ for _ in ()).throw(ConnectionError("hub 503")))
-    res = runner.invoke(cli.app, ["whitelist", "me/listed"])
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
     assert res.exit_code != 0
     assert "not in the community catalog" not in res.output
 
 
-def test_whitelist_says_so_when_it_cannot_record_a_source_revision(monkeypatch):
-    effects = _stub_whitelist(monkeypatch, sha=None)
-    res = runner.invoke(cli.app, ["whitelist", "me/listed"])
+def test_verify_says_so_when_it_cannot_record_a_source_revision(monkeypatch):
+    effects = _stub_verify(monkeypatch, sha=None)
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
     assert res.exit_code == 0, res.output
     assert effects[1][3] is None            # revision recorded as null
     assert "no source revision" in res.output
 
 
-def test_unwhitelist_delists_the_copy_and_keeps_it(monkeypatch):
+def test_unverify_delists_the_copy_and_keeps_it(monkeypatch):
     calls = []
     monkeypatch.setattr(hub, "set_catalog_listing",
                         lambda rid, listed: calls.append((rid, listed)))
-    res = runner.invoke(cli.app, ["unwhitelist", f"{TT_ORG}/Qwen3-32B"])
+    res = runner.invoke(cli.app, ["unverify", f"{TT_ORG}/Qwen3-32B"])
     assert res.exit_code == 0, res.output
     assert calls == [(f"{TT_ORG}/Qwen3-32B", False)]
     assert "unchanged" in res.output        # the reviewed snapshot is kept
 
 
-def test_unwhitelist_refuses_a_community_repo(monkeypatch):
+def test_unverify_refuses_a_community_repo(monkeypatch):
     """Passing the original rather than the copy is the easy slip, and delisting someone
     else's repo is not ours to do."""
     calls = []
     monkeypatch.setattr(hub, "set_catalog_listing",
                         lambda rid, listed: calls.append((rid, listed)))
-    res = runner.invoke(cli.app, ["unwhitelist", "me/listed"])
+    res = runner.invoke(cli.app, ["unverify", "me/listed"])
     assert res.exit_code != 0
     assert calls == []
     assert f"not a {TT_ORG} copy" in res.output
@@ -560,10 +563,10 @@ def test_annotate_review_writes_the_keys_tt_cli_reads(monkeypatch):
     pushed = _fake_card(monkeypatch, data={"license": "apache-2.0"})
     hub.annotate_review(f"{TT_ORG}/Qwen3-32B", source="me/listed", revision="d" * 40,
                         reviewer="sam", reviewed_at="2026-09-22T12:00:00Z")
-    assert pushed["data"][hub.REVIEW_SOURCE_KEY] == "me/listed"
-    assert pushed["data"][hub.REVIEW_REVISION_KEY] == "d" * 40
-    assert pushed["data"][hub.REVIEW_REVIEWER_KEY] == "sam"
-    assert pushed["data"][hub.REVIEW_DATE_KEY] == "2026-09-22T12:00:00Z"
+    assert pushed["data"][hub.VERIFIED_SOURCE_KEY] == "me/listed"
+    assert pushed["data"][hub.VERIFIED_REVISION_KEY] == "d" * 40
+    assert pushed["data"][hub.VERIFIED_BY_KEY] == "sam"
+    assert pushed["data"][hub.VERIFIED_AT_KEY] == "2026-09-22T12:00:00Z"
     # the author's own frontmatter survives — card.data is mutated, not rebuilt
     assert pushed["data"]["license"] == "apache-2.0"
     # and the body gains the attribution, keeping what was there
@@ -573,7 +576,7 @@ def test_annotate_review_writes_the_keys_tt_cli_reads(monkeypatch):
 
 
 def test_annotate_review_credits_the_author_in_the_cards_top_line(monkeypatch):
-    """The team's bargain for whitelisting: the copy earns the Tenstorrent org's traffic,
+    """The team's bargain for verifying: the copy earns the Tenstorrent org's traffic,
     so the community author is credited where a reader lands, not under the fold."""
     pushed = _fake_card(monkeypatch, text="# Qwen3-32B\n\nthe author's own words")
     hub.annotate_review(f"{TT_ORG}/Qwen3-32B", source="someauthor/foo", revision="d" * 40,
@@ -589,7 +592,7 @@ def test_annotate_review_credits_the_author_in_the_cards_top_line(monkeypatch):
 
 
 def test_annotate_review_replaces_its_own_block_rather_than_stacking(monkeypatch):
-    """`whitelist` resumes by re-annotating an already-copied source, so this runs again
+    """`verify` resumes by re-annotating an already-copied source, so this runs again
     on a card it wrote. A second credit under the first would be the visible bug."""
     pushed = _fake_card(monkeypatch, text="# Qwen3-32B\n\nbody")
     hub.annotate_review(f"{TT_ORG}/Qwen3-32B", source="someauthor/foo", revision="a" * 40,
@@ -649,5 +652,5 @@ def test_read_review_propagates_a_real_failure(monkeypatch):
 
 
 def test_read_review_reports_the_recorded_source(monkeypatch):
-    _fake_card(monkeypatch, data={hub.REVIEW_SOURCE_KEY: "me/listed"})
-    assert hub.read_review(f"{TT_ORG}/x")[hub.REVIEW_SOURCE_KEY] == "me/listed"
+    _fake_card(monkeypatch, data={hub.VERIFIED_SOURCE_KEY: "me/listed"})
+    assert hub.read_review(f"{TT_ORG}/x")[hub.VERIFIED_SOURCE_KEY] == "me/listed"
