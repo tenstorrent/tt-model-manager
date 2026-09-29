@@ -862,6 +862,15 @@ def package_thin(
     typer.secho(f"✓ Staged v6 thin bundle {manifest.name} at {staged}", fg=typer.colors.GREEN)
     typer.echo(f"  runner: {model_path.name}   deps: {manifest.deps.requirements}"
                + (f" + {len(manifest.deps.wheels)} bundled wheel(s)" if manifest.deps.wheels else ""))
+    if manifest.deps.custom_ops:
+        typer.echo(f"  custom ops: {len(manifest.deps.custom_ops)} generic_op wheel(s), "
+                   "auto-recorded from model.py imports")
+    unimported_ops = [Path(w).name for w in (ops_wheel or [])
+                      if f"{packaging.WHEELS_DIR}/{Path(w).name}" not in manifest.deps.custom_ops]
+    if unimported_ops:
+        typer.secho(f"  ! --ops-wheel not imported by {model_path.name}, so not recorded as a "
+                    f"custom op (shipped and installed regardless): {', '.join(unimported_ops)}",
+                    fg=typer.colors.YELLOW)
     if manifest.deps.models_wheels:
         typer.echo(f"  local pins: {len(manifest.deps.models_wheels)} models wheel(s) "
                    "resolved via --find-links (not on an index yet)")

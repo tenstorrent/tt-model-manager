@@ -41,6 +41,12 @@ full platform. There is **no embedded `ttnn` wheel and no `metal/` tree**.
 - `requirements`: the pins file (default `requirements.txt`), `ttnn` / `tt-metal-models` only
 - `wheels`: bundle-relative wheels installed **by path** (`vllm-tt-plugin`, then any `generic_op` wheels)
 - `wheels_dir`: the dir holding them (`wheels`), also put on `--find-links`
+- `custom_ops`: bundle-relative paths of the shipped `generic_op` wheels `model.py` actually
+  **imports** — auto-recorded at package time, so you never hand-maintain the list. Metadata only
+  (discovery/provenance): a subset of `wheels`, it does **not** drive installation, and how you
+  ship/import ops is unchanged (`--ops-wheel` still installs by path). An op reached only by
+  `ttnn.generic_op("name", ...)` with no Python `import` is not detected (still shipped and served,
+  just not listed).
 - `vllm`: the empty-target vLLM install step (below): `version`, `target_device` (`empty`),
   `overrides` (the pins file), `common_requirements` (optional bundled copy, else fetched),
   `wheel` (optional prebuilt empty-target wheel). `None` for a non-vLLM model.
