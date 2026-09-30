@@ -56,6 +56,41 @@ LABEL = "org.tenstorrent.tt-model"
 #: to know exactly what one of our own containers holds without re-parsing its device mounts.
 DEVICES_LABEL = f"{LABEL}.devices"
 
+#: Namespace for DESCRIPTIVE labels a UI (e.g. TT Studio) reads so it does not have to
+#: reverse-engineer a served package from its repo name, image name, or routes (issue #140).
+#: Distinct from the ``org.tenstorrent.tt-model.*`` labels above, which are operational (we use
+#: them to FIND and manage our own containers). Only facts the manifest already knows are emitted;
+#: a semantic task taxonomy (chat / image_generation / ...) needs a manifest field and is a
+#: deliberate follow-up, so it is NOT guessed here.
+DESCRIPTOR_LABEL_NS = "tt.model"
+
+
+def descriptor_labels(m: Manifest, profile: ServeProfile, port: int) -> Dict[str, str]:
+    """The ``tt.model.*`` descriptor labels for a container serve, derived from the manifest.
+
+    Answers a UI's "what is this package?" from what the manifest already encodes: the serving
+    stack (``kind``), whether it speaks the OpenAI API, whether tool calling / reasoning parsing
+    are on for this profile, the port, and the schema. It does not invent a ``task`` value — that
+    would need a new authored field (#140 open question) — so an image-gen package is reported as
+    ``kind=tt-dit-server`` / ``openai_compatible=false`` (enough to stop a consumer registering it
+    as chat) rather than mislabelled.
+    """
+    spec = m.container
+    assert spec is not None
+    caps = profile.capabilities
+    return {
+        f"{DESCRIPTOR_LABEL_NS}.kind": spec.kind,
+        f"{DESCRIPTOR_LABEL_NS}.openai_compatible": _b(spec.kind in ("vllm-plugin", "vllm-fork")),
+        f"{DESCRIPTOR_LABEL_NS}.tool_calling": _b(bool(caps and caps.tool_parser)),
+        f"{DESCRIPTOR_LABEL_NS}.reasoning": _b(bool(caps and caps.reasoning_parser)),
+        f"{DESCRIPTOR_LABEL_NS}.port": str(port),
+        f"{DESCRIPTOR_LABEL_NS}.manifest_schema": m.schema_version,
+    }
+
+
+def _b(value: bool) -> str:
+    return "true" if value else "false"
+
 # SIGTERM lets the server close the mesh on its way out; SIGKILL does not, and leaves the
 # devices needing a reset before anything can open them again. Boot alone is ~10 minutes,
 # so the grace period is deliberately generous.
@@ -747,6 +782,9 @@ def compose_run(
         "--label", f"{LABEL}={m.name}",
         "--label", f"{LABEL}.profile={profile.name}",
     ]
+    # Descriptive labels so a UI can read what this package is instead of guessing (issue #140).
+    for k, v in descriptor_labels(m, profile, port).items():
+        cmd += ["--label", f"{k}={v}"]
     if device_ids is not None:
         cmd += ["--label", f"{DEVICES_LABEL}={','.join(str(d) for d in device_ids)}"]
         for d in device_ids:
