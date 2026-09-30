@@ -127,6 +127,12 @@ What the commands guarantee:
 - **The author's repo is never touched.** `duplicate_repo` is a server-side copy — it reads the
   source and writes only the new repo. A review costs one request and moves no bundle data, even
   for a multi-GB image.
+- **The copy stays private until it is complete.** It is made private, then its review is
+  recorded, then it is listed, and only then made public. `tt model list` counts anything in the
+  org as verified, so a copy that went public first would show as verified with no credit to the
+  author. A run that fails part way leaves nothing public. One gap: the private copy carries the
+  source's catalog tag from the start, so someone whose token can see private org repos may see
+  it early.
 - **The copy is a snapshot.** It records the source repo and the exact revision it was copied at,
   in its own card frontmatter. Later commits to the original are *not* covered by the review, and
   `Tenstorrent/...` does not track upstream.
@@ -144,9 +150,14 @@ What the commands guarantee:
 - **A name collision refuses.** Two bundles of the same model — two board targets, or two authors
   packaging the same upstream weights — derive the same name. The second is refused, naming the
   existing copy and what it was made from; it is never overwritten, because a reviewed artifact
-  someone may be relying on is not ours to replace silently.
-- **A half-finished run resumes.** If the copy landed but its review record did not, re-running
-  re-records rather than being permanently blocked by its own partial state.
+  someone may be relying on is not ours to replace silently. `unverify` does not free the name
+  (it only delists). If the other copy is abandoned, delete it on the Hub and re-run.
+- **A half-finished run resumes.** Re-running `verify` finishes a run that stopped part way
+  instead of copying again. The existing copy counts as this run's when its card records this
+  source, or, before the review is recorded, when its files are exactly the source's at the
+  revision being verified. (A server-side copy does not keep the source's commit history, but
+  it keeps every file byte for byte.) A copy of an older revision of the source does not count,
+  so it is never finished with a revision it does not contain.
 - **Withdrawing keeps the artifact.** `unverify` delists the copy and leaves the repo, so
   anyone who pinned it can still reach it, and the original is unaffected. Delete the
   repo by hand on the Hub if it should be gone entirely. It takes the **copy's** id — passing the

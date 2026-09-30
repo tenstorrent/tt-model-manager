@@ -1946,6 +1946,9 @@ def verify(
     touched, and stays listed as unverified. The copy records what it came from and is a
     snapshot of that revision: later commits to the original are not covered.
 
+    The copy stays private until its review is recorded and it is listed, so a run that
+    fails part way leaves nothing public. Re-running finishes it.
+
     The bundle must already be listed (``tt-model publish``) and public. Listing is the
     AUTHOR's decision and this command never makes it for them.
     """
@@ -1991,27 +1994,44 @@ def verify(
     # Existing target: either this is a half-finished run to resume, or it is a different
     # bundle's copy and the name has collided. Never overwrite the latter — a reviewed
     # artifact someone may be relying on is not ours to replace silently.
-    already = None
+    resumed = None  # None: fresh copy; else what the milestone says was done
     if _hub(lambda: hub.repo_exists(target), target, what="Verify"):
         review = _hub(lambda: hub.read_review(target), target, what="Verify") or {}
         recorded = review.get(hub.VERIFIED_SOURCE_KEY)
         if recorded and str(recorded).lower() == source.lower():
-            already = recorded
+            resumed = "re-recorded"
             console.note(
                 f"{target} already records {source} — re-recording the review rather than "
                 "copying again",
                 marker="○", style="muted",
             )
+        elif not recorded and state.sha and _hub(
+            lambda: hub.is_copy_of(target, repo_id, state.sha), target, what="Verify"
+        ):
+            # A run that copied but failed before recording the review.
+            resumed = "finished copying"
+            console.note(
+                f"{target} is an unfinished copy of {source} — finishing it rather than "
+                "copying again",
+                marker="○", style="muted",
+            )
         else:
+            if recorded:
+                why = f"{target} already exists, copied from {recorded}"
+            elif state.sha:
+                why = (f"{target} already exists and records no review, and it is not a "
+                       f"copy of {repo_id} at {state.sha[:9]}")
+            else:
+                why = (f"{target} already exists and records no review, and with no head "
+                       f"commit for {repo_id} it cannot be matched to this bundle")
             raise _err(
-                f"{target} already exists" + (f", copied from {recorded}" if recorded else "")
-                + f", so {repo_id} cannot take that name.\n"
+                f"{why}, so {repo_id} cannot take that name.\n"
                 f"  The name comes from the weights repo, so two bundles of the same model\n"
-                f"  collide here. Withdraw the other copy first (tt-model unverify\n"
-                f"  {target}) if it should be replaced, or agree a suffix with the team."
+                f"  collide here. If that copy is abandoned, delete it on the Hub\n"
+                f"  (https://huggingface.co/{target}/settings) and re-run."
             )
 
-    if already is None:
+    if resumed is None:
         _hub(lambda: hub.duplicate_into_org(repo_id, target), repo_id, what="Verify",
              consequence=f"nothing was copied into {TT_ORG}")
     reviewed_at = (
@@ -2020,13 +2040,19 @@ def verify(
     _hub(lambda: hub.annotate_review(target, source=source, revision=state.sha,
                                      reviewer=reviewer, reviewed_at=reviewed_at),
          target, what="Verify",
-         consequence=f"{target} exists but carries no review record — re-run to finish")
+         consequence=f"{target} exists, private, with no review record — re-run to finish")
     # Explicit rather than relying on the copy inheriting the tag: a source that was
     # public-but-unlisted would otherwise produce a copy nobody can find.
-    _hub(lambda: hub.set_catalog_listing(target, listed=True), target, what="Verify")
+    _hub(lambda: hub.set_catalog_listing(target, listed=True), target, what="Verify",
+         consequence=f"{target} is reviewed but private and unlisted — re-run to finish")
+    # Last, so the copy is only public once it is complete. The private copy still
+    # carries the source's catalog tag, so someone whose token can see private org repos
+    # may see it before this.
+    _hub(lambda: hub.set_visibility(target, private=False), target, what="Verify",
+         consequence=f"{target} is reviewed and listed but still private — re-run to finish")
 
     console.milestone(
-        f"{'re-recorded' if already else 'copied'} {source} to {target} as verified by "
+        f"{resumed or 'copied'} {source} to {target} as verified by "
         f"Tenstorrent" + (f" (at {state.sha[:9]})" if state.sha else "")
         + f" — it now shows in `tt model list`, and {source} stays listed as unverified; "
         f"undo with `tt-model unverify {target}`"

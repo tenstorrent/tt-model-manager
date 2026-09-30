@@ -334,7 +334,8 @@ def _manifest(weights="Qwen/Qwen3-32B"):
 
 def _stub_verify(monkeypatch, *, tags=(TT_MODEL_CATALOG_TAG,), private=False,
                     sha="c" * 40, who={"name": "reviewer"}, repo_id=None,
-                    target_exists=False, target_review=None, weights="Qwen/Qwen3-32B"):
+                    target_exists=False, target_review=None, weights="Qwen/Qwen3-32B",
+                    copy_of=False, annotate_error=None):
     """Stub every Hub call `verify` makes; returns the ordered list of effects.
 
     Order matters and is asserted: a half-finished run (copied but not annotated) is a
@@ -349,13 +350,28 @@ def _stub_verify(monkeypatch, *, tags=(TT_MODEL_CATALOG_TAG,), private=False,
     monkeypatch.setattr(auth, "whoami", lambda: who)
     monkeypatch.setattr(hub, "duplicate_into_org",
                         lambda src, dst: effects.append(("copy", src, dst)))
-    monkeypatch.setattr(
-        hub, "annotate_review",
-        lambda rid, **kw: effects.append(("annotate", rid, kw["source"], kw["revision"],
-                                          kw["reviewer"])))
+    def annotate(rid, **kw):
+        if annotate_error:
+            raise annotate_error
+        effects.append(("annotate", rid, kw["source"], kw["revision"], kw["reviewer"]))
+
+    monkeypatch.setattr(hub, "annotate_review", annotate)
     monkeypatch.setattr(hub, "set_catalog_listing",
                         lambda rid, listed: effects.append(("list", rid, listed)))
+    monkeypatch.setattr(hub, "set_visibility",
+                        lambda rid, private: effects.append(("publish", rid, private)))
+
+    def is_copy_of(rid, source_rid, source_sha):
+        effects.append(("is_copy_of", rid, source_rid, source_sha))
+        return copy_of
+
+    monkeypatch.setattr(hub, "is_copy_of", is_copy_of)
     return effects
+
+
+def _kinds(effects):
+    """Effect names, without the read-only is_copy_of check."""
+    return [e[0] for e in effects if e[0] != "is_copy_of"]
 
 
 def test_verify_copies_the_bundle_into_the_org_and_records_the_review(monkeypatch):
@@ -366,6 +382,7 @@ def test_verify_copies_the_bundle_into_the_org_and_records_the_review(monkeypatc
         ("copy", "me/listed", f"{TT_ORG}/Qwen3-32B"),
         ("annotate", f"{TT_ORG}/Qwen3-32B", "me/listed", "c" * 40, "reviewer"),
         ("list", f"{TT_ORG}/Qwen3-32B", True),
+        ("publish", f"{TT_ORG}/Qwen3-32B", False),
     ]
     assert f"{TT_ORG}/Qwen3-32B" in res.output
     # the original is kept, not superseded
@@ -441,7 +458,10 @@ def test_verify_refuses_a_name_already_taken_by_another_bundle(monkeypatch):
     assert effects == []                     # nothing copied, nothing annotated
     assert "already exists" in res.output
     assert "someone-else/qwen3-32b-p300x2" in res.output
-    assert "unverify" in res.output       # and it names the way out
+    # unverify only delists, so it cannot free the name; the real way out is named
+    out = " ".join(res.output.split())
+    assert "unverify" not in out
+    assert "delete it on the Hub" in out
 
 
 def test_verify_resumes_a_half_finished_run_without_copying_again(monkeypatch):
@@ -452,7 +472,7 @@ def test_verify_resumes_a_half_finished_run_without_copying_again(monkeypatch):
         target_review={hub.VERIFIED_SOURCE_KEY: "me/listed"})
     res = runner.invoke(cli.app, ["verify", "me/listed"])
     assert res.exit_code == 0, res.output
-    assert [e[0] for e in effects] == ["annotate", "list"]   # no second copy
+    assert _kinds(effects) == ["annotate", "list", "publish"]   # no second copy
     assert "re-recording" in res.output
 
 
@@ -462,7 +482,59 @@ def test_verify_matches_an_existing_copys_source_case_insensitively(monkeypatch)
         target_review={hub.VERIFIED_SOURCE_KEY: "Me/Listed"})
     res = runner.invoke(cli.app, ["verify", "me/listed"])
     assert res.exit_code == 0, res.output
-    assert [e[0] for e in effects] == ["annotate", "list"]
+    assert _kinds(effects) == ["annotate", "list", "publish"]
+
+
+def test_verify_makes_the_copy_public_only_once_it_is_reviewed_and_listed(monkeypatch):
+    """tt-cli counts anything in the org as verified, so a public copy without its
+    review record would show as verified with no credit to the author."""
+    effects = _stub_verify(monkeypatch)
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
+    assert res.exit_code == 0, res.output
+    assert _kinds(effects)[-1] == "publish"
+    assert effects[-1] == ("publish", f"{TT_ORG}/Qwen3-32B", False)
+
+
+def test_verify_leaves_nothing_public_when_the_review_cannot_be_recorded(monkeypatch):
+    effects = _stub_verify(monkeypatch, annotate_error=ConnectionError("hub 503"))
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
+    assert res.exit_code != 0
+    assert _kinds(effects) == ["copy"]      # copied (privately), then stopped
+    assert "re-run to finish" in " ".join(res.output.replace("│", " ").split())
+
+
+def test_verify_finishes_its_own_unfinished_copy(monkeypatch):
+    """The copy landed but the review was never recorded, so the copy has no source key.
+    It is still ours: its files are the source's at the revision being verified."""
+    effects = _stub_verify(monkeypatch, target_exists=True, target_review=None,
+                           copy_of=True)
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
+    assert res.exit_code == 0, res.output
+    assert ("is_copy_of", f"{TT_ORG}/Qwen3-32B", "me/listed", "c" * 40) in effects
+    assert _kinds(effects) == ["annotate", "list", "publish"]   # no second copy
+    assert "unfinished copy" in " ".join(res.output.split())
+
+
+def test_verify_refuses_an_unrecorded_repo_that_is_not_its_copy(monkeypatch):
+    effects = _stub_verify(monkeypatch, target_exists=True,
+                           target_review={hub.VERIFIED_SOURCE_KEY: None}, copy_of=False)
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
+    assert res.exit_code != 0
+    assert _kinds(effects) == []
+    out = " ".join(res.output.split())
+    assert "cannot take that name" in out
+    assert "unverify" not in out
+
+
+def test_verify_refuses_an_unrecorded_repo_when_the_source_has_no_sha(monkeypatch):
+    """With no head commit there is nothing to match the copy against, so it cannot be
+    told apart from another bundle's."""
+    effects = _stub_verify(monkeypatch, sha=None, target_exists=True, target_review=None,
+                           copy_of=True)
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
+    assert res.exit_code != 0
+    assert effects == []                    # not even asked
+    assert "cannot be matched" in " ".join(res.output.split())
 
 
 def test_verify_does_not_confuse_an_unreadable_repo_with_an_unlisted_one(monkeypatch):
@@ -527,6 +599,75 @@ def test_duplicate_into_org_asks_for_a_server_side_model_copy(monkeypatch):
     assert seen["to_id"] == f"{TT_ORG}/Qwen3-32B"
     assert seen["repo_type"] == "model"
     assert seen["exist_ok"] is False
+    assert seen["private"] is True          # public only once `verify` has finished
+
+
+def _tree_api(monkeypatch, trees, error=None):
+    """Stand in for list_repo_tree; ``trees`` maps (repo_id, revision) to its entries."""
+    calls = []
+
+    class _Api:
+        def list_repo_tree(self, repo_id, revision=None, recursive=False, repo_type=None):
+            calls.append((repo_id, revision))
+            assert recursive and repo_type == "model"
+            if error:
+                raise error
+            return trees[(repo_id, revision)]
+
+    monkeypatch.setattr(hub, "_api", lambda: _Api())
+    return calls
+
+
+def _file(path, blob, lfs=None):
+    return type("F", (), {"path": path, "blob_id": blob,
+                          "lfs": type("L", (), {"sha256": lfs})() if lfs else None})()
+
+
+def _folder(path):
+    return type("D", (), {"path": path, "tree_id": "t"})()
+
+
+_SOURCE_FILES = [_file("README.md", "r1"), _folder("weights"),
+                 _file("weights/model.safetensors", "w1", lfs="s1")]
+
+
+def test_is_copy_of_matches_a_copy_with_the_sources_files_at_that_revision(monkeypatch):
+    # duplicate_repo does not keep history (the copy starts with one new commit), so the
+    # match is on the files: same blob ids and LFS hashes as the source at `sha`.
+    calls = _tree_api(monkeypatch, {
+        (f"{TT_ORG}/x", None): list(_SOURCE_FILES),
+        ("me/listed", "c" * 40): list(_SOURCE_FILES),
+    })
+    assert hub.is_copy_of(f"{TT_ORG}/x", "me/listed", "c" * 40) is True
+    assert ("me/listed", "c" * 40) in calls   # the revision verified, not the tip
+
+
+def test_is_copy_of_is_false_for_a_copy_of_another_revision(monkeypatch):
+    _tree_api(monkeypatch, {
+        (f"{TT_ORG}/x", None): [_file("README.md", "r1"),
+                                _file("weights/model.safetensors", "w0", lfs="s0")],
+        ("me/listed", "c" * 40): list(_SOURCE_FILES),
+    })
+    assert hub.is_copy_of(f"{TT_ORG}/x", "me/listed", "c" * 40) is False
+
+
+def test_is_copy_of_is_false_when_a_file_is_missing(monkeypatch):
+    _tree_api(monkeypatch, {
+        (f"{TT_ORG}/x", None): [_file("README.md", "r1")],
+        ("me/listed", "c" * 40): list(_SOURCE_FILES),
+    })
+    assert hub.is_copy_of(f"{TT_ORG}/x", "me/listed", "c" * 40) is False
+
+
+def test_is_copy_of_does_not_match_two_empty_repos(monkeypatch):
+    _tree_api(monkeypatch, {(f"{TT_ORG}/x", None): [], ("me/listed", "c" * 40): []})
+    assert hub.is_copy_of(f"{TT_ORG}/x", "me/listed", "c" * 40) is False
+
+
+def test_is_copy_of_raises_rather_than_guessing(monkeypatch):
+    _tree_api(monkeypatch, {}, error=ConnectionError("hub 503"))
+    with pytest.raises(ConnectionError):
+        hub.is_copy_of(f"{TT_ORG}/x", "me/listed", "c" * 40)
 
 
 def _fake_card(monkeypatch, *, data=None, text="# t\n\nbody", load_error=None):

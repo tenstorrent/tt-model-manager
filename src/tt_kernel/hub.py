@@ -318,8 +318,10 @@ def duplicate_into_org(source_repo_id: str, target_repo_id: str) -> str:
 
     ``duplicate_repo`` copies git history and LFS objects on the Hub itself, with no
     local download/upload — so verifying a multi-GB bundle is one request that moves
-    no data. Visibility is inherited from the source, which the caller has already
-    established is public, and ``exist_ok=False`` so an existing target is an error the
+    no data. The copy is PRIVATE, whatever the source's visibility: it carries the
+    source's catalog tag, and tt-cli counts anything in the org as verified, so a public
+    copy would show as verified before its review is recorded. The caller makes it
+    public as the last step. ``exist_ok=False`` so an existing target is an error the
     caller diagnoses rather than an overwrite of someone else's reviewed copy.
 
     Nothing is written to the source: an author's repo is never touched by a review.
@@ -328,9 +330,43 @@ def duplicate_into_org(source_repo_id: str, target_repo_id: str) -> str:
         from_id=source_repo_id,
         to_id=target_repo_id,
         repo_type=_REPO_TYPE,
+        private=True,
         exist_ok=False,
     )
     return str(url)
+
+
+def _file_tree(repo_id: str, revision: Optional[str]) -> dict:
+    """Every file in the repo at ``revision``, as path -> (git blob id, LFS sha256)."""
+    entries = _api().list_repo_tree(
+        repo_id, revision=revision, recursive=True, repo_type=_REPO_TYPE
+    )
+    tree = {}
+    for e in entries:
+        if getattr(e, "blob_id", None) is None:  # a folder
+            continue
+        lfs = getattr(e, "lfs", None)
+        tree[e.path] = (e.blob_id, getattr(lfs, "sha256", None) if lfs else None)
+    return tree
+
+
+def is_copy_of(repo_id: str, source_repo_id: str, source_sha: str) -> bool:
+    """Whether ``repo_id`` holds exactly the files of ``source_repo_id`` at ``source_sha``.
+
+    Lets ``verify`` recognise its own unfinished copy, which has no review record yet.
+    ``duplicate_repo`` does not keep the source's history (the copy starts with one new
+    "Duplicate from" commit), but it does keep every file byte for byte, so the git blob
+    ids and LFS hashes match the source at the revision copied. A copy of an older
+    revision does not match, which is the point: finishing it would record a revision it
+    does not contain. Compares listings only; nothing is downloaded.
+
+    Only meaningful before the review is recorded, since recording it rewrites the card.
+
+    Raises on Hub errors, like :func:`read_review`: "could not check" must not read as
+    "not ours" (a refusal) any more than as "ours".
+    """
+    copy = _file_tree(repo_id, None)
+    return bool(copy) and copy == _file_tree(source_repo_id, source_sha)
 
 
 def read_review(repo_id: str) -> Optional[dict]:
