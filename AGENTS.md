@@ -42,7 +42,10 @@ violates one of these is wrong even if tests pass:
      `generic_op` wheel) and serves `vllm.entrypoints.openai.api_server`; `"tt-dit-server"` (no
      vLLM step regardless of `--vllm`/`--no-vllm`) serves `deps.app` directly with uvicorn
      instead, for a model with no tokens, KV cache, or continuous batching, mirroring the
-     same-named v5.1 CONTAINER kind (`launchers.TtDitServerLauncher`).
+     same-named v5.1 CONTAINER kind (`launchers.TtDitServerLauncher`). A model whose bring-up adds
+     hand-written **pure-Python** ops (composing stock `ttnn`, no new C++ op or forked build) ships
+     them in `deps.extra_code_dir`, which rides in the bundle and goes on PYTHONPATH; `deps.verify`
+     holds install-time sanity checks (issue #127).
 
    In every case the engine that serves is the one the bundle builds rather than a shared host install.
 5. **Manifest support is gated on `SUPPORTED_SCHEMAS`.** A bundle whose `schema_version` is not
