@@ -20,7 +20,8 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from tt_kernel import cli, hub
+from tt_kernel import cli, hub, packaging
+from tt_kernel.manifest import WeightsRef
 
 runner = CliRunner()
 
@@ -119,6 +120,47 @@ def test_package_thin_publish_with_private_conflicts(monkeypatch, tmp_path):
     assert res.exit_code == 1
     assert "--public" in res.output  # message points at the resolution
     assert calls == []  # refused before anything happens
+
+
+def test_push_uploads_an_existing_v6_directory_without_catalog_side_effects(monkeypatch, tmp_path):
+    """The release path uploads the already-tested bytes; it does not restage or list them."""
+    model_py = _model_py(tmp_path)
+    staged = tmp_path / "staged"
+    packaging.stage_thin_package(
+        staged,
+        name="qwen-v6",
+        arch="blackhole",
+        model_py=model_py,
+        vllm_metadata={"arch": "QwenForCausalLM", "main_class": "model:C"},
+        tt_kernel_version="0.0.0",
+        weights=WeightsRef(repo="Qwen/Qwen3-4B", revision="deadbeef"),
+    )
+    before = {str(p.relative_to(staged)): p.read_bytes() for p in staged.rglob("*") if p.is_file()}
+    seen = {}
+    monkeypatch.setattr(cli, "_ensure_repo",
+                        lambda repo_id, private: seen.update(repo=repo_id, private=private))
+
+    def _upload(repo_id, folder, commit_message, *, replace=False, refuse_foreign=False):
+        seen["replace"] = replace
+        seen["refuse_foreign"] = refuse_foreign
+        seen["uploaded"] = {
+            str(p.relative_to(folder)): p.read_bytes() for p in folder.rglob("*") if p.is_file()
+        }
+
+    monkeypatch.setattr(hub, "push_folder", _upload)
+    monkeypatch.setattr(hub, "tag_repo",
+                        lambda *a, **k: pytest_fail("v6 exact push must not rewrite card tags"))
+    monkeypatch.setattr(hub, "set_catalog_listing",
+                        lambda *a, **k: pytest_fail("plain v6 push must not touch the catalog"))
+
+    res = runner.invoke(cli.app, [
+        "push", str(staged), "--repo", "me/qwen-v6", "--private",
+    ])
+    assert res.exit_code == 0, res.output
+    assert seen["repo"] == "me/qwen-v6" and seen["private"] is True
+    assert seen["replace"] is True
+    assert seen["refuse_foreign"] is True
+    assert seen["uploaded"] == before
 
 
 def pytest_fail(msg):  # tiny helper so the lambdas above read cleanly

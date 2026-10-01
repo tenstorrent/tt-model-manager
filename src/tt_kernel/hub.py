@@ -83,8 +83,14 @@ def _foreign_overwrites(api, repo_id: str, folder: Path) -> List[str]:
     return sorted((local & remote) - {".gitattributes"})
 
 
-def push_folder(repo_id: str, folder: Path, commit_message: str, *,
-                refuse_foreign: bool = False) -> None:
+def push_folder(
+    repo_id: str,
+    folder: Path,
+    commit_message: str,
+    *,
+    refuse_foreign: bool = False,
+    replace: bool = False,
+) -> None:
     """Upload an entire staged bundle folder. Large binaries go to LFS automatically.
 
     ``upload_folder`` takes no ``tqdm_class``, so the bridge here silences HF's writers and
@@ -100,20 +106,26 @@ def push_folder(repo_id: str, folder: Path, commit_message: str, *,
     ``.gitattributes`` is HF's own LFS config, so neither is swept.
 
     ``refuse_foreign`` raises :class:`ForeignFilesError` instead of overwriting files in a
-    repo that is not a tt-model bundle yet.
+    repo that is not a tt-model bundle yet. ``replace`` removes every remote file absent
+    from the staged directory except Hugging Face's own ``.gitattributes``.
     """
     api = _api()
     if refuse_foreign:
         clobbered = _foreign_overwrites(api, repo_id, folder)
         if clobbered:
             raise ForeignFilesError(repo_id, clobbered)
+    delete_patterns = ["code/**", "image/**"]
+    if replace:
+        local = {str(path.relative_to(folder)) for path in folder.rglob("*") if path.is_file()}
+        remote = set(api.list_repo_files(repo_id=repo_id, repo_type=_REPO_TYPE))
+        delete_patterns = sorted(remote - local - {".gitattributes"})
     with progress_bridge(f"Uploading to {repo_id}"):
         api.upload_folder(
             repo_id=repo_id,
             repo_type=_REPO_TYPE,
             folder_path=str(folder),
             commit_message=commit_message,
-            delete_patterns=["code/**", "image/**"],
+            delete_patterns=delete_patterns,
         )
 
 

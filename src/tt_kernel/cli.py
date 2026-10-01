@@ -896,7 +896,7 @@ def package_thin(
         tags.append(TT_MODEL_CATALOG_TAG)
     _ensure_repo(repo_id, private)  # private by default; never flips an existing repo silently
     try:
-        hub.push_folder(repo_id, staged, refuse_foreign=True,
+        hub.push_folder(repo_id, staged, refuse_foreign=True, replace=True,
                         commit_message=f"tt-model package-thin {manifest.name} (v6 thin)")
     except hub.ForeignFilesError as e:
         raise _err(str(e))
@@ -2134,6 +2134,41 @@ def push(
     from . import container_cli
 
     out = Path(staged_dir).expanduser()
+    # v6 exact-directory push: validate the staged manifest, then upload this directory as-is.
+    # Do not call tag_repo: it rewrites README frontmatter after upload, violating byte identity.
+    # A catalog mutation happens only for an explicit --publish request.
+    wire_manifest: Optional[Manifest] = None
+    manifest_path = out / MANIFEST_NAME
+    if manifest_path.is_file():
+        try:
+            wire_manifest = Manifest.from_json(manifest_path.read_text())
+        except (OSError, UnicodeDecodeError, ValueError):
+            wire_manifest = None
+    if wire_manifest is not None and wire_manifest.is_thin:
+        if not repo:
+            raise _err("A staged v6 directory records no Hub target; pass --repo namespace/name.")
+        _ensure_repo(repo, private)
+        try:
+            hub.push_folder(
+                repo,
+                out,
+                commit_message=f"tt-model push {wire_manifest.name} (v6 thin)",
+                refuse_foreign=True,
+                replace=True,
+            )
+        except hub.ForeignFilesError as e:
+            raise _err(str(e))
+        if publish:
+            try:
+                hub.set_catalog_listing(repo, listed=True)
+            except Exception as exc:  # noqa: BLE001
+                console.note(f"uploaded {repo}, but could not list it in the catalog: {exc}",
+                             marker="!", style="warning")
+                console.note(f"list it with: tt-model publish {repo}", marker="→")
+            else:
+                console.milestone(f"listed {repo} in the community catalog")
+        typer.secho(f"✓ Pushed exact staged v6 thin bundle {repo}", fg=typer.colors.GREEN)
+        return
     cmani = container_cli.is_package_dir(out)
     if cmani is None:
         raise _err(
