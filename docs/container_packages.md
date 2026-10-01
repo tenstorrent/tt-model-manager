@@ -306,6 +306,14 @@ On any box with Docker and a card:
 tt-model serve you/my-model                   # auto-pulls the image + weights, then serves
 ```
 
+`serve` stamps `tt.model.*` labels on the container (alongside the operational
+`org.tenstorrent.tt-model.*` ones) so a UI can read what the package is instead of guessing from
+its name or routes (`docker inspect --format '{{json .Config.Labels}}' <container>`):
+`tt.model.kind`, `tt.model.openai_compatible`, `tt.model.tool_calling`, `tt.model.reasoning`,
+`tt.model.port`, `tt.model.manifest_schema` — all derived from the manifest. A semantic task label
+(`chat` / `image_generation` / …) needs a new authored field and is a deliberate follow-up, so it
+is not guessed; `kind` + `openai_compatible` already distinguish a chat stack from a diffusion one.
+
 `serve` starts the container and then watches it boot, as a short checklist of the boot's
 landmarks parsed out of the container log — never the log itself:
 
