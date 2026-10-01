@@ -230,6 +230,10 @@ class Resources(BaseModel):
     max_num_seqs: Optional[int] = None
     block_size: Optional[int] = None
     trace_region_bytes: Optional[int] = None
+    # Additional values for vLLM's ``--additional-config {"tt": ...}`` payload. Fabric and
+    # trace-region size remain first-class fields above; the renderer overlays those canonical
+    # values onto this mapping so an escape hatch cannot silently contradict the manifest.
+    tt_additional_config: Dict[str, object] = Field(default_factory=dict)
     # Escape hatches (see docstring): raw args appended after the composed ones, or a full
     # argv that replaces composition entirely (per machine key, or "default").
     extra_args: List[str] = Field(default_factory=list)
