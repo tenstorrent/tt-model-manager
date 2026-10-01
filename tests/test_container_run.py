@@ -338,6 +338,81 @@ def test_the_fork_forwards_the_mesh_as_a_grid_not_as_MESH_DEVICE():
     assert "(1, 4)" in launcher_for("vllm-fork").serve_argv(m, p)
 
 
+# The fourth kind, as an override: `_wire(**HTTP)`.
+HTTP = {
+    "kind": "http-server",
+    "runtime": {
+        "command": [
+            "python", "models/demos/my_model/tools/server.py",
+            "--host", "{host}", "--port", "{port}",
+        ],
+    },
+    "serve": {"port": 8000},
+    "serve_profiles": [
+        {"name": "p300x2", "hardware": "p300x2", "mesh_device": "(1, 4)",
+         "max_model_len": 131072},
+    ],
+}
+
+
+def test_http_server_serve_argv_golden():
+    """The command is recorded verbatim except for the two placeholders every serve
+    moves; profile args ride after it."""
+    m = _wire(**{**HTTP, "serve": {"port": 8000, "args": ["--allocated-context", "131072"]}})
+    p = m.container.resolve_profile()
+    assert launcher_for("http-server").serve_argv(m, p) == [
+        "python", "models/demos/my_model/tools/server.py",
+        "--host", "0.0.0.0", "--port", "8000",
+        "--allocated-context", "131072",
+    ]
+
+
+def test_http_server_reads_the_ready_line_from_the_manifest():
+    m = _wire(**HTTP)
+    assert launcher_for("http-server").ready_probe(m) == '"event": "ready"'
+    m = _wire(**{**HTTP, "runtime": {**HTTP["runtime"], "ready_line": "listening on"}})
+    assert launcher_for("http-server").serve_argv(m, m.container.resolve_profile())
+    assert launcher_for("http-server").ready_probe(m) == "listening on"
+
+
+def test_http_server_env_is_the_profile_env_verbatim():
+    m = _wire(**{**HTTP, "serve": {"port": 8000, "env": {"QWEN38_LANES": "1"}}})
+    env = launcher_for("http-server").serve_env(m, m.container.resolve_profile())
+    assert env == {"QWEN38_LANES": "1"}
+
+
+def test_http_server_does_not_need_engine_settings():
+    """No engine, no max_num_seqs/block_size requirement — hardware and mesh are the
+    whole contract."""
+    from tt_kernel.launchers import required_serve_fields
+    assert required_serve_fields("http-server") == ("hardware", "mesh_device")
+    m = _wire(**HTTP)  # profiles carry neither max_num_seqs nor block_size
+    assert m.container.resolve_profile().hardware == "p300x2"
+
+
+def test_http_server_without_a_command_is_refused():
+    with pytest.raises(ContainerManifestError, match="requires runtime.command"):
+        _wire(**{**HTTP, "runtime": {}})
+
+
+def test_http_server_with_an_unknown_placeholder_is_refused():
+    bad = ["python", "s.py", "--port", "{port}", "--mesh", "{mesh}"]
+    with pytest.raises(ContainerManifestError, match="unknown placeholder"):
+        _wire(**{**HTTP, "runtime": {"command": bad}})
+
+
+def test_http_server_without_a_port_placeholder_is_refused():
+    bad = ["python", "s.py", "--listen", "8080"]
+    with pytest.raises(ContainerManifestError, match="never names \\{port\\}"):
+        _wire(**{**HTTP, "runtime": {"command": bad}})
+
+
+def test_http_server_script_must_be_shipped_by_the_allowlist():
+    bad = ["python", "myserver/server.py", "--host", "{host}", "--port", "{port}"]
+    with pytest.raises(ContainerManifestError, match="no allowlist entry ships"):
+        _wire(**{**HTTP, "runtime": {"command": bad}})
+
+
 def test_the_fork_ready_probe_matches_what_the_runner_actually_prints():
     """The readiness runner sends vLLM's own output to a file inside the container, so
     "Application startup complete" never reaches `docker logs`. The only ready signal
