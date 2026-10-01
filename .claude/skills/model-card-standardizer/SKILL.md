@@ -1,142 +1,92 @@
 ---
 name: model-card-standardizer
-description: Check a tt-model card — an authored tt-model.yaml's `card` fields, a locally built package's README.md, or an already-published HF repo's README — against the proposed DEVSTACK-447 model-card template, separate what the model's author can fix from what the `render_model_card` generator itself hardcodes, and interview the author to draft the missing free-text sections as ready-to-paste `card.quickstart` markdown. Use for "does this model card follow the template", "review/standardize this model card", "help me write the card for this model", or "check this repo against DEVSTACK-447". Advisory only — never pushes to HF, never edits a published repo, and only edits a local tt-model.yaml's `card:` block after showing the diff and getting confirmation.
+description: Check a tt-model card — an authored tt-model.yaml's `card:` block, a locally built package's README.md, or a published Hugging Face repo's README — against the standard card layout, separate what the model's author fills in from what only a change to the card generator can fix, and interview the author to draft the missing `card:` fields. Use for "does this model card follow the template", "review this model card", or "help me write the card for this model". Advisory only — never pushes to Hugging Face, never edits a published repo, and only edits a local tt-model.yaml's `card:` block after showing the diff and getting confirmation.
 ---
 
-# Standardize a tt-model card against the DEVSTACK-447 template
+# Standardize a tt-model card
 
-## Read this first: what actually generates a card
+## How a card is made
 
-Two things combine into the published `README.md`, and only one of them is
-something a model's author can edit per package:
+Authors never write the README. `render_model_card()` in `src/tt_kernel/build.py`
+renders it from the manifest, and the author's input is the `card:` block of their
+`tt-model.yaml` (`CardSettings` in `src/tt_kernel/container_manifest.py`, built on
+`CardSpec` in `src/tt_kernel/manifest.py`). Unknown keys in `card:` are rejected.
 
-1. **`render_model_card()` in `src/tt_kernel/build.py`** is fixed code, identical
-   for every package regardless of `kind`. It emits the `tags:` frontmatter, the
-   `# <name>` title, the hardware/mesh line, the `## Quickstart` heading with a
-   **hardcoded `tt-model pull`/`tt-model serve`** block, the `## Serve profiles`
-   table with **hardcoded LLM-shaped columns** (`max_num_seqs`/`max_model_len`)
-   whenever there is more than one profile, and the `## Provenance` table. None
-   of this is author-editable per model — a gap here needs a `tt-model-manager`
-   code change, not different card text.
+Read those before relying on the table below. If the fields or sections have changed,
+the code wins.
 
-   The Quickstart command: `tt` (the `tenstorrent` PyPI package, i.e. "tt-cli")
-   is real, published at v1.0.1, and `tt model pull`/`tt serve` already install
-   and drive `tt-model pull`/`tt-model serve` themselves (checked
-   `tenstorrent/tt-cli`, `src/tenstorrent/backends/serving/model_manager.py`).
-   But the card must show **both** flows, `tt` first: `AGENTS.md` invariant 1
-   ("tt-model alone must do the whole job; never introduce a step needing
-   tt-cli") is binding on this repo, so a card naming only `tt` violates it.
-   Note `tt model pull` has **no** `--with-weights` flag (only
-   `--bundle`/`--weights-only`/`--offline`) — it pulls a bundle's weights by
-   default; that flag belongs to the lower-level `tt-model pull`, which is why
-   the two fences differ. Re-verify against the live `tt-cli` repo before
-   relying on this, in case something's since moved.
-2. **`CardSettings` in `src/tt_kernel/container_manifest.py`** is the only
-   per-model input, and it has exactly two fields: `description` (a short lead
-   paragraph, rendered right under the title) and `quickstart` (a markdown blob
-   rendered right after the tool's own Quickstart block, before Serve profiles).
-   `CardSettings` uses `extra="forbid"` — an author cannot invent a third field
-   like `card.license`. Everything else in the template today has to be
-   additional `## Heading` markdown packed by hand into `card.quickstart`, in
-   the right order.
-
-**Re-read both of those before relying on anything below.** This skill was
-written against a specific snapshot of the code; DEVSTACK-447 may have since
-added dedicated `CardSettings` fields or changed the hardcoded command, in
-which case some "generator-owned" gaps listed here may already be fixed or
-author-fixable. Don't carry a stale verdict forward.
-
-## Step 1 — Get the template and figure out what you're checking
-
-Read `reference/template.md` in this skill directory — the template proposed
-in [DEVSTACK-447 comment 670207](https://tenstorrent.atlassian.net/browse/DEVSTACK-447).
-**Status: PROPOSED**, pending sign-off on the open questions logged there.
-`license` is under an explicit A/B/C vote on that ticket (stays optional /
-required to list publicly / required to package at all), and who retrofits the
-existing ~50 catalog cards is still unassigned — so treat both as unsettled.
-
-Two questions are settled and recorded in the template's own status note: the
-card shows both consumer flows with `tt` first (AGENTS.md invariant 1), and
-whitelist status is not a card concern at all — a reviewed model is one copied
-into the Tenstorrent HF org. Check the ticket for movement before treating any
-other section as settled fact.
-
-Then identify the input:
-
-- **An authored `tt-model.yaml`, not yet built** — read its `card:` block (it
-  may be absent entirely).
-- **A locally staged/built package** — read `<out>/README.md`, the actual
-  `render_model_card()` output for that manifest.
-- **An already-published HF repo** — fetch it read-only, no auth needed for a
-  public repo: `curl -s -L "https://huggingface.co/<repo>/raw/main/README.md"`.
-
-## Step 2 — Score every template section
-
-Go section by section through `reference/template.md` against what you're
-checking. Classify each as:
-
-- **OK** — present and matches.
-- **Author-fixable** — missing or wrong, and belongs in `card.description` /
-  `card.quickstart`.
-- **Generator-owned** — missing or wrong, and current code cannot express it
-  per-card. Cite the exact line you checked.
-
-Most of what this skill originally listed as generator-owned has since been
-built (PRs #129 and #133–#135). `CardSpec` now carries `description`,
-`quickstart`, `architecture`, `status`, `intended_use`, `out_of_scope_use`,
-`usage`, `performance`, `limitations`, `risks`, `licensing`, `related`,
-`license`, `pipeline_tag` and `base_model`, and the renderer emits *At a
-glance*, *Intended use*, *Quickstart*, *Serve profiles*, *Using it*,
-*Licensing*, *Risks and safety considerations*, *Related packages*, *Feedback*
-and *Provenance*. So a missing section is now usually **author-fixable**, not a
-generator gap — which inverts the default this skill started with.
-
-What is still genuinely generator-owned:
-
-| Template section | What the generator does today |
+| Card section | Filled by |
 | --- | --- |
-| `tt_perf_summary` frontmatter | Not emitted at all. Deferred until the perf-target schema is settled |
-| Model CI v0 row | Not emitted at all. Deferred until DEVSTACK-430 produces a result worth citing |
-| Changelog | No field and no section. `render_model_card()` rewrites the card wholesale on every build, so there is no history to draw on |
-| Whitelist status | Not a card concern at all: a reviewed model is one Tenstorrent has copied into its own HF org (`tt-model whitelist` does the copy), so the repo it sits in *is* the signal. A `tt-whitelisted` tag in a card's frontmatter means nothing — anyone can add one to their own repo — and the renderer must never emit one |
+| Frontmatter `tags` | the generator (hardware, board, catalog and runtime tags) |
+| Frontmatter `license`, `pipeline_tag`, `base_model` | `card.license`, `card.pipeline_tag`, `card.base_model` |
+| Lead paragraph | `card.description` |
+| At a glance | `card.architecture`, `card.status`, the license; hardware and context come from the serve profiles |
+| Intended use | `card.intended_use`, `card.out_of_scope_use` |
+| Quickstart | the generator (`tt` and `tt-model` commands), then `card.quickstart` |
+| Serve profiles | the generator, when there is more than one profile |
+| Using it | the generator (what the API is), then `card.usage` |
+| Expected performance | `card.performance` — required to list in the catalog |
+| Limitations | `card.limitations` — required to list in the catalog |
+| Risks and safety considerations | `card.risks` |
+| Licensing | `card.licensing` |
+| Related packages | `card.related` |
+| Feedback, Provenance | the generator |
 
-Verify this table against the live source each time — don't trust it blindly.
-It has already gone stale once, when the PR stack above landed.
+What a good value looks like for each field is in `reference/template.md`.
 
-## Step 3 — Interview for the author-fixable gaps
+Two things a card cannot carry today, because the generator has no field for them: a
+changelog (the card is rendered fresh on every build) and a machine-readable
+performance summary in the frontmatter. Report these as generator gaps, not author
+fixes.
 
-For everything classified author-fixable, ask the user for the missing
-content in ONE batch (mirroring the `tt-model-yaml` skill's interview style)
-— state your best guess and where it came from, so they are confirming
-rather than composing from scratch. Then draft it as a single ready-to-paste
-`card.quickstart` markdown block, sections in the template's order, each
-under its own `## Heading` — since `CardSettings` has no separate field per
-section today, all of it lands in one blob.
+Verified status is never part of a card. A model is verified when Tenstorrent copies
+it into the `Tenstorrent` Hugging Face org; the org is the signal. Anyone can edit their
+own card, so a card that calls itself verified (in `status`, a tag, or prose) is wrong
+and should be flagged.
+
+## Step 1 — Find what you are checking
+
+- **An authored `tt-model.yaml`, not yet built**: read its `card:` block (it may be
+  missing entirely).
+- **A locally built package**: read `<out>/README.md`, the generator's real output.
+- **A published repo**: fetch it read-only, no login needed for a public repo:
+  `curl -sL "https://huggingface.co/<repo>/raw/main/README.md"`.
+
+## Step 2 — Score every section
+
+For each row of the table, classify it as:
+
+- **OK**: present, and the content meets the guidance in `reference/template.md`.
+- **Author fix**: missing or weak. Name the `card:` field it belongs in.
+- **Generator gap**: the generator cannot express it. Cite the file and line you checked.
+
+A missing section is almost always an author fix now: every section above has its own
+field. Pay most attention to `performance` and `limitations` (the catalog will not list
+a package without them) and to `out_of_scope_use`, the one most often left out.
+
+## Step 3 — Interview for the author fixes
+
+Ask for everything missing in one batch, in the style of the `tt-model-yaml` skill:
+give your best guess and where it came from, so the author confirms rather than writes
+from scratch. Then draft a `card:` block with each answer in its own field. Use
+`card.quickstart` only for what the generated commands do not cover, such as first-boot
+time or the log line that means the server is ready.
 
 ## Step 4 — Offer to write it
 
-- **Unbuilt `tt-model.yaml`**: show the diff to the `card:` block and write it
-  only after the user confirms.
-- **Already built or published**: editing `card.quickstart` requires a
-  rebuild and re-push (`tt-model package --container` then `tt-model push`)
-  to take effect. Say so explicitly — do not attempt to patch a published
-  `README.md` directly; the manifest is the source of truth, not the
-  rendered file.
+- **Unbuilt `tt-model.yaml`**: show the diff to the `card:` block and write it only after
+  the author confirms.
+- **Already built or published**: a card change needs a rebuild and re-push
+  (`tt-model package --container`, then `tt-model push`). Say so. Never patch a published
+  README directly; the manifest is the source of truth.
 
 ## Step 5 — Report
 
-Two lists, and be exact:
+Two lists:
 
-- **Author-fixable** — what you drafted, and which manifest field it goes in.
-- **Generator-owned** — what needs a `tt-model-manager` code change, each
-  with the file:line you checked. Point these at DEVSTACK-447 (or a follow-up
-  ticket) rather than treating them as resolved just because you found them.
+- **Author fixes**: what you drafted, and which field each part goes in.
+- **Generator gaps**: what needs a tt-model-manager code change, each with the file and
+  line you checked.
 
-## Notes
-
-- Read-only against HF and Jira by default: never pushes, publishes, or
-  comments unless the user explicitly asks.
-- The template is not finalized. If a decision on one of the open questions
-  lands (including posting the `tt-cli` resolution back to the ticket),
-  update `reference/template.md` to match rather than letting this skill
-  drift out of sync with the ticket.
+Read-only against Hugging Face throughout: never push, publish, or comment unless the
+user explicitly asks.
