@@ -47,6 +47,9 @@ from .manifest import (
 # Where the shipped wheels and the embedded metal tree live inside the bundle.
 WHEELS_DIR = "wheels"
 METAL_DIR = "metal"
+#: Bundle dir holding a v6 thin bundle's shipped hand-written ops tree (issue #127), put on
+#: PYTHONPATH at serve. Its own top-level packages are what `model.py` imports.
+EXTRA_CODE_DIR = "extra_code"
 INSTALL_SCRIPT = "install.sh"
 RUN_SCRIPT = "run.sh"
 REQUIREMENTS = "requirements.txt"
@@ -457,6 +460,11 @@ def render_install_sh(manifest: Manifest) -> str:
             bundled = " ".join(f'"$HERE/{w}"' for w in d.wheels)
             find_links = f'--find-links "$HERE/{d.wheels_dir}" ' if d.wheels_dir else ""
             steps.append(f'{pip} {find_links}{bundled}')
+        # (4) Sanity checks, LAST — the venv is complete, so these run against the real installed
+        # deps (e.g. `import <ops pkg>`, or assert ttnn.__version__ is in the validated range). A
+        # failing check fails install (the script runs under `set -e`), which is the point.
+        for stmt in d.verify:
+            steps.append(f'"$VENV/bin/python" -c {shlex.quote(stmt)}')
         install = "\n".join(steps)
         deps_note = "v6 thin: ttnn/tt-metal-models (index) + empty-target vLLM + plugin/ops wheels (by path)"
     else:
@@ -651,7 +659,12 @@ export TT_METAL_VISIBLE_DEVICES
     # (bundle root, or deps.model_dir). This is the one serve-time difference between the regimes.
     if manifest.deps is not None:
         md = (manifest.deps.model_dir or ".").strip("/")
-        pythonpath_entry = "$HERE" if md in ("", ".") else f"$HERE/{md}"
+        entries = ["$HERE" if md in ("", ".") else f"$HERE/{md}"]
+        # A shipped ops tree (issue #127) goes on the path ahead of model_dir so its packages
+        # resolve for model.py's imports.
+        if manifest.deps.extra_code_dir:
+            entries.insert(0, f"$HERE/{manifest.deps.extra_code_dir.strip('/')}")
+        pythonpath_entry = ":".join(entries)
     else:
         pythonpath_entry = f"$HERE/{METAL_DIR}"
     # The actual serve command. kind="vllm" (default; the only case for v5 fat, which has no kind
@@ -1000,6 +1013,8 @@ def stage_thin_package(
     plugin_wheel: Optional[Path] = None,
     extra_wheels: Optional[List[Path]] = None,
     models_wheels: Optional[List[Path]] = None,
+    extra_code: Optional[Path] = None,
+    verify: Optional[List[str]] = None,
     vllm_wheel: Optional[Path] = None,
     vllm_version: str = VLLM_VERSION,
     with_vllm: bool = True,
@@ -1074,6 +1089,18 @@ def stage_thin_package(
     staged.mkdir(parents=True, exist_ok=True)
     model_dest = staged / Path(model_py).name
     shutil.copy2(model_py, model_dest)
+
+    # A shipped ops tree (issue #127): copy its CONTENTS into extra_code/ so its own top-level
+    # packages sit directly on PYTHONPATH (run.sh adds $HERE/extra_code ahead of the bundle root).
+    # Raise on a missing source rather than silently ship nothing — mirrors build.stage_code.
+    extra_code_rel: Optional[str] = None
+    if extra_code is not None:
+        src = Path(extra_code)
+        if not src.is_dir():
+            raise ValueError(f"extra_code {str(src)!r} is not a directory")
+        shutil.copytree(src, staged / EXTRA_CODE_DIR, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
+        extra_code_rel = EXTRA_CODE_DIR
 
     # requirements.txt: the author's index pins, or a #29 template with TODO lines to fill —
     # kind="tt-dit-server" gets its own template (base HTTP stack instead of vLLM notes), and an
@@ -1152,6 +1179,8 @@ def stage_thin_package(
                                     or (vllm_spec and vllm_spec.wheel)) else None),
         vllm=vllm_spec,
         model_dir=".",
+        extra_code_dir=extra_code_rel,
+        verify=list(verify or []),
         kind=kind,
         app=app,
     )
