@@ -95,6 +95,74 @@ tt-model unpublish    you/mymodel                 # delist (repo stays public)
 indexes only repos carrying it, and reads each repo's `tt_kernel_manifest.json` to render it.
 `tt-model search <term> --catalog` restricts a search to listed bundles.
 
+## Verifying bundles (Tenstorrent reviewers)
+
+The catalog is open — anyone can list a bundle, and that is the point. A new bundle is
+**unverified**. **Verified** bundles are the curated subset a Tenstorrent reviewer has looked at, so a developer can pick a
+model that is expected to work on the hardware it claims instead of sifting through everything
+published:
+
+```bash
+tt-model verify   you/mymodel                    # copy a LISTED, public bundle into Tenstorrent/
+tt-model unverify Tenstorrent/MyModel            # withdraw the copy from the catalog
+```
+
+**Verifying is the copy.** A bundle under `Tenstorrent/` is verified by definition,
+because only the DX team can write that namespace (`TT_ORG` in
+[`tt_kernel/__init__.py`](../src/tt_kernel/__init__.py)). There is no index to fetch and nothing
+to keep in sync: "has Tenstorrent reviewed this" reduces to "is this repo ours", which any
+consumer can answer from the repo id alone. It is deliberately **not a repo tag** and **not a
+manifest field** — a tag lives in the author's own README frontmatter, which they can edit from
+the Hub UI, and the manifest is written by whoever publishes the model, so neither can carry a
+review someone *else* granted. `tt model list` shows verified models by default; the original
+stays listed as unverified, shown with `tt model list --unverified`.
+
+The copy is named after the **weights** repo, not the bundle: a bundle published as
+`someone/qwen3-32b-blackhole-v51` with weights `Qwen/Qwen3-32B` becomes
+`Tenstorrent/Qwen3-32B`. That is the canonical model name a reader is looking for rather than an
+author's packaging slug.
+
+What the commands guarantee:
+
+- **The author's repo is never touched.** `duplicate_repo` is a server-side copy — it reads the
+  source and writes only the new repo. A review costs one request and moves no bundle data, even
+  for a multi-GB image.
+- **The copy stays private until it is complete.** It is made private, then its review is
+  recorded, then it is listed, and only then made public. `tt model list` counts anything in the
+  org as verified, so a copy that went public first would show as verified with no credit to the
+  author. A run that fails part way leaves nothing public. One gap: the private copy carries the
+  source's catalog tag from the start, so someone whose token can see private org repos may see
+  it early.
+- **The copy is a snapshot.** It records the source repo and the exact revision it was copied at,
+  in its own card frontmatter. Later commits to the original are *not* covered by the review, and
+  `Tenstorrent/...` does not track upstream.
+- **The author is credited in the card's top line.** A verified copy opens with a block naming
+  the community author and linking both their profile and their original repo, above the model's
+  own heading. That is the bargain: the copy earns this org's traffic, so the credit goes where a
+  reader lands rather than under the fold. Re-recording a review replaces that block, so resuming
+  an interrupted `verify` never stacks a second credit on the first.
+- **Verified bundles are a subset of the catalog.** `verify` refuses a repo that is not listed
+  (listing is the author's decision — it will never `publish` on their behalf) and refuses a
+  private one. The copy is then listed explicitly rather than relying on it inheriting the tag,
+  so a public-but-unlisted source cannot produce a copy nobody can find.
+- **`push` neither grants nor drops a review**, and `unpublish` has nothing to say about one: the
+  copy is its own repo, so delisting an original leaves it alone. That independence is the point.
+- **A name collision refuses.** Two bundles of the same model — two board targets, or two authors
+  packaging the same upstream weights — derive the same name. The second is refused, naming the
+  existing copy and what it was made from; it is never overwritten, because a reviewed artifact
+  someone may be relying on is not ours to replace silently. `unverify` does not free the name
+  (it only delists). If the other copy is abandoned, delete it on the Hub and re-run.
+- **A half-finished run resumes.** Re-running `verify` finishes a run that stopped part way
+  instead of copying again. The existing copy counts as this run's when its card records this
+  source, or, before the review is recorded, when its files are exactly the source's at the
+  revision being verified. (A server-side copy does not keep the source's commit history, but
+  it keeps every file byte for byte.) A copy of an older revision of the source does not count,
+  so it is never finished with a revision it does not contain.
+- **Withdrawing keeps the artifact.** `unverify` delists the copy and leaves the repo, so
+  anyone who pinned it can still reach it, and the original is unaffected. Delete the
+  repo by hand on the Hub if it should be gone entirely. It takes the **copy's** id — passing the
+  community bundle it came from is refused.
+
 ## How compatibility is checked
 
 `tt-model` records the target arch and machine in the bundle's `tt_kernel_manifest.json` and

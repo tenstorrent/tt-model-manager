@@ -9,6 +9,8 @@ tagged ``tt-model-cache`` so ``search`` can filter for it.
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
@@ -245,6 +247,193 @@ def is_listed(repo_id: str) -> bool:
         return TT_MODEL_CATALOG_TAG in tags
     except Exception:  # noqa: BLE001 — advisory only; absent/offline/gated all mean "not listed"
         return False
+
+
+@dataclass(frozen=True)
+class RepoState:
+    """What one ``model_info`` call says about a repo: its tags, visibility and head sha."""
+
+    tags: List[str]
+    private: bool
+    sha: Optional[str]
+    # The Hub's own spelling of the id. The caller typed one on the command line and
+    # casing is not significant there, but a verified copy records this for humans to read
+    # and for a later drift check to display, so record what the repo is actually called
+    # rather than what the reviewer happened to type.
+    repo_id: Optional[str] = None
+
+
+def repo_state(repo_id: str) -> RepoState:
+    """Tags, visibility and head sha in ONE round trip — and it RAISES.
+
+    For a decision, not a description. ``is_listed`` fails to ``False`` by design, which
+    is right when the question is "should I preserve a tag across this push" and wrong
+    when the question is "may this repo be verified": a network blip would then read
+    as "not listed" and produce a confident, false refusal. Callers wrap this in the
+    CLI's ``_hub`` so a failure renders as a diagnosis card instead.
+    """
+    info = _api().model_info(repo_id)
+    return RepoState(
+        tags=list(getattr(info, "tags", None) or []),
+        private=bool(getattr(info, "private", False)),
+        sha=getattr(info, "sha", None),
+        repo_id=getattr(info, "id", None),
+    )
+
+
+# Card frontmatter keys `verify` writes onto a copy. tt-cli reads the source key to link
+# a verified copy to its original, so renaming one here silently drops that link with no
+# error anywhere. The weekly pin-bump checklist in tt-cli asks the reviewer to diff these.
+VERIFIED_SOURCE_KEY = "tt_verified_source"
+VERIFIED_REVISION_KEY = "tt_verified_revision"
+VERIFIED_BY_KEY = "tt_verified_by"
+VERIFIED_AT_KEY = "tt_verified_at"
+_VERIFIED_KEYS = (VERIFIED_SOURCE_KEY, VERIFIED_REVISION_KEY, VERIFIED_BY_KEY, VERIFIED_AT_KEY)
+
+# Markers bracketing the attribution block in a reviewed copy's card body. They render as
+# nothing on the Hub and make the block findable, so re-recording a review REPLACES it
+# rather than stacking a second one — `verify` on an already-copied source resumes by
+# calling `annotate_review` again, every time.
+ATTRIBUTION_MARKER = "tt-verified-attribution"
+_ATTRIBUTION_RE = re.compile(
+    rf"<!-- {ATTRIBUTION_MARKER} -->.*?<!-- /{ATTRIBUTION_MARKER} -->\s*", re.DOTALL
+)
+
+
+def duplicate_into_org(source_repo_id: str, target_repo_id: str) -> str:
+    """Server-side copy of a bundle into the Tenstorrent org. Returns the new repo URL.
+
+    ``duplicate_repo`` copies git history and LFS objects on the Hub itself, with no
+    local download/upload — so verifying a multi-GB bundle is one request that moves
+    no data. The copy is PRIVATE, whatever the source's visibility: it carries the
+    source's catalog tag, and tt-cli counts anything in the org as verified, so a public
+    copy would show as verified before its review is recorded. The caller makes it
+    public as the last step. ``exist_ok=False`` so an existing target is an error the
+    caller diagnoses rather than an overwrite of someone else's reviewed copy.
+
+    Nothing is written to the source: an author's repo is never touched by a review.
+    """
+    url = _api().duplicate_repo(
+        from_id=source_repo_id,
+        to_id=target_repo_id,
+        repo_type=_REPO_TYPE,
+        private=True,
+        exist_ok=False,
+    )
+    return str(url)
+
+
+def _file_tree(repo_id: str, revision: Optional[str]) -> dict:
+    """Every file in the repo at ``revision``, as path -> (git blob id, LFS sha256)."""
+    entries = _api().list_repo_tree(
+        repo_id, revision=revision, recursive=True, repo_type=_REPO_TYPE
+    )
+    tree = {}
+    for e in entries:
+        if getattr(e, "blob_id", None) is None:  # a folder
+            continue
+        lfs = getattr(e, "lfs", None)
+        tree[e.path] = (e.blob_id, getattr(lfs, "sha256", None) if lfs else None)
+    return tree
+
+
+def is_copy_of(repo_id: str, source_repo_id: str, source_sha: str) -> bool:
+    """Whether ``repo_id`` holds exactly the files of ``source_repo_id`` at ``source_sha``.
+
+    Lets ``verify`` recognise its own unfinished copy, which has no review record yet.
+    ``duplicate_repo`` does not keep the source's history (the copy starts with one new
+    "Duplicate from" commit), but it does keep every file byte for byte, so the git blob
+    ids and LFS hashes match the source at the revision copied. A copy of an older
+    revision does not match, which is the point: finishing it would record a revision it
+    does not contain. Compares listings only; nothing is downloaded.
+
+    Only meaningful before the review is recorded, since recording it rewrites the card.
+
+    Raises on Hub errors, like :func:`read_review`: "could not check" must not read as
+    "not ours" (a refusal) any more than as "ours".
+    """
+    copy = _file_tree(repo_id, None)
+    return bool(copy) and copy == _file_tree(source_repo_id, source_sha)
+
+
+def read_review(repo_id: str) -> Optional[dict]:
+    """The review keys on a repo's card, or None when it carries no card at all.
+
+    Used to tell "this copy records the bundle I am about to verify" (a resumable
+    half-finished run) from "this copy records a different bundle" (a name collision that
+    must not be overwritten). Raises on anything other than a missing card, so a
+    transient read failure can never be mistaken for "no review recorded".
+    """
+    from huggingface_hub import ModelCard
+    from huggingface_hub.utils import EntryNotFoundError
+
+    try:
+        card = ModelCard.load(repo_id)
+    except EntryNotFoundError:
+        return None
+    return {k: getattr(card.data, k, None) for k in _VERIFIED_KEYS}
+
+
+def _attribution_block(
+    source: str, revision: Optional[str], reviewer: str, reviewed_at: str
+) -> str:
+    """The credit line that OPENS a reviewed copy's card.
+
+    It leads with the community author, and it goes at the top, because that is the whole
+    bargain: the copy earns the Tenstorrent org's traffic, so the person whose work it is
+    is the first thing a reader sees rather than a footnote under the fold.
+    """
+    owner = source.split("/", 1)[0]
+    at = f" at `{revision[:9]}`" if revision else ""
+    # "that revision" has no antecedent when the Hub reported no sha.
+    snapshot = "a snapshot of that revision" if revision else "a point-in-time snapshot"
+    return (
+        f"<!-- {ATTRIBUTION_MARKER} -->\n"
+        f"> **Published by [{owner}](https://huggingface.co/{owner})** as "
+        f"[`{source}`](https://huggingface.co/{source}).\n"
+        f"> Tenstorrent reviewed it{at} ({reviewer}, {reviewed_at[:10]}) and copied it here. "
+        f"This is {snapshot} — later commits to the original are not covered by this "
+        "review.\n"
+        f"<!-- /{ATTRIBUTION_MARKER} -->\n\n"
+    )
+
+
+def annotate_review(
+    repo_id: str,
+    *,
+    source: str,
+    revision: Optional[str],
+    reviewer: str,
+    reviewed_at: str,
+) -> None:
+    """Record the review on the copy's card: frontmatter keys plus an attribution line.
+
+    The record lives in the artifact rather than in a side index, so it cannot drift out
+    of step with what it describes, and tt-cli reads the source key straight off the
+    listing response.
+
+    The attribution block is PREPENDED, not appended: the team agreed the community
+    author is credited in the card's top line. It is also replaced rather than added to,
+    so the resume path (re-running ``verify`` on a source already copied) re-records
+    the review instead of stacking a second credit under the first.
+
+    ``card.data`` is mutated in place for the reason :func:`tag_repo` documents: building
+    a fresh block drops every other frontmatter field the author set (``license``,
+    ``pipeline_tag``, ``base_model``). Unlike ``tag_repo`` there is deliberately no
+    "start from an empty card" fallback — this writes the BODY as well, and a transient
+    read failure must not replace a real README with an empty one. A copy always has the
+    card it was duplicated with, so a missing card here means something is wrong.
+    """
+    from huggingface_hub import ModelCard
+
+    card = ModelCard.load(repo_id)  # raises; the CLI renders it as a diagnosis card
+    setattr(card.data, VERIFIED_SOURCE_KEY, source)
+    setattr(card.data, VERIFIED_REVISION_KEY, revision)
+    setattr(card.data, VERIFIED_BY_KEY, reviewer)
+    setattr(card.data, VERIFIED_AT_KEY, reviewed_at)
+    body = _ATTRIBUTION_RE.sub("", card.text).lstrip()
+    card.text = _attribution_block(source, revision, reviewer, reviewed_at) + body
+    card.push_to_hub(repo_id, repo_type=_REPO_TYPE)
 
 
 def is_private_safe(repo_id: str) -> Optional[bool]:
