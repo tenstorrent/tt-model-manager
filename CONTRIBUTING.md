@@ -59,7 +59,7 @@ Bug fixes and new features are accepted through Pull Requests (PRs).
   `install.sh` (v6 thin). That path builds the bundle's own venv, expects `ttnn`,
   installs the Tenstorrent vLLM stack, and is not needed for ordinary development.
 
-Python 3.9 or newer is required. The reproducible setup uses
+Python 3.10 or newer is required. The reproducible setup uses
 [`uv`](https://docs.astral.sh/uv/) and the checked-in lockfile:
 
 ```bash
