@@ -18,6 +18,7 @@ so it is unit-testable offline.
 
 from __future__ import annotations
 
+import ast
 import base64
 import datetime
 import hashlib
@@ -381,6 +382,52 @@ def make_wheel_artifact(src: Path, rel_path: str) -> WheelArtifact:
         abi_tag=tags["abi_tag"],
         platform_tag=tags["platform_tag"],
     )
+
+
+def wheel_top_level_packages(wheel_path: Path) -> set:
+    """The top-level import names a wheel provides (e.g. {"myops"}), read from the ``.whl`` zip.
+
+    Prefers ``*.dist-info/top_level.txt`` (the wheel's own declaration); when a wheel omits it
+    (some modern wheels do) falls back to the archive's top-level path segments, dropping the
+    ``*.dist-info``/``*.data`` metadata dirs and ``.pth`` files and stripping a ``.py`` suffix for a
+    single-module wheel. Returns an empty set for an unreadable/not-a-zip file rather than raising —
+    this feeds best-effort metadata, never a hard gate.
+    """
+    try:
+        with zipfile.ZipFile(wheel_path) as z:
+            names = z.namelist()
+            tl = next((n for n in names if n.endswith(".dist-info/top_level.txt")), None)
+            if tl:
+                return {ln.strip() for ln in z.read(tl).decode().splitlines() if ln.strip()}
+    except (OSError, zipfile.BadZipFile):
+        return set()
+    packages = set()
+    for n in names:
+        seg = n.split("/", 1)[0]
+        if seg.endswith((".dist-info", ".data")) or seg.endswith(".pth"):
+            continue
+        packages.add(seg[:-3] if seg.endswith(".py") else seg)
+    return packages
+
+
+def imported_top_level(py_path: Path) -> set:
+    """Top-level module names imported by a Python file (absolute imports only).
+
+    Static AST scan: ``import X`` / ``import X.y`` -> ``X``; ``from X import ...`` -> ``X`` (only
+    absolute, ``level == 0`` — a relative ``from . import`` names nothing top-level). A missing file
+    or a syntax error yields an empty set; detection must never fail packaging.
+    """
+    try:
+        tree = ast.parse(py_path.read_text())
+    except (OSError, SyntaxError, ValueError):
+        return set()
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".", 1)[0])
+    return names
 
 
 def render_install_sh(manifest: Manifest) -> str:
@@ -874,8 +921,6 @@ def stage_package(
     return manifest
 
 
-CUSTOM_OPS_DIR = "custom_ops"
-
 # Placeholder requirements for a v6 thin bundle when the author doesn't supply one. Reflects the
 # issue #29 plan exactly; the not-yet-published deps are commented TODOs the lab uncomments/pins
 # once TTTv2 and the models wheel land (M0).
@@ -1107,6 +1152,18 @@ def stage_thin_package(
             shutil.copy2(w, wheels_root / Path(w).name)
             deps_wheels.append(f"{WHEELS_DIR}/{Path(w).name}")
 
+    # Auto-record which shipped custom-op (generic_op) wheels model.py actually imports, as
+    # metadata (Deps.custom_ops). The wheels still ship + install via `deps_wheels` above no matter
+    # what — this is a derived, labeled subset for discovery/provenance, not an install list. The
+    # plugin wheel is infrastructure, not a model custom op, so only `extra_wheels` are candidates.
+    # An op reached purely by ttnn.generic_op("name", ...) with no Python import is not detected.
+    imported = imported_top_level(model_py)
+    custom_ops: List[str] = [
+        f"{WHEELS_DIR}/{Path(w).name}"
+        for w in (extra_wheels or [])
+        if wheel_top_level_packages(w) & imported
+    ]
+
     # Wheels that only need to satisfy a requirements.txt pin locally (not installed by path) — a
     # locally-built tt-metal-models wheel ahead of its index publish is the motivating case.
     models_deps_wheels: List[str] = []
@@ -1148,6 +1205,7 @@ def stage_thin_package(
         requirements=REQUIREMENTS,
         wheels=deps_wheels,
         models_wheels=models_deps_wheels,
+        custom_ops=custom_ops,
         wheels_dir=(WHEELS_DIR if (deps_wheels or models_deps_wheels
                                     or (vllm_spec and vllm_spec.wheel)) else None),
         vllm=vllm_spec,
@@ -1189,11 +1247,12 @@ def stage_thin_package(
 __all__ = [
     "WHEELS_DIR",
     "METAL_DIR",
-    "CUSTOM_OPS_DIR",
     "sha256_file",
     "parse_wheel_tags",
     "make_wheel_artifact",
     "strip_wheel_test_dirs",
+    "wheel_top_level_packages",
+    "imported_top_level",
     "host_python_tag",
     "host_incompatible_wheels",
     "render_install_sh",

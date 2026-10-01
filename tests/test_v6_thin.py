@@ -128,6 +128,9 @@ def test_thin_ships_plugin_and_ops_as_wheels_by_path(tmp_path):
     # recorded in deps.wheels in order — plugin, then ops — and shipped in wheels/ (no vllm fork)
     assert m.deps.wheels == [f"wheels/{pw.name}", f"wheels/{ow.name}"]
     assert m.deps.wheels_dir == "wheels"
+    # custom_ops is import-derived: this model.py imports nothing, so nothing is recorded (and a
+    # non-real wheel is tolerated). See test_v6_custom_ops.py for the populated cases.
+    assert m.deps.custom_ops == []
     assert not any("vllm-" in w and "plugin" not in w for w in m.deps.wheels)  # no bare vllm fork wheel
     for w in (pw, ow):
         assert (staged / "wheels" / w.name).is_file()
