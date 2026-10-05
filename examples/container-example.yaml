@@ -36,6 +36,23 @@ weights: org/Weights-7B
 #                  runtime: {app: "...", mesh_shape_env: OTHER_MESH_SHAPE}
 #                The VALUE is always derived from mesh_device below — never hand-write
 #                the shape in serve.env, or the two drift.
+#   http-server  the model's OWN HTTP server, launched by its own argv — for stacks
+#                that are neither a vLLM arrangement nor a diffusion ASGI app (a
+#                stdlib ThreadingHTTPServer with a validated serve*.sh, say). Record
+#                the launch command verbatim with {host}/{port} placeholders for the
+#                two values every serve moves, and put the validated serving knobs in
+#                serve.args (they merge per profile):
+#                  kind: http-server
+#                  runtime:
+#                    command: [python, "models/demos/my_model/tools/server.py",
+#                              --host, "{host}", --port, "{port}"]
+#                    ready_line: '"event": "ready"'  # the log substring that marks the
+#                    # boot done (the model servers log structured JSON events)
+#                  serve:
+#                    args: [--mtp, "4", --lanes, "4"]
+#                This kind installs no engine and no default HTTP stack — runtime
+#                `packages` is what the server needs BEYOND tt-metal's editable
+#                install, and `lock` is the same frozen pin file the other kinds take.
 kind: vllm-plugin
 arch: blackhole                 # fixed by the build; every profile shares it
 

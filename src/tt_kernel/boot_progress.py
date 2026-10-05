@@ -160,6 +160,17 @@ TT_DIT_PHASES: Tuple[Phase, ...] = (
           start=_rx(r"[Ww]arm(?:ing)? ?up", r"Capturing trace", r"Compiling")),
 )
 
+#: a model's own HTTP server (kind: http-server): the boot is the runtime admission
+#: contract, then the device chain + warmup, then the server's own ready event. The
+#: model servers log structured JSON ("{"event": ...}") so the anchors are the event
+#: names themselves; every row is optional and readiness is still the endpoint.
+HTTP_SERVER_PHASES: Tuple[Phase, ...] = (
+    Phase("runtime", "admitting the runtime", "runtime admitted",
+          start=_rx(r'"event": "runtime"')),
+    Phase("chain", "building the device chain", "device chain built",
+          start=_rx(r'"event": "phase"')),
+)
+
 
 class BootTracker:
     """Feed it log lines; it tells you which step the boot is on.

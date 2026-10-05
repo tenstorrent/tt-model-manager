@@ -56,7 +56,7 @@ import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-from .boot_progress import TT_DIT_PHASES, VLLM_PHASES, Phase
+from .boot_progress import HTTP_SERVER_PHASES, TT_DIT_PHASES, VLLM_PHASES, Phase
 from .manifest import DEFAULT_PORT, Manifest, ServeProfile
 
 if TYPE_CHECKING:
@@ -896,6 +896,212 @@ class TtDitServerLauncher:
         return TT_DIT_PHASES
 
 
+class HttpServerLauncher:
+    """``kind: http-server`` — the model's own HTTP server, launched by its own argv.
+
+    For stacks that are neither a vLLM arrangement nor a diffusion ASGI app: a model
+    whose serving code is its own HTTP server with its own threading model and its own
+    launch recipe (a ``serve*.sh`` the author validated). The command is recorded
+    verbatim in ``runtime.command`` with ``{host}``/``{port}`` placeholders for the two
+    values every serve moves; ``serve.args`` carries the validated serving knobs and
+    merges per profile. Readiness is the endpoint, not a log line — but the server's
+    own ready log line is taken as the boot's last landmark so the progress view ends
+    when the server says so, not when some vLLM line happens to appear.
+
+    This kind installs no engine and has no opinion about the HTTP stack (stdlib
+    servers welcome); its ``runtime:`` block is only what the image build needs (the
+    command, an optional lock, optional extra packages) plus the two card facts the
+    author states (OpenAI-compatible or not, Hub task).
+    """
+
+    name = "http-server"
+
+    # The model's own server has no continuous-batching engine to configure: it needs
+    # its hardware and mesh, and that is all a profile must promise.
+    REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device")
+
+    # keys the manifest's ``runtime:`` block may contain for this kind
+    RUNTIME_KEYS = ("command", "ready_line", "packages", "lock", "wheels", "overrides")
+
+    # see VllmPluginLauncher.LOCK_EXCLUDES; only ttnn is built in-image for this kind.
+    LOCK_EXCLUDES = ("ttnn",)
+
+    # Readiness is decided by the server's own ready log line — the author's server
+    # says when it is serving, and ``runtime.ready_line`` pins what that looks like.
+    # The default matches the structured-JSON event form ("{"event": "ready", ...}")
+    # the tt-metal model servers log; override it for a server that logs otherwise.
+    # the log substring that marks this server's boot as done, as a CLASS attribute:
+    # build.py's generated README consumes `launcher.READY_LINE` for every kind. The
+    # manifest's runtime.ready_line overrides it per package (see ready_probe).
+    DEFAULT_READY_LINE = '"event": "ready"'
+    READY_LINE = DEFAULT_READY_LINE
+
+    # how the card describes what ``serve`` starts. Conservative by default: the kind
+    # knows nothing about the API surface, so it claims nothing. A server that IS
+    # OpenAI-compatible says so in its card description.
+    SERVER_DESC = "the model's own HTTP server"
+    OPENAI_COMPATIBLE = False
+    DEFAULT_PIPELINE_TAG: Optional[str] = None  # the author's API shape is their own
+
+    PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+
+    # the two placeholders serve_argv substitutes; anything else in the command is
+    # recorded verbatim. {port} is REQUIRED — a command with no {port} would ignore
+    # the profile's port and serve somewhere the readiness probe never looks.
+    PLACEHOLDERS = ("{host}", "{port}")
+
+    def validate(self, m: "ContainerManifest") -> None:
+        from .container_manifest import ContainerManifestError
+
+        rt = m.runtime
+        for key in rt:
+            if key not in self.RUNTIME_KEYS:
+                raise ContainerManifestError(
+                    f"runtime key {key!r} is not valid for kind {self.name}; allowed: "
+                    + ", ".join(self.RUNTIME_KEYS)
+                )
+
+        command = rt.get("command")
+        if (
+            not command
+            or not isinstance(command, list)
+            or not all(isinstance(a, str) and a for a in command)
+        ):
+            raise ContainerManifestError(
+                f"kind {self.name} requires runtime.command, the launch argv to exec, as "
+                "a list of strings — e.g. [python, \"models/demos/my_model/tools/server.py\", "
+                '--host, "{host}", --port, "{port}"].'
+            )
+
+        placeholders = {
+            token for arg in command for token in re.findall(r"\{[a-z_]+\}", arg)
+        }
+        unknown = placeholders - set(self.PLACEHOLDERS)
+        if unknown:
+            raise ContainerManifestError(
+                f"runtime.command has unknown placeholder(s) {sorted(unknown)}; "
+                f"supported: {', '.join(self.PLACEHOLDERS)}"
+            )
+        if "{port}" not in placeholders:
+            raise ContainerManifestError(
+                "runtime.command never names {port} — the command would ignore the "
+                "profile's port and the readiness probe would watch the wrong one."
+            )
+
+        # Every arg that looks like a shipped script must be covered by the allowlist, or
+        # the image boots into a FileNotFoundError on the author's machine instead of here.
+        # "Looks like a shipped path": ends .py or .sh and is a bare path (no spaces — a
+        # spaced arg is a shell snippet, not a file), at ANY depth (the common top-level
+        # server.py has no slash, and bash serve.sh is a real launch shape). Runs after
+        # the placeholder checks: those are the author's primary errors, and the two
+        # minimal-command golden tests expect them first.
+        for arg in command:
+            if not (arg.endswith(".py") or arg.endswith(".sh")) or " " in arg:
+                continue
+            top = arg.split("/")[0]
+            if not any(c.split("/")[0] == top for c in m.source.all_code_paths):
+                raise ContainerManifestError(
+                    f"runtime.command runs {arg!r}, which no allowlist entry "
+                    "ships. Add the directory holding it to source.code (if it lives "
+                    "in the tt-metal tree) or to source.extra_code (if it does not)."
+                )
+
+        ready_line = rt.get("ready_line")
+        if ready_line is not None and (
+            not isinstance(ready_line, str) or not ready_line.strip()
+        ):
+            raise ContainerManifestError(
+                f"runtime.ready_line {ready_line!r} must be a non-empty string — the "
+                "log substring that marks this server's boot as done (default: "
+                f"{self.DEFAULT_READY_LINE!r})."
+            )
+
+    # ---- build -----------------------------------------------------------------------
+
+    def install_lines(self, m: "ContainerManifest") -> List[str]:
+        rt = m.runtime
+        if rt.get("lock"):
+            # The lock IS the dependency set: nothing resolves at build time, so two
+            # builds a week apart produce the same environment.
+            return [
+                'uv pip install --python "$VENV/bin/python" -r /ctx/requirements.lock '
+                f"--extra-index-url {self.PYTORCH_CPU_INDEX} --index-strategy unsafe-best-match"
+            ]
+        # No lock: the author names what the server needs BEYOND tt-metal's editable
+        # install (transformers, safetensors, ...). Nothing pulls torch by default here —
+        # ttnn's extension modules are built against tt-metal's pinned torch, so install
+        # exactly that rather than whatever resolves.
+        extra = [str(p) for p in (rt.get("packages") or ())]
+        if not any(re.match(r"^torch\b", p) for p in extra):
+            pin = metal_torch_pin(_local_metal_tree(m))
+            extra.insert(0, f"torch=={pin}" if pin else "torch")
+        quoted = " ".join(shlex.quote(p) for p in extra)
+        return [
+            f'uv pip install --python "$VENV/bin/python" {quoted} '
+            f"--extra-index-url {self.PYTORCH_CPU_INDEX} --index-strategy unsafe-best-match"
+        ]
+
+    def verify_lines(self, m: "ContainerManifest") -> List[str]:
+        checks = [
+            "import ttnn",
+            "import torch; assert torch.__version__.endswith('+cpu'), torch.__version__",
+        ]
+        pin = metal_torch_pin(_local_metal_tree(m))
+        if pin:
+            checks.append(
+                "import torch; v = torch.__version__.split('+')[0]; "
+                f"assert v == {pin!r}, "
+                "f'torch {v} is installed but tt-metal pins {pin}; ttnn extension "
+                "modules were built against {pin} — pin it via runtime.lock'"
+            )
+        lines = [f'"$VENV/bin/python" -c {shlex.quote("; ".join(checks))}']
+        lines += [f'"$VENV/bin/python" -c {shlex.quote(v)}' for v in m.verify]
+        return lines
+
+    # ---- serve -----------------------------------------------------------------------
+
+    def serve_argv(self, m: Manifest, profile: ServeProfile) -> List[str]:
+        command = self._runtime_command(m)
+        values = {
+            "{host}": "0.0.0.0",  # containers bind every interface; the publish scopes reach
+            "{port}": str(profile.port or DEFAULT_PORT),
+        }
+        # Substitute WITHIN each arg, not only whole-arg matches: validate() accepts the
+        # embedded form ("--port={port}"), so serving it literally would be exactly the
+        # discover-it-ten-minutes-into-a-boot failure this kind exists to prevent. A
+        # whole-arg placeholder is the same replacement under token replace.
+        argv = []
+        for arg in command:
+            for token, value in values.items():
+                arg = arg.replace(token, value)
+            argv.append(arg)
+        argv += profile.flat_args()
+        return argv
+
+    def serve_env(self, m: Manifest, profile: ServeProfile) -> Dict[str, str]:
+        return dict(profile.env)
+
+    def ready_probe(self, m: Manifest) -> str:
+        container = getattr(m, "container", None)
+        runtime = getattr(container, "runtime", {}) if container is not None else {}
+        return str(runtime.get("ready_line") or self.DEFAULT_READY_LINE)
+
+    def boot_phases(self, m: Manifest) -> Tuple[Phase, ...]:
+        """The boot's landmarks, for `serve`'s progress view (see boot_progress)."""
+        return HTTP_SERVER_PHASES
+
+    def _runtime_command(self, m: Manifest) -> List[str]:
+        container = getattr(m, "container", None)
+        runtime = getattr(container, "runtime", {}) if container is not None else {}
+        command = runtime.get("command")
+        if not command:
+            raise LauncherError(
+                f"manifest has no container.runtime.command, so kind "
+                f"{self.name} cannot know what to serve"
+            )
+        return [str(a) for a in command]
+
+
 def _mesh_shape_env(m: Manifest) -> str:
     """Name of the env var carrying the mesh shape, per the published manifest.
 
@@ -926,6 +1132,7 @@ KINDS: Dict[str, object] = {
     VllmPluginLauncher.name: VllmPluginLauncher(),
     VllmForkLauncher.name: VllmForkLauncher(),
     TtDitServerLauncher.name: TtDitServerLauncher(),
+    HttpServerLauncher.name: HttpServerLauncher(),
 }
 
 # Used when a kind is unknown or predates ``REQUIRED_SERVE_FIELDS``.
