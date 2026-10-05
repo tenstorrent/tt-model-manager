@@ -153,7 +153,8 @@ This materializes the folder, then runs its `install.sh`, which, **entirely insi
 provisions the pinned Python interpreter (via `uv`, into `.python/`), builds the venv, installs
 the pinned deps, builds the empty-target vLLM, and installs the bundled wheels. Weights are
 fetched from the HF pointer. Add `--with-weights` to pre-download them; otherwise they are fetched
-on first serve.
+on first serve. Either way they land in the same HF cache, the one `run.sh` serves from:
+`<install>/.hf` by default, or `$HF_HOME` (`$HF_HUB_CACHE`) if you set it for both commands.
 
 If the bundle's `arch` does not match this host's card, `pull` stops here with a clear message.
 

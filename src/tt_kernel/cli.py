@@ -741,6 +741,9 @@ def package_thin(
     mesh_topology: Optional[str] = typer.Option(None, "--mesh", help='Device topology, e.g. "P150" / "1x4".'),
     device_count: int = typer.Option(1, "--device-count"),
     python_version: str = typer.Option("3.12", "--python", help="Pinned interpreter (uv provisions)."),
+    tt_metal_version: Optional[str] = typer.Option(
+        None, "--tt-metal-version", help="Record this TT-Metalium version in the manifest. "
+        "Default: the exact ttnn (or tt-metal-models) pin in --requirements, else this host's."),
     max_num_seqs: Optional[int] = typer.Option(None, "--max-num-seqs"),
     block_size: Optional[int] = typer.Option(None, "--block-size"),
     max_model_len: Optional[int] = typer.Option(None, "--max-model-len"),
@@ -785,6 +788,9 @@ def package_thin(
     model_path = Path(model_py).expanduser()
     if not model_path.is_file():
         raise _err(f"--model-py {model_py!r} is not a file.")
+    if model_path.name in packaging.THIN_RESERVED_NAMES:
+        raise _err(f"--model-py {model_path.name!r} has the same name as a file the bundle "
+                   "generates; rename the runner.")
     if kind not in THIN_KINDS:
         raise _err(f"--kind {kind!r} is not supported; use one of {THIN_KINDS}.")
     vmeta: Optional[dict] = None
@@ -846,7 +852,12 @@ def package_thin(
         vllm_version=vllm_version, with_vllm=with_vllm,
         weights=weights_block, device_count=device_count, mesh=mesh, env=env_map,
         resources=resources, python_version=python_version,
-        tt_metal_version=metal.resolve_version() or "unknown",
+        tt_metal_version=(
+            tt_metal_version
+            or packaging.pinned_ttnn_version(Path(requirements).expanduser().read_text()
+                                             if requirements else "")
+            or metal.resolve_version() or "unknown"
+        ),
     )
     typer.secho(f"✓ Staged v6 thin bundle {manifest.name} at {staged}", fg=typer.colors.GREEN)
     typer.echo(f"  runner: {model_path.name}   deps: {manifest.deps.requirements}"
@@ -884,7 +895,11 @@ def package_thin(
     if publish:
         tags.append(TT_MODEL_CATALOG_TAG)
     _ensure_repo(repo_id, private)  # private by default; never flips an existing repo silently
-    hub.push_folder(repo_id, staged, commit_message=f"tt-model package-thin {manifest.name} (v6 thin)")
+    try:
+        hub.push_folder(repo_id, staged, refuse_foreign=True,
+                        commit_message=f"tt-model package-thin {manifest.name} (v6 thin)")
+    except hub.ForeignFilesError as e:
+        raise _err(str(e))
     try:
         hub.tag_repo(repo_id, tags)
     except Exception as exc:  # tagging is best-effort
@@ -1013,7 +1028,7 @@ def _materialize_and_record(
             # A user who pre-staged weights keeps them across a reinstall (resumable from the HF
             # cache) instead of silently dropping them and refetching at load time.
             typer.echo(f"Downloading weights {manifest.weights.repo_id} ...")
-            weights_path = runtime.download_weights(manifest.weights, dest / "weights")
+            weights_path = runtime.download_weights(manifest.weights, runtime.serve_hub_cache(dest))
 
         run_script = dest / ((manifest.bundled.run_script if manifest.bundled else None) or "run.sh")
         localdb.record(repo_id, {
@@ -1195,6 +1210,16 @@ def _refresh_self_contained(
                     fg=typer.colors.YELLOW, err=True)
 
 
+# serve writes the server's PID here (inside the install folder) so `tt-model stop` can find it.
+SERVE_PID_FILE = ".serve.pid"
+
+
+def _install_root(entry: dict) -> Path:
+    """The install folder serve and stop both key the PID file on (run.sh may be nested in it)."""
+    return Path(entry.get("install_dir") or entry.get("bundle_path")
+                or Path(entry.get("run_script") or "").parent)
+
+
 def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional[List[str]] = None) -> None:
     """Serve a v5 self-contained bundle by running its own ``run.sh`` in its own venv.
 
@@ -1212,10 +1237,56 @@ def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional
         # resolved command + env instead of the bare `bash run.sh` line.
         subprocess.run(argv, env={**os.environ, "TT_MODEL_PRINT": "1"})
         return
+    # run.sh execs the server, so the PID bash writes here is the server's own.
+    pid_file = _install_root(entry) / SERVE_PID_FILE
+    argv = ["bash", "-c", 'echo $$ > "$0" && exec "$@"', str(pid_file), *argv]
     try:
         raise typer.Exit(code=subprocess.run(argv).returncode)
     except KeyboardInterrupt:
         raise typer.Exit(code=130)
+    finally:
+        pid_file.unlink(missing_ok=True)
+
+
+def _pid_alive(pid: int) -> bool:
+    """True while ``pid`` is running (a zombie awaiting its parent's reap counts as gone)."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def _stop_self_contained(entry: dict) -> None:
+    """SIGTERM the server ``serve`` recorded for this install, SIGKILL after the grace period."""
+    import signal
+    import time
+
+    install = _install_root(entry)
+    pid_file = install / SERVE_PID_FILE
+    try:
+        pid = int(pid_file.read_text().strip())
+        # Guard against a recycled PID: the server's command line runs from this install.
+        ours = str(install) in Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace")
+    except (OSError, ValueError):
+        ours = False
+    if not ours:
+        pid_file.unlink(missing_ok=True)
+        console.note("nothing running", marker="○")
+        return
+    with console.step(f"stopping {entry.get('repo_id')} (pid {pid})") as st:
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + container.STOP_TIMEOUT_S
+        while _pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.5)
+        clean = not _pid_alive(pid)
+        if not clean:
+            os.kill(pid, signal.SIGKILL)
+        st.detail("clean" if clean else "killed")
+    pid_file.unlink(missing_ok=True)
+    if not clean:
+        console.note("the server did not exit on SIGTERM and was killed; the chips may need a "
+                     "reset before the next serve", marker="⚠", style="warning")
+    console.milestone(f"stopped {entry.get('repo_id')}")
 
 
 @app.command(rich_help_panel="Environment")
@@ -1247,7 +1318,8 @@ def serve(
     ),
     profile: Optional[str] = typer.Option(
         None, "--profile", help="For a container package: which serve profile to launch "
-        "(default: the author's). See `tt-model profiles <id>`."
+        "(default: the author's). See `tt-model profiles <id>`. A v5/v6 bundle has one launch "
+        "config, so it is ignored there, with a note."
     ),
     detach: bool = typer.Option(
         False, "--detach", help="For a container package: start the container and return "
@@ -1387,6 +1459,15 @@ def serve(
             console.note(f"port {DEFAULT_PORT} is in use; serving on {chosen} instead",
                          marker="•")
         extra_args = ["--port", str(chosen)] + extra_args
+
+    # Past the container branch, the container-only options have nothing to act on. Say so
+    # rather than drop them silently.
+    ignored = [f for f, v in (("--profile", profile), ("--device-id", device_id)) if v]
+    if ignored:
+        one = len(ignored) == 1
+        console.note(f"{' and '.join(ignored)} {'applies' if one else 'apply'} only to container "
+                     f"packages; {repo_id} is a v5/v6 bundle with one launch config, so "
+                     f"{'it was' if one else 'they were'} ignored", marker="•")
 
     # An already-installed bundle serves from its own venv. The host toolchain (ttnn/vLLM versions)
     # is irrelevant — the bundle ships/builds its own — so nothing about the host is checked.
@@ -1828,7 +1909,12 @@ def unpublish(
 # ------------------------------------------------------------------------------ rm
 @app.command(rich_help_panel="Maintenance")
 def rm(
-    repo_id: str = typer.Argument(..., help="Installed bundle as namespace/name."),
+    repo_id: Optional[str] = typer.Argument(None, help="Installed bundle as namespace/name."),
+    all_installed: bool = typer.Option(
+        False, "--all", help="Remove EVERY installed bundle (what `tt-model list` shows) "
+        "instead of one. Asks first unless --yes."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="With --all: skip the confirmation."),
     keep_cache: bool = typer.Option(
         False, "--keep-cache", help="For a container package: keep the host caches — JIT "
         "kernels AND converted weights — so a later pull of the same model boots fast "
@@ -1841,7 +1927,7 @@ def rm(
         "can be tens of gigabytes to re-download, so this is off by default."
     ),
 ) -> None:
-    """Remove a locally installed bundle and its index entry.
+    """Remove a locally installed bundle and its index entry — or all of them with --all.
 
     For a container (v5.1) package this removes the containers, the docker image, the
     pulled manifest, both host caches (JIT kernels and converted weights) and the
@@ -1850,11 +1936,55 @@ def rm(
 
     Weights are kept unless ``--include-weights``: they are shared with everything else on
     the host and are a pointer rather than part of the package.
-    """
-    entry = localdb.get(repo_id)
-    if not entry:
-        raise _err(f"{repo_id} is not recorded as installed.")
 
+    ``--all`` walks every installed bundle and applies the same removal to each; one
+    bundle failing does not stop the rest, and the failures are listed at the end.
+    """
+    if all_installed and repo_id:
+        raise _err("Give either a bundle id or --all, not both.")
+    if not all_installed:
+        if not repo_id:
+            raise _err("Give a bundle id, or --all to remove every installed bundle.")
+        entry = localdb.get(repo_id)
+        if not entry:
+            raise _err(f"{repo_id} is not recorded as installed.")
+        _rm_one(repo_id, entry, keep_cache=keep_cache, include_weights=include_weights)
+        return
+
+    entries = localdb.all_entries()
+    if not entries:
+        console.note("nothing is installed", marker="○")
+        return
+    console.note(f"{len(entries)} installed bundle(s):", marker="•")
+    for e in entries:
+        console.hint(e["repo_id"])
+    if not yes and not typer.confirm(
+        "Remove all of them" + (" and their weights" if include_weights else "") + "?",
+        default=False,
+    ):
+        raise _err("Aborted; nothing removed.")
+
+    failed: List[str] = []
+    for e in entries:
+        rid = e["repo_id"]
+        try:
+            _rm_one(rid, e, keep_cache=keep_cache, include_weights=include_weights)
+        except typer.Exit:
+            failed.append(rid)
+        except Exception as exc:  # one broken bundle must not shield the rest
+            typer.secho(f"{rid}: {exc}", fg=typer.colors.RED, err=True)
+            failed.append(rid)
+    done = len(entries) - len(failed)
+    if failed:
+        raise _err(
+            f"Removed {done} of {len(entries)}; failed: {', '.join(failed)}. "
+            "Fix the cause and re-run `tt-model rm <id>` for each."
+        )
+    console.milestone(f"removed all {done} installed bundle(s)")
+
+
+def _rm_one(repo_id: str, entry: dict, *, keep_cache: bool, include_weights: bool) -> None:
+    """Remove ONE recorded bundle. Raises ``typer.Exit`` (already reported) on failure."""
     # --- container (v5.1) --------------------------------------------------------------
     # Checked FIRST: a container entry has no install_dir, so the venv branch below would
     # drop the index entry and report success while leaving ~10 GB of image on disk.
@@ -1907,16 +2037,21 @@ def _require_container(target: str):
 
 @app.command(rich_help_panel="Run a model")
 def stop(
-    target: str = typer.Argument(..., help="Container package: org/name, or a manifest path."),
+    target: str = typer.Argument(..., help="Package or bundle: org/name, or a manifest path."),
     profile: Optional[str] = typer.Option(None, "--profile", help="Stop only this profile."),
 ) -> None:
-    """Stop a running container package, SIGTERM first.
+    """Stop a running container package or v5/v6 bundle server, SIGTERM first.
 
     A clean SIGTERM lets the server close the mesh on its way out. If the grace period
     expires and docker has to SIGKILL, the devices are left needing a reset — so the mesh
     is reset with tt-smi from a throwaway container, and you are told it happened.
     """
     from . import container_cli
+
+    entry = localdb.get(target)
+    if entry and entry.get("self_contained"):
+        _stop_self_contained(entry)
+        return
 
     try:
         container_cli.stop_container(_require_container(target), profile_name=profile)

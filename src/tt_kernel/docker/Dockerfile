@@ -221,7 +221,9 @@ COPY --from=builder --chown=tt:tt /opt/tt-metal/ttnn /opt/tt-metal/ttnn
 COPY --from=builder --chown=tt:tt /opt/tt-metal/tools /opt/tt-metal/tools
 COPY --from=builder --chown=tt:tt /opt/tt-metal/setup.py /opt/tt-metal/pyproject.toml /opt/tt-metal/
 COPY --chown=tt:tt code/ /opt/tt-metal/
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+# --chmod: the context copies carry the AUTHOR's umask (a 007 umask writes 660/770 files), and the
+# runtime user `tt` cannot read a root-owned 660 file. Fix the mode here, not in the author's shell.
+COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 # The default profile's env + launch command, generated per model. Gives the image a
 # CMD, so `docker run <image>` with the right host flags serves correctly instead of
 # starting a misconfigured server — and refuses with the required flags when it cannot.
@@ -270,7 +272,9 @@ WORKDIR /home/tt/work
 # assertions are generated per model (launchers.verify_lines + the manifest's own
 # verify: list); an under-shipped image fails HERE, on the author's machine, not ten
 # minutes into a consumer's first boot.
-COPY verify.sh /ctx/verify.sh
+# 0755, not 0644: /ctx does not exist in this stage, and --chmod also sets the mode of the
+# directory COPY creates -- a 0644 /ctx is untraversable by `tt`.
+COPY --chmod=0755 verify.sh /ctx/verify.sh
 RUN bash /ctx/verify.sh
 
 # Verification runs as `tt` (uid 1000) and its imports CREATE cache dirs under $HOME —

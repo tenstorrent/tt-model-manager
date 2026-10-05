@@ -884,6 +884,100 @@ def test_push_uploads_the_whole_directory_with_the_large_folder_uploader(tmp_pat
     assert Path(seen["folder"]) == out
 
 
+def test_repoint_card_quickstart_swaps_the_command_lines_not_prose(tmp_path):
+    """#109: the Quickstart command lines name the repo — all four, both the `tt` CLI pair and
+    the `tt-model` pair — and get repointed; prose that merely mentions a repo does not."""
+    card = ("# my-model\n\n## Quickstart\n\n```bash\n"
+            "tt model pull authored/x\n"
+            "tt serve authored/x\n```\n\n```bash\n"
+            "tt-model pull  authored/x --with-weights\n"
+            "tt-model serve authored/x\n```\n"
+            "some prose mentioning authored/x that must NOT change.\n")
+    readme = tmp_path / "README.md"
+    readme.write_text(card)
+    assert container_cli._repoint_card_quickstart(readme, "override/y") is True
+    out = readme.read_text()
+    assert "tt model pull override/y" in out
+    assert "tt serve override/y" in out
+    assert "tt-model pull  override/y --with-weights" in out
+    assert "tt-model serve override/y" in out
+    assert "prose mentioning authored/x" in out              # prose is left untouched
+    # idempotent: repointing to the repo already on the lines writes nothing.
+    assert container_cli._repoint_card_quickstart(readme, "override/y") is False
+
+
+def test_repoint_is_anchored_on_the_command_so_repeated_pushes_stay_correct(tmp_path):
+    """@anirudTT's catch: the fix must not anchor on the OLD repo, which never moves in the
+    manifest. package for canonical, push --repo a/x, then a plain push back to canonical must
+    restore canonical on the card — and a second redirect must leave no trace of the first."""
+    readme = tmp_path / "README.md"
+    readme.write_text("## Quickstart\n```bash\ntt-model serve canonical/m\n```\n")
+
+    assert container_cli._repoint_card_quickstart(readme, "a/m") is True
+    assert "tt-model serve a/m" in readme.read_text()
+    # a plain push back to the canonical repo must repoint back — the bug was this no-op'd,
+    # publishing someone else's repo name onto the canonical repo's card.
+    assert container_cli._repoint_card_quickstart(readme, "canonical/m") is True
+    assert "tt-model serve canonical/m" in readme.read_text()
+    assert "a/m" not in readme.read_text()
+    # a/m -> b/m: no trace of a/m survives.
+    container_cli._repoint_card_quickstart(readme, "a/m")
+    assert container_cli._repoint_card_quickstart(readme, "b/m") is True
+    out = readme.read_text()
+    assert "tt-model serve b/m" in out and "a/m" not in out
+
+
+def test_repoint_does_not_touch_a_prose_command_naming_a_different_model(tmp_path):
+    """A bare word after `tt serve` is not a repo; and an author's related-model command in
+    prose keeps its own repo — the swap requires a `namespace/name` on a generated line."""
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        "## Quickstart\n```bash\ntt serve authored/x\n```\n"
+        "tt serve is the fast path.\n")                       # not a repo -> untouched
+    assert container_cli._repoint_card_quickstart(readme, "pushed/x") is True
+    out = readme.read_text()
+    assert "tt serve pushed/x" in out
+    assert "tt serve is the fast path." in out                # the prose line is unchanged
+
+
+def test_push_container_repoints_the_card_when_repo_is_overridden(tmp_path, monkeypatch):
+    """A `push --repo <other>` must publish a card whose quickstart names <other>, not the
+    repo the package was built for — otherwise the published card 404s (#109)."""
+    monkeypatch.setattr(hub, "push_large_folder", lambda *a, **k: None)
+    out = _staged(tmp_path, repo="tenstorrent/devstral")      # built.repo == what the card used
+    (out / "README.md").write_text(
+        "## Quickstart\n```bash\ntt model pull tenstorrent/devstral\n```\n```bash\n"
+        "tt-model pull  tenstorrent/devstral --with-weights\n"
+        "tt-model serve tenstorrent/devstral\n```\n")
+    container_cli.push_container(str(out), container_cli.is_package_dir(out), "anirud/devstral")
+    card = (out / "README.md").read_text()
+    assert "tt-model serve anirud/devstral" in card
+    assert "tt model pull anirud/devstral" in card
+    assert "tenstorrent/devstral" not in card                # the stale repo is gone
+
+
+def test_a_rendered_card_repoints_cleanly_end_to_end(tmp_path):
+    """Guards format drift: the anchors _repoint_card_quickstart matches must track what
+    render_model_card actually emits. Render a real card, repoint it, check every command."""
+    from tt_kernel import build
+
+    raw = json.loads(json.dumps(BASE))
+    raw["repo"] = "authored/model"
+    m = ContainerManifest.model_validate(raw)
+    m.validate_semantics()
+    readme = tmp_path / "README.md"
+    readme.write_text(build.render_model_card(m, {"repo": m.repo, "tt_metal": {}}))
+    assert "tt-model serve authored/model" in readme.read_text()   # sanity: rendered as authored
+    assert container_cli._repoint_card_quickstart(readme, "pushed/model") is True
+    out = readme.read_text()
+    assert "tt model pull pushed/model" in out
+    assert "tt serve pushed/model" in out
+    assert "tt-model pull  pushed/model --with-weights" in out
+    assert "tt-model serve pushed/model" in out
+    # No generated Quickstart COMMAND still names the authored repo (prose lede may).
+    assert "pull  authored/model" not in out and "serve authored/model" not in out
+
+
 def test_push_refuses_a_directory_whose_image_is_not_an_oci_layout(tmp_path, monkeypatch):
     out = _staged(tmp_path, with_layout=False)
     with pytest.raises(container_cli.ContainerCliError, match="not an OCI layout"):
@@ -1723,6 +1817,109 @@ def test_a_digest_bearing_package_says_nothing_about_it(tmp_path, monkeypatch, c
     monkeypatch.setattr(container_cli, "_download_weights", lambda ref, **kw: Path("/w"))
     container_cli.pull_container("org/x", None, m, no_weights=True)
     assert "no image digest" not in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ containerd image store
+#
+# docker's image id is the config digest on the classic store and the manifest digest on the
+# containerd store (Docker >= 28 default). A package records the builder's id, so on a host
+# with the other store `have == want` never holds and every pull/serve re-downloaded the
+# multi-GB image with a "different image" note. The id the local daemon assigns at load is
+# recorded and accepted while the package digest is unchanged.
+
+CONFIG_DIGEST = "sha256:" + "c" * 64          # what the classic-store builder recorded
+MANIFEST_ID = "sha256:" + "m" * 64            # what a containerd-store consumer reports
+
+
+def _containerd_pull(tmp_path, monkeypatch, m):
+    """Wire pull_container to a daemon that reports MANIFEST_ID once something is loaded."""
+    from tt_kernel import oci
+
+    state = {"id": None}
+    loads = []
+
+    def fake_load(src, expect_tag=None):
+        loads.append(src)
+        state["id"] = MANIFEST_ID
+
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: state["id"])
+    monkeypatch.setattr(oci, "load", fake_load)
+    monkeypatch.setattr(container_cli.hub, "download_bundle",
+                        lambda repo, rev, dest=None: Path(dest))
+    monkeypatch.setattr(container_cli, "_download_weights", lambda ref, **kw: Path("/w"))
+    return state, loads
+
+
+def test_pull_on_the_containerd_store_records_the_daemons_id_and_skips_the_next_reload(
+        tmp_path, monkeypatch, capsys):
+    from tt_kernel import localdb
+
+    m = _manifest(tmp_path)
+    m.container.image.digest = CONFIG_DIGEST
+    state, loads = _containerd_pull(tmp_path, monkeypatch, m)
+
+    container_cli.pull_container("org/x", None, m, no_weights=True)
+    assert loads == [Path(loads[0])] and len(loads) == 1
+    assert localdb.get("org/x")["image_loaded_id"] == MANIFEST_ID
+    assert localdb.get("org/x")["image_digest"] == CONFIG_DIGEST
+
+    container_cli.pull_container("org/x", None, m, no_weights=True)
+    assert len(loads) == 1                               # not reloaded
+    out = " ".join(capsys.readouterr().out.split())
+    assert "already loaded" in out
+
+
+def test_a_republished_package_still_reloads_on_the_containerd_store(tmp_path, monkeypatch):
+    """The recorded daemon id only vouches for the package digest it was loaded from."""
+    from tt_kernel import localdb
+
+    m = _manifest(tmp_path)
+    m.container.image.digest = "sha256:" + "d" * 64        # republished: new digest
+    localdb.record("org/x", {"repo_id": "org/x", "container": True,
+                             "image": container.image_ref(m),
+                             "image_digest": CONFIG_DIGEST, "image_loaded_id": MANIFEST_ID})
+    state, loads = _containerd_pull(tmp_path, monkeypatch, m)
+    state["id"] = MANIFEST_ID                             # the old image is still loaded
+
+    container_cli.pull_container("org/x", None, m, no_weights=True)
+    assert len(loads) == 1
+
+
+def test_serve_accepts_the_recorded_daemon_id_instead_of_repulling(tmp_path, monkeypatch):
+    from tt_kernel import localdb
+
+    m = _manifest(tmp_path)
+    m.container.image.digest = CONFIG_DIGEST
+    localdb.record("org/m", {"repo_id": "org/m", "container": True,
+                             "image": container.image_ref(m),
+                             "image_digest": CONFIG_DIGEST, "image_loaded_id": MANIFEST_ID})
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: MANIFEST_ID)
+    monkeypatch.setattr(container_cli, "pull_container",
+                        lambda *a, **k: pytest.fail("must not re-pull a loaded image"))
+    ran = []
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: ran.append(argv))
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda mm: None)
+
+    container_cli.serve_container(m, target="org/m")
+    assert ran and ran[0][:2] == ["docker", "run"]
+
+
+def test_describe_pulled_is_ready_with_the_recorded_daemon_id(monkeypatch):
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: MANIFEST_ID)
+    monkeypatch.setattr(container, "run_or_empty", lambda argv: "10737418240")
+    r = container_cli.describe_pulled(
+        {"repo_id": "org/x", "image": "tt-model/x:abc", "arch": "blackhole",
+         "image_digest": CONFIG_DIGEST, "image_loaded_id": MANIFEST_ID})
+    assert r["ready"] is True and r["why"] == ""
+
+
+def test_describe_pulled_still_flags_a_swapped_image(monkeypatch):
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: "sha256:" + "z" * 64)
+    r = container_cli.describe_pulled(
+        {"repo_id": "org/x", "image": "tt-model/x:abc", "arch": "blackhole",
+         "image_digest": CONFIG_DIGEST, "image_loaded_id": MANIFEST_ID})
+    assert r["ready"] is False and "different build" in r["why"]
 
 
 # ------------------------------------------------------------------ --refresh
@@ -2881,3 +3078,28 @@ def test_a_path_outside_an_hf_cache_layout_gets_no_pointer(tmp_path):
     container_cli._ensure_default_ref(other)
     assert not (tmp_path / "somewhere" / "refs").exists()
     assert not (tmp_path / "refs").exists()
+
+
+# ------------------------------------------- a later v6 pull supersedes a pulled container
+
+
+def test_serve_prefers_a_later_v6_install_over_a_stale_pulled_container(tmp_path, monkeypatch):
+    """A repo republished as a v6 bundle leaves the old pulled container manifest behind.
+    The v6 pull re-records the repo in localdb, and that newest record must win."""
+    from tt_kernel import cli, localdb
+
+    d = container_cli.pull_dir("org/x")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "tt_kernel_manifest.json").write_text(_manifest(tmp_path).to_json())
+    localdb.record("org/x", {"repo_id": "org/x", "self_contained": True,
+                             "install_dir": str(tmp_path), "run_script": str(tmp_path / "run.sh")})
+    served = []
+    monkeypatch.setattr(cli, "_serve_self_contained",
+                        lambda entry, **kw: served.append(entry["repo_id"]))
+    monkeypatch.setattr(container_cli, "serve_container",
+                        lambda *a, **k: pytest.fail("served the stale container"))
+
+    res = runner.invoke(cli.app, ["serve", "org/x", "--local-only"])
+    assert res.exit_code == 0, res.output
+    assert served == ["org/x"]
+    assert container_cli.resolve_target("org/x") is None

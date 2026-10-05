@@ -72,6 +72,7 @@ kinds. Both are served with the same `tt-model serve` command.
 | [docs/container_packages.md](docs/container_packages.md) | v5.1 container packages: `tt-model.yaml`, serving, how the container runs, and design notes |
 | [docs/thin_packages.md](docs/thin_packages.md) | v6 thin bundles (draft) |
 | [docs/multi_host_mesh.md](docs/multi_host_mesh.md) | Multi-host (cross-box) mesh design note (issue #87) |
+| [docs/multi_variant_repos.md](docs/multi_variant_repos.md) | Proposed design: one repo carrying several bundle formats (for example v5.1 and v6) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, testing, PR process |
 | [AGENTS.md](AGENTS.md) | Design invariants and workflow notes for maintainers and coding agents |
 

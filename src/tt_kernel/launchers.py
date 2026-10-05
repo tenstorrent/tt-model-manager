@@ -84,6 +84,22 @@ def _weights_id(m: Manifest) -> str:
     return m.weights.repo_id
 
 
+def _revision_argv(m: Manifest) -> List[str]:
+    """``--revision <sha>`` for vLLM when the manifest pins one, else nothing.
+
+    ``pull`` downloads the pinned revision, which leaves ``snapshots/<sha>/`` in the HF
+    cache and no ``refs/main`` (only a branch or tag download writes a ref). The container
+    runs with ``HF_HUB_OFFLINE=1`` and names the weights by repo id, so a vLLM that resolves
+    that id through ``snapshot_download`` at the default revision (0.26 does, before it
+    parses its own arguments) looks for ``refs/main``, finds nothing, and dies with
+    ``LocalEntryNotFoundError`` over a complete cache. Handing vLLM the sha makes the offline
+    lookup land on the snapshot that was validated, whatever ``refs/main`` says or does not
+    say. vLLM derives ``--tokenizer-revision`` from ``--revision`` when it is unset.
+    """
+    rev = m.weights.revision if m.weights is not None else None
+    return ["--revision", rev] if rev else []
+
+
 class VllmPluginLauncher:
     """``kind: vllm-plugin`` — stock vLLM plus the standalone Tenstorrent platform plugin.
 
@@ -337,7 +353,7 @@ class VllmPluginLauncher:
     # ---- serve -----------------------------------------------------------------------
 
     def serve_argv(self, m: Manifest, profile: ServeProfile) -> List[str]:
-        argv = ["vllm", "serve", _weights_id(m)]
+        argv = ["vllm", "serve", _weights_id(m)] + _revision_argv(m)
         if profile.max_model_len is not None:
             argv += ["--max-model-len", str(profile.max_model_len)]
         argv += ["--max-num-seqs", str(profile.max_num_seqs)]
@@ -568,7 +584,7 @@ class VllmForkLauncher:
         # or the split does not round-trip: a value carrying spaces or quotes -- most
         # often JSON, e.g. --override-generation-config '{"temperature": 0}'
         # shlex.quote is a no-op for tokens that need no quoting
-        extra = profile.flat_args() + _capability_argv(profile)
+        extra = _revision_argv(m) + profile.flat_args() + _capability_argv(profile)
         if extra:
             argv += ["--additional-server-args",
                      " ".join(shlex.quote(t) for t in extra)]

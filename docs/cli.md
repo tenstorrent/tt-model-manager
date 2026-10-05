@@ -22,7 +22,7 @@ tt-model curl "hello"                              # send a chat completion to t
 tt-model curl "write a haiku" --temperature 0.7 --max-tokens 200
 tt-model curl "hello" --print                      # emit the equivalent curl instead of sending
 
-tt-model stop you/mymodel                          # container packages: stop the running server (SIGTERM first)
+tt-model stop you/mymodel                          # stop the running server (SIGTERM first; container or v5/v6 bundle)
 tt-model logs you/mymodel                          # container packages: show the server logs
 ```
 
@@ -37,7 +37,9 @@ and go straight to launch. For a v5.1 container package, `serve` runs the image 
 **Pass-through rule.** `--port`, `--print`, `--local-only`, `--force`, `--arch`, `--profile`,
 `--detach`, `--no-weights`, `--refresh`, `--no-update-check`, and `--device-id` are `serve`'s
 own options and can appear before or after the bundle id. Anything else after the id passes through to vLLM unchanged. This rule is the
-same for every package format.
+same for every package format. `--profile` and `--device-id` act only on a v5.1 container
+package; a v5/v6 bundle has one launch config, so `serve` ignores them there and prints a note
+saying so.
 
 `serve` also compares the installed revision to the Hub's tip and prints a non-blocking
 advisory if a newer one exists. Skip it with `--no-update-check`, `--local-only`, or a pinned
@@ -90,5 +92,6 @@ Flags per format: [container_packages.md](container_packages.md) (v5.1) and
 
 ```bash
 tt-model rm      you/mymodel                        # remove an installed bundle and its index entry
+tt-model rm      --all [--include-weights]          # remove every installed bundle (asks first; -y to skip)
 tt-model version                                    # print the installed tt-model version
 ```

@@ -16,6 +16,7 @@ looks like the rest of the tool. The modules underneath (``build``, ``container`
 from __future__ import annotations
 
 import errno
+import re
 import shlex
 import shutil
 import tempfile
@@ -179,17 +180,66 @@ def is_package_dir(path: Path) -> Optional[Manifest]:
     return m if m.is_container else None
 
 
+# The generated Quickstart's command lines, anchored on the COMMAND, not the repo that
+# happens to be on them. `render_model_card` emits four (two `tt` CLI, two `tt-model`):
+#     tt model pull <repo>
+#     tt serve <repo>
+#     tt-model pull  <repo> --with-weights
+#     tt-model serve <repo>
+# Anchoring on the old repo instead (an earlier version of this fix) only worked for the
+# FIRST redirected push: `built.repo` never moves, so once the card no longer literally
+# contains it every later push matched nothing and silently did nothing — #109 again, and
+# worse when a plain push after a redirected one left the canonical repo's card naming
+# someone else's repo (thanks @anirudTT for catching this). The command prefix is fixed, so
+# the swap works no matter what repo is currently on the line and is idempotent by nature.
+# The `\S+/\S+` (a `namespace/name`) means a stray prose line like `tt serve is fast` is not
+# mistaken for a command — a repo id always has exactly one slash, prose words do not.
+_QUICKSTART_CMD = re.compile(
+    r"(?m)^(tt model pull |tt serve |tt-model pull  |tt-model serve )(\S+/\S+)"
+)
+
+
+def _repoint_card_quickstart(readme: Path, new_repo: str) -> bool:
+    """Point the card's Quickstart command lines at ``new_repo``; True if the file changed.
+
+    ``render_model_card`` bakes the manifest's repo into those lines at PACKAGE time, before
+    any ``push --repo`` override is known, so a push to a different repo would otherwise
+    publish a card telling the reader to pull a repo that is not there (issue #109). This
+    realigns them with wherever the bytes are actually going.
+
+    It rewrites the generated command lines above; ``card.description`` and an author's
+    appended ``card.quickstart`` are prose that may also name a repo, and those are left
+    alone. A no-op (the lines already name ``new_repo``, or the card is absent) returns False.
+    """
+    if not readme.is_file():
+        return False
+    text = readme.read_text()
+    swapped = _QUICKSTART_CMD.sub(lambda mo: mo.group(1) + new_repo, text)
+    if swapped == text:
+        return False
+    readme.write_text(swapped)
+    return True
+
+
 def push_container(staged_dir: str, manifest: Manifest, repo_id: str) -> None:
     """Upload a staged container package directory to the Hub.
 
-    The caller owns repo creation and visibility (``_ensure_repo`` in the CLI), so this
-    only moves bytes. The model card is already written into the directory by ``package``
-    and carries its own tags, so nothing here rewrites it — ``tag_repo`` would clobber it.
+    The caller owns repo creation and visibility (``_ensure_repo`` in the CLI), so this only
+    moves bytes and does not touch the card's tags — ``tag_repo`` would clobber them. It does
+    repoint the card's Quickstart to ``repo_id`` when a ``push --repo`` sends the package to a
+    repo other than the one it was packaged for, so the published card names where it actually
+    lives rather than the authored source (issue #109).
     """
     out = Path(staged_dir)
     image_dir = out / "image"
     spec = manifest.container
     assert spec is not None
+
+    # Rendered at package time with the manifest's repo; realign it with the real target.
+    # Anchored on the command, not the old repo, so it is correct on every push — including a
+    # plain push after a redirected one, which must restore the canonical repo's own name.
+    if _repoint_card_quickstart(out / "README.md", repo_id):
+        console.note(f"repointed the card's quickstart to {repo_id}", marker="•")
 
     if spec.image.is_hub_hosted:
         if not (image_dir / "oci-layout").is_file():
@@ -226,6 +276,22 @@ def pull_dir(repo_id: str) -> Path:
     return compat.cache_dir() / "pulled" / repo_id.replace("/", "__")
 
 
+def _image_is_current(have: Optional[str], want: Optional[str], entry: Optional[dict]) -> bool:
+    """Is the image under the tag the one this package records?
+
+    docker's image id is the config digest on the classic store but the manifest digest on
+    the containerd store, so ``have == want`` fails on every containerd host for a package
+    built on a classic one (and vice versa). The id this daemon gave the image when pull
+    loaded it is recorded and accepted too, as long as the package digest is unchanged.
+    """
+    if have is None:
+        return False
+    if want is None or have == want:
+        return True
+    return bool(entry) and entry.get("image_digest") == want \
+        and entry.get("image_loaded_id") == have
+
+
 def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
                    no_weights: bool = False) -> None:
     """Snapshot the repo, load the image into docker, and put weights in the HOST cache."""
@@ -242,6 +308,7 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
     # the previous image while reporting success.
     want = spec.image.digest
     have = container.loaded_digest(ref)
+    prior = localdb.get(repo_id)
     if want is None:
         # Published before digest identity. Everything still works — the comparison below
         # degrades to the old tag-presence test — but the protection this exists to give is
@@ -252,12 +319,12 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
             "detection",
             marker="○",
         )
-    if have is not None and (want is None or have == want):
+    if _image_is_current(have, want, prior):
         console.note(f"image {ref} already loaded", marker="•")
     elif spec.image.is_hub_hosted:
-        if have is not None and want is not None and have != want:
+        if have is not None and want is not None:
             console.note(
-                f"{ref} is loaded but is a different image than this package records "
+                f"{ref} is loaded but is not known to be the image this package records "
                 f"({have[7:19]} vs {want[7:19]}) — reloading",
                 marker="○",
             )
@@ -281,6 +348,8 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
         # "arch=None install=None", which found it but described nothing.
         "arch": manifest.arch,
         "image_digest": spec.image.digest,
+        # what THIS daemon calls the image, for _image_is_current on the next pull/serve
+        "image_loaded_id": container.loaded_digest(ref),
         "profile": spec.resolved_default(),
         "profiles": spec.profile_names(),
     })
@@ -852,6 +921,9 @@ def load_pulled(repo_id: str) -> Optional[Manifest]:
     path = pull_dir(repo_id) / MANIFEST_NAME
     if not path.is_file():
         return None
+    entry = localdb.get(repo_id)
+    if entry is not None and not entry.get("container"):
+        return None  # a later v5/v6 pull re-recorded this repo; that install wins
     try:
         m = Manifest.from_json(path.read_text())
     except ValueError:
@@ -1068,7 +1140,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         ref = container.image_ref(manifest)
         want = spec.image.digest
         have = container.loaded_digest(ref)
-        if have is None or (want is not None and have != want):
+        entry = localdb.get(target) if target else None
+        if not _image_is_current(have, want, entry):
             layout = (Path(source) / "image") if source else None
             if layout and (layout / "oci-layout").is_file():
                 with console.step(f"docker load {ref} (image was not loaded)"):
@@ -1082,7 +1155,6 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                 # Re-fetch rather than dead-ending. This is NOT an update check -- those
                 # stay opt-in behind --refresh -- so it re-pulls the RECORDED revision,
                 # reproducing the image this manifest describes rather than the Hub tip.
-                entry = localdb.get(target) if target else None
                 repairable = (
                     bool(target) and not local_only and spec.image.is_hub_hosted
                     and bool(entry) and not Path(str(target)).exists()
@@ -1383,7 +1455,7 @@ def describe_pulled(entry: dict) -> dict:
     ref = entry.get("image") or "?"
     want = entry.get("image_digest")
     have = container.loaded_digest(ref) if ref != "?" else None
-    loaded = have is not None and (want is None or have == want)
+    loaded = _image_is_current(have, want, entry)
     size = ""
     if loaded:
         out = container.run_or_empty(

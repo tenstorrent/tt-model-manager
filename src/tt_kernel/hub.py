@@ -62,7 +62,29 @@ def set_visibility(repo_id: str, private: bool) -> None:
         api.update_repo_visibility(repo_id=repo_id, repo_type=_REPO_TYPE, private=private)
 
 
-def push_folder(repo_id: str, folder: Path, commit_message: str) -> None:
+class ForeignFilesError(Exception):
+    """A push would overwrite files in a repo that is not (yet) a tt-model bundle."""
+
+    def __init__(self, repo_id: str, paths: List[str]) -> None:
+        self.paths = paths
+        super().__init__(
+            f"{repo_id} already has files that are not part of a tt-model bundle, and this push "
+            f"would overwrite them: {', '.join(paths)}. Push to a new repo, rename the clashing "
+            "file(s) in the bundle, or remove them from the repo first."
+        )
+
+
+def _foreign_overwrites(api, repo_id: str, folder: Path) -> List[str]:
+    """Files ``folder`` would overwrite in a repo that has no tt-model manifest yet."""
+    remote = set(api.list_repo_files(repo_id=repo_id, repo_type=_REPO_TYPE))
+    if MANIFEST_NAME in remote:  # already a bundle: overwriting its files is the update
+        return []
+    local = {p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file()}
+    return sorted((local & remote) - {".gitattributes"})
+
+
+def push_folder(repo_id: str, folder: Path, commit_message: str, *,
+                refuse_foreign: bool = False) -> None:
     """Upload an entire staged bundle folder. Large binaries go to LFS automatically.
 
     ``upload_folder`` takes no ``tqdm_class``, so the bridge here silences HF's writers and
@@ -76,9 +98,17 @@ def push_folder(repo_id: str, folder: Path, commit_message: str) -> None:
     described neither. Image blobs are content-addressed, so stale ones accumulate the
     same way after any rebuild. Top-level files are rewritten on every push, and
     ``.gitattributes`` is HF's own LFS config, so neither is swept.
+
+    ``refuse_foreign`` raises :class:`ForeignFilesError` instead of overwriting files in a
+    repo that is not a tt-model bundle yet.
     """
+    api = _api()
+    if refuse_foreign:
+        clobbered = _foreign_overwrites(api, repo_id, folder)
+        if clobbered:
+            raise ForeignFilesError(repo_id, clobbered)
     with progress_bridge(f"Uploading to {repo_id}"):
-        _api().upload_folder(
+        api.upload_folder(
             repo_id=repo_id,
             repo_type=_REPO_TYPE,
             folder_path=str(folder),

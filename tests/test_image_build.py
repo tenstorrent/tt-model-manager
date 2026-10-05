@@ -536,3 +536,11 @@ def test_the_labels_carry_the_source_commits():
     assert 'org.opencontainers.image.revision="${MODEL_TT_METAL_SHA}"' in DOCKERFILE
     assert 'org.tenstorrent.tt-model.tt-metal="${MODEL_TT_METAL_DESCRIBE}"' in DOCKERFILE
     assert 'org.tenstorrent.tt-model.plugin="${MODEL_PLUGIN_SHA}"' in DOCKERFILE
+
+
+def test_entrypoint_and_verify_are_copied_with_explicit_modes():
+    # Context files inherit the author's umask (a 007 umask writes 660/770); a root-owned 660
+    # file is unreadable by `tt`, and the first boot died with "entrypoint.sh: Permission denied".
+    assert "--chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh" in DOCKERFILE
+    # 0755 because --chmod also applies to the /ctx directory the COPY creates; 0644 made it untraversable.
+    assert "--chmod=0755 verify.sh /ctx/verify.sh" in DOCKERFILE

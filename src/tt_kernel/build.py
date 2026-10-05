@@ -879,11 +879,13 @@ def run_build(staged: Staged, echo: Optional[Callable[[str], None]] = None) -> N
 
 
 def image_digest(image: str) -> str:
-    """The image's own config digest — what ``docker inspect`` reports as ``.Id``.
+    """The image's identity — what ``docker inspect`` reports as ``.Id``.
 
-    This is the image's identity: it changes if and only if the image changes. Everything
-    that made the old tag unreliable (the plugin pin, the code allowlist, serve settings,
-    the base image) is inside it.
+    It changes if and only if the image changes. Everything that made the old tag
+    unreliable (the plugin pin, the code allowlist, serve settings, the base image) is
+    inside it. Which digest it is depends on the builder's image store (config digest on
+    the classic store, manifest digest on containerd), so a consumer may report a different
+    id for the same image; ``container_cli._image_is_current`` allows for that.
     """
     r = subprocess.run(
         ["docker", "image", "inspect", image, "--format", "{{.Id}}"],

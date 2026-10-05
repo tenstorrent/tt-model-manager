@@ -563,11 +563,49 @@ def render_run_sh(manifest: Manifest) -> str:
     is_dit_kind = manifest.deps is not None and manifest.deps.kind != "vllm"
     weights = manifest.weights.repo_id if manifest.weights else ""
     mesh_device = (manifest.mesh.topology if manifest.mesh and manifest.mesh.topology else "") or ""
+    author_env = dict(manifest.env or {})
+    # Chips: the operator's TT_METAL_VISIBLE_DEVICES, else the first N of a TT_VISIBLE_DEVICES
+    # grant (from whatever scheduler launched us), else the author's --env value, else 0..N-1.
+    # The grant is narrowed to the chips used (the vLLM plugin sizes its mesh from what is
+    # visible). One visible chip of a multi-chip Blackhole board is a CUSTOM cluster that
+    # tt-metal refuses to open without a mesh graph descriptor, so a 1-chip Blackhole bundle
+    # under a grant gets ttnn's own P150 one unless something already set it.
+    nchips = max(int(manifest.device_count or 1), 1)
+    first_n = ",".join(str(i) for i in range(nchips))
+    default_chips = author_env.pop("TT_METAL_VISIBLE_DEVICES", None) or first_n
+    single_chip_desc = "" if nchips != 1 or manifest.arch != "blackhole" else """
+    _P150_MGD="$TTNN_DIR/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto"
+    if [ -z "${TT_MESH_GRAPH_DESC_PATH:-}" ] && [ -f "$_P150_MGD" ]; then
+      export TT_MESH_GRAPH_DESC_PATH="$_P150_MGD"
+    fi"""
+    chips_block = f"""NCHIPS={nchips}
+if [ -z "${{TT_METAL_VISIBLE_DEVICES:-}}" ]; then
+  if [ -n "${{TT_VISIBLE_DEVICES:-}}" ]; then
+    IFS=, read -ra _GRANT <<< "$TT_VISIBLE_DEVICES"
+    if [ "${{#_GRANT[@]}}" -lt "$NCHIPS" ]; then
+      echo "run.sh: this model needs $NCHIPS chip(s) but TT_VISIBLE_DEVICES grants ${{#_GRANT[@]}} ($TT_VISIBLE_DEVICES)" >&2
+      exit 1
+    fi
+    TT_VISIBLE_DEVICES="$(IFS=,; echo "${{_GRANT[*]:0:$NCHIPS}}")"
+    export TT_VISIBLE_DEVICES
+    TT_METAL_VISIBLE_DEVICES="{first_n}"{single_chip_desc}
+  else
+    TT_METAL_VISIBLE_DEVICES="{default_chips}"
+  fi
+fi
+export TT_METAL_VISIBLE_DEVICES
+"""
     extra_env = "".join(
-        f'export {k}="{v}"\n' for k, v in (manifest.env or {}).items()
+        f'export {k}="{v}"\n' for k, v in author_env.items()
     )
     # The tt_transformers adapter reads HF_MODEL from the env (not vLLM's --model), so export it.
     hf_export = f'export HF_MODEL="${{HF_MODEL:-{weights}}}"\n' if weights else ""
+    # The pinned weights revision: vLLM gets it as flags, any other server reads it from the env.
+    weights_rev = manifest.weights.revision if manifest.weights else None
+    if weights_rev:
+        hf_export += (
+            f'export TT_MODEL_WEIGHTS_REVISION="${{TT_MODEL_WEIGHTS_REVISION:-{weights_rev}}}"\n'
+        )
     # The TT vLLM backend REQUIRES a supported batch size and a concrete block_size (its default
     # of 256 / None both fail), so always emit them — from the manifest's resources, with the
     # known-good tt_transformers defaults when unset.
@@ -575,6 +613,9 @@ def render_run_sh(manifest: Manifest) -> str:
     max_num_seqs = (res.max_num_seqs if res and res.max_num_seqs else 32)
     block_size = (res.block_size if res and res.block_size else 64)
     serving = f"--max_num_seqs {max_num_seqs} --block_size {block_size}"
+    if weights_rev:
+        rev = shlex.quote(weights_rev)
+        serving += f" --revision {rev} --tokenizer-revision {rev}"
     if res and res.max_model_len:
         serving += f" --max_model_len {res.max_model_len}"
     # Tool/reasoning parsers, if the manifest declares them. Same vLLM flag spelling the
@@ -663,8 +704,7 @@ export TT_VLLM_BUILTIN_MODELS=0
 # + model registry load via entry points without it.
 export PYTHONPATH="{pythonpath_entry}:${{PYTHONPATH:-}}"   # resolves the adapter/model imports
 export MESH_DEVICE="${{MESH_DEVICE:-{mesh_device}}}"
-export TT_METAL_VISIBLE_DEVICES="${{TT_METAL_VISIBLE_DEVICES:-0}}"
-# HERMETIC RUNTIME: keep every cache/home INSIDE the folder wall, so serving writes and reads
+{chips_block}# HERMETIC RUNTIME: keep every cache/home INSIDE the folder wall, so serving writes and reads
 # nothing outside it (the ttnn tensor cache even DEFAULTS to a hard-coded /mnt/... path upstream —
 # a classic other-machine leak we must override). Each is overridable if the operator sets it.
 export HF_HOME="${{HF_HOME:-$HERE/.hf}}"                  # HF weights + hub cache
@@ -928,6 +968,24 @@ def _merge_default_packages(requirements_text: str, defaults: tuple) -> str:
     )
 
 
+# Top-level names a v6 thin bundle writes itself; the runner may not take one of them.
+THIN_RESERVED_NAMES = (REQUIREMENTS, INSTALL_SCRIPT, RUN_SCRIPT, VLLM_OVERRIDES,
+                       "tt_kernel_manifest.json", WHEELS_DIR, METADATA_DIR)
+
+
+_EXACT_PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*===?\s*([^\s;,#]+)")
+
+
+def pinned_ttnn_version(requirements_text: str) -> Optional[str]:
+    """The exact ttnn version a requirements file pins (``ttnn==X``, else ``tt-metal-models==X``)."""
+    pins: Dict[str, str] = {}
+    for line in requirements_text.splitlines():
+        m = _EXACT_PIN.match(line.split("#", 1)[0].strip())
+        if m:
+            pins[re.sub(r"[-_.]+", "-", m.group(1).lower())] = m.group(2)
+    return pins.get("ttnn") or pins.get("tt-metal-models")
+
+
 def stage_thin_package(
     staged: Path,
     *,
@@ -1006,10 +1064,14 @@ def stage_thin_package(
         if with_vllm:
             raise ValueError(f'kind={kind!r} serves no vLLM; pass with_vllm=False.')
 
-    staged.mkdir(parents=True, exist_ok=True)
-
     # The runner, copied to the bundle root under its own name so `--main-class <module>:<Class>`
-    # resolves it via PYTHONPATH=$HERE at serve time.
+    # resolves it via PYTHONPATH=$HERE at serve time. It must not shadow a file tt-model writes.
+    if Path(model_py).name in THIN_RESERVED_NAMES:
+        raise ValueError(
+            f"model_py {Path(model_py).name!r} has the same name as a file the bundle generates "
+            f"({', '.join(THIN_RESERVED_NAMES)}); rename the runner."
+        )
+    staged.mkdir(parents=True, exist_ok=True)
     model_dest = staged / Path(model_py).name
     shutil.copy2(model_py, model_dest)
 
@@ -1138,5 +1200,6 @@ __all__ = [
     "render_run_sh",
     "stage_package",
     "stage_thin_package",
+    "pinned_ttnn_version",
     "StagingError",
 ]

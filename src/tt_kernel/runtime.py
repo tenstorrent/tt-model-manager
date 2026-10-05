@@ -38,22 +38,32 @@ def resolve_models_dir(models_dir: Optional[str], repo_id: str) -> Path:
     return base.joinpath(*repo_id.split("/"))
 
 
-def download_weights(weights: WeightsRef, dest: Path) -> Path:
-    """Download a model's weights from the Hub into ``dest`` (resumable).
+def serve_hub_cache(install_dir: Path) -> Path:
+    """The HF hub cache a bundle's ``run.sh`` loads weights from, given this process's env.
 
-    Thin wrapper over ``huggingface_hub.snapshot_download`` — content-addressed and
-    resumable, so a half-finished download just continues on a re-pull.
+    Mirrors ``render_run_sh``: ``HF_HOME`` defaults to ``<install>/.hf``, and huggingface_hub
+    reads ``$HF_HUB_CACHE``, else ``$HF_HOME/hub``.
+    """
+    if os.environ.get("HF_HUB_CACHE"):
+        return Path(os.environ["HF_HUB_CACHE"])
+    return Path(os.environ.get("HF_HOME") or install_dir / ".hf") / "hub"
+
+
+def download_weights(weights: WeightsRef, cache_dir: Path) -> Path:
+    """Download a model's weights into the HF hub cache ``cache_dir``; returns the snapshot dir.
+
+    A hub cache (not a flat ``local_dir``) so a server that loads by repo id finds them.
     """
     from huggingface_hub import snapshot_download
 
-    dest.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
     path = snapshot_download(
         repo_id=weights.repo_id,
         repo_type=weights.repo_type,
         revision=weights.revision,
         allow_patterns=weights.allow_patterns,
         ignore_patterns=weights.ignore_patterns,
-        local_dir=str(dest),
+        cache_dir=str(cache_dir),
     )
     return Path(path)
 
@@ -221,6 +231,7 @@ def render_curl(argv: List[str]) -> str:
 __all__ = [
     "ENV_MODELS_DIR",
     "resolve_models_dir",
+    "serve_hub_cache",
     "download_weights",
     "install_self_contained",
     "DEFAULT_BASE_URL",

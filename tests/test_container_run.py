@@ -985,3 +985,29 @@ def test_running_matches_the_container_name_exactly(monkeypatch):
         "tt-model-my-model-p300x2"
     ]
     assert [r["name"] for r in container.running()] == ["tt-model-my-model-p300x2"]
+
+
+def test_the_plugin_kind_hands_vllm_the_pinned_weights_revision():
+    """pull downloads the pinned sha, which leaves snapshots/<sha>/ and no refs/main in the
+    HF cache. The container is offline and names the weights by repo id, so vLLM 0.26's
+    argument-time snapshot_download looked for refs/main and died with
+    LocalEntryNotFoundError over a complete cache (changh95/qwen3.8-27b-p150x2, 2026 Sep 25).
+    The sha has to reach vLLM, not just the download."""
+    sha = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    m = _wire(weights={"repo": "org/Weights-7B", "revision": sha})
+    argv = launcher_for("vllm-plugin").serve_argv(m, m.container.resolve_profile())
+    assert argv[:5] == ["vllm", "serve", "org/Weights-7B", "--revision", sha]
+
+
+def test_the_fork_kind_forwards_the_pinned_weights_revision_to_the_server():
+    sha = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    m = _wire(**FORK, weights={"repo": "org/Weights-7B", "revision": sha})
+    argv = launcher_for("vllm-fork").serve_argv(m, m.container.resolve_profile())
+    extra = shlex.split(argv[argv.index("--additional-server-args") + 1])
+    assert extra[:2] == ["--revision", sha]
+
+
+def test_an_unpinned_weights_id_adds_no_revision_flag():
+    m = _wire()
+    assert "--revision" not in launcher_for("vllm-plugin").serve_argv(m, m.container.resolve_profile())
+    assert "--revision" not in " ".join(launcher_for("vllm-fork").serve_argv(_wire(**FORK), _wire(**FORK).container.resolve_profile()))
