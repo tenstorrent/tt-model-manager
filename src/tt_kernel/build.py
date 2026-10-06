@@ -1332,10 +1332,7 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     else:
         count_words = {2: "both", 3: "all three", 4: "all four"}
         count = count_words.get(len(weight_links), f"all {len(weight_links)}")
-        weight_description = (
-            f"automatically downloads {count} required checkpoints: "
-            + ", ".join(weight_links)
-        )
+        weight_description = f"{count} required checkpoints: " + ", ".join(weight_links)
 
     lines += [
         f"Packaged and published with [tt-model-manager]({TT_MODEL_MANAGER_URL}) "

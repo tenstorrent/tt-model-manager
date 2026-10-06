@@ -834,7 +834,7 @@ def test_the_card_names_every_auxiliary_weight_and_pin():
     )
     assert "[`org/drafter`](https://huggingface.co/org/drafter) at `deadbeef`" in card
     assert "[`org/adapter`](https://huggingface.co/org/adapter)" in card
-    assert "automatically downloads all three" in card
+    assert "downloads the Docker image and all three required checkpoints: " in card
 
 
 def test_the_card_includes_the_authors_quickstart():
