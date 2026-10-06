@@ -290,3 +290,24 @@ def test_publish_fails_closed_when_offline(monkeypatch):
     res = runner.invoke(cli.app, ["publish", "me/x"])
     assert res.exit_code != 0
     assert effects == []
+
+
+def test_search_asks_the_hub_for_newest_first(monkeypatch):
+    """`search` documents "newest first", so it has to say so in the request.
+
+    Without an explicit sort the Hub orders by trending, which puts a brand-new repo
+    below the default limit of 50: after publishing a model, `tt-model search --catalog`
+    did not list it at all while the Hub's own API, sorted, returned it first.
+    """
+    seen = {}
+
+    class _Api:
+        def list_models(self, **kw):
+            seen.update(kw)
+            return []
+
+    monkeypatch.setattr(hub, "_api", lambda: _Api())
+    hub.search("", catalog_only=True)
+
+    assert seen["sort"] == "lastModified"
+    assert seen["filter"] == TT_MODEL_CATALOG_TAG
