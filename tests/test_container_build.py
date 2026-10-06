@@ -639,7 +639,7 @@ def test_at_a_glance_omits_a_row_it_cannot_fill():
 
 
 def test_no_model_ci_row_until_that_gate_exists():
-    """DEVSTACK-430 is not built. A "not yet run" row would be a claim frozen at build
+    """The model CI gate is not built. A "not yet run" row would be a claim frozen at build
     time that no consumer could refresh."""
     assert "Model CI" not in _card(card=_FULL_CARD)
 
