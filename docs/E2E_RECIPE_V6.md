@@ -111,6 +111,7 @@ vllm_models/<name>/vllm_metadata.json     the EXTRA_MODELS_DIR contract
 install.sh  run.sh
 tt_kernel_manifest.json                   the v6 manifest
 # weights: NOT here. A pointer in the manifest.
+# manifest deps.custom_ops: the generic_op wheels model.py imports, auto-recorded (metadata only).
 ```
 
 For the full bundle layout, the remaining authoring flags, and the offline tests, see
