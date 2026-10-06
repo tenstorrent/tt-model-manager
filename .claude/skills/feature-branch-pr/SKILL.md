@@ -116,9 +116,10 @@ the PR body.
 
 **Serve/device-path changes** additionally need hardware validation —
 package → pull → serve → `curl`, per
-[docs/self_contained_packages.md](../../../docs/self_contained_packages.md)
-(Testing) and the checkpoints in AGENTS.md ("Application startup complete"
-before the curl, coherent text after). If hardware isn't available, say so
+[docs/thin_packages.md](../../../docs/thin_packages.md) (Testing) for a v6
+bundle, or the `tt-model-package-test` skill for a container package, and
+the checkpoints in AGENTS.md ("Application startup complete" before the
+curl, coherent text after). If hardware isn't available, say so
 explicitly in the PR rather than implying it was checked.
 
 **Docs-only changes**: pytest still must stay green; also validate the

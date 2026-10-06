@@ -625,9 +625,6 @@ class ContainerManifest(BaseModel):
             tt_metal_version=tt_metal_version,
             arch=self.arch,
             device_count=hardware_chip_count(default.hardware or "") or 1,
-            build_key=None,  # kernels JIT inside the container into a mounted cache dir
-            kernel_count=0,
-            fast_path_kernels=None,
             producer=Producer(
                 tt_kernel_version=tt_kernel_version,
                 created_at=created_at

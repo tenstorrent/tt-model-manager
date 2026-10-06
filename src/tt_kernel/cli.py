@@ -764,7 +764,7 @@ def package_thin(
 
     This command is beta and unsupported: the v6 thin format is still a draft, its flags and
     on-disk layout may change without notice, and bundles it produces are not guaranteed to
-    install or serve. Use ``tt-model package`` (v5 self-contained) for supported packaging.
+    install or serve. Use ``tt-model package --container`` (v5.1 container) for supported packaging.
 
     DRAFT (reflects the plan): fully installable once TTTv2 + the models wheel publish so the pins are
     real; until then the generated requirements.txt carries TODO pins for those two (ttnn already
@@ -775,7 +775,7 @@ def package_thin(
         ["[muted]The v6 thin format is a draft: flags and layout may change without notice,[/muted]",
          "[muted]and the bundles it produces are not guaranteed to install or serve.[/muted]",
          "",
-         "[muted]supported path:  tt-model package  (v5 self-contained)[/muted]"],
+         "[muted]supported path:  tt-model package --container tt-model.yaml  (v5.1)[/muted]"],
     ))
     if publish and private is True:  # explicit --private contradicts --publish
         raise _err("--publish and --private conflict: a catalog listing is public by definition. "
