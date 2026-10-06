@@ -708,6 +708,55 @@ def test_ready_card_suggests_a_curl_that_actually_parses(capsys):
     assert "tt-model stop org/x" in out  # the target still belongs on stop/logs
 
 
+def _dit_wire(tmp_path: Path) -> Path:
+    """A `kind: tt-dit-server` wire manifest — a model served by its own ASGI app."""
+    from test_tt_dit_server_kind import DIT_BASE
+
+    m = ContainerManifest.model_validate(json.loads(json.dumps(DIT_BASE)))
+    m.validate_semantics()
+    wire = m.to_wire(image_tag="tt-model/my-diffusion-model:abc123",
+                     tt_metal_version="0.72.1", tt_kernel_version="0.1.0")
+    path = tmp_path / "tt_kernel_manifest.json"
+    path.write_text(wire.to_json())
+    return path
+
+
+def test_a_non_chat_package_is_not_told_to_run_tt_model_curl(tmp_path, monkeypatch, capsys):
+    """A tt-dit-server has no /v1/chat/completions, and `tt-model curl` only posts one.
+
+    The card used to print `tt-model curl "hello"` for every kind, so the last line of a
+    successful diffusion boot was a command that cannot talk to the server that just came
+    up. Point at the package's own routes instead.
+    """
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "port_is_free", lambda p: True)
+    container_cli.serve_container(
+        Manifest.from_json(_dit_wire(tmp_path).read_text()), target="you/my-diffusion-model"
+    )
+    out = capsys.readouterr().out
+    assert "you/my-diffusion-model ready" in out
+    assert "tt-model curl" not in out
+    assert "https://huggingface.co/you/my-diffusion-model" in out
+    # The rows that are true for every kind stay.
+    assert "/v1/models" in out and "/v1/health" in out
+
+
+def test_a_chat_package_still_gets_the_curl_row(tmp_path, monkeypatch, capsys):
+    """The guard for the test above: the vLLM kinds are unchanged."""
+    monkeypatch.setattr(container, "running", lambda name=None: [])
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: None)
+    monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
+    monkeypatch.setattr(container, "port_is_free", lambda p: True)
+    container_cli.serve_container(_manifest(tmp_path), target="org/x")
+    out = capsys.readouterr().out
+    assert 'tt-model curl "hello"' in out
+    # No routes row: a chat server's routes are the OpenAI ones, not a card to go read.
+    # Scoped to this package -- an unrelated Hub URL (the weights warning) is not the card.
+    assert "huggingface.co/org/x" not in out
+
+
 # ------------------------------------------------------------------ stop
 
 
