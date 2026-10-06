@@ -10,6 +10,9 @@ wheel are published so requirements can pin real versions.
 """
 
 import json
+import shlex
+import subprocess
+import sys
 
 from typer.testing import CliRunner
 
@@ -20,7 +23,8 @@ _runner = CliRunner()
 
 
 def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=None,
-                models_wheels=None, vllm_wheel=None, with_vllm=True):
+                models_wheels=None, vllm_wheel=None, with_vllm=True, constraints=None,
+                vllm_common_requirements=None):
     model_py = tmp_path / "model.py"
     model_py.write_text("class QwenForCausalLM:  # the runner\n    pass\n")
     staged = tmp_path / "thin"
@@ -28,9 +32,11 @@ def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=Non
         staged, name="qwen-thin", arch="blackhole", model_py=model_py,
         vllm_metadata={"arch": "QwenForCausalLM", "main_class": "model:QwenForCausalLM"},
         tt_kernel_version="0.0.0", requirements=requirements,
+        constraints=constraints,
         plugin_wheel=plugin_wheel, extra_wheels=extra_wheels,
         models_wheels=models_wheels,
-        vllm_wheel=vllm_wheel, with_vllm=with_vllm,
+        vllm_wheel=vllm_wheel, vllm_common_requirements=vllm_common_requirements,
+        with_vllm=with_vllm,
         weights=WeightsRef(repo="Qwen/Qwen3-4B"), mesh=Mesh(devices=1, topology="P150"),
         resources=Resources(max_num_seqs=32, block_size=64),
     )
@@ -103,6 +109,36 @@ def test_thin_prebuilt_vllm_wheel_installed_by_path_not_built(tmp_path):
     assert f'--no-deps "$HERE/wheels/{vw.name}"' in inst     # installed by path
 
 
+def test_thin_stages_resolved_constraints_and_pinned_vllm_common(tmp_path):
+    constraints = tmp_path / "qualification.lock"
+    constraints.write_text("numpy==1.26.4\nrequests==2.34.2\n")
+    common = tmp_path / "common.txt"
+    common.write_text("requests>=2.26.0\n")
+
+    staged, manifest = _stage_thin(
+        tmp_path,
+        constraints=constraints,
+        vllm_common_requirements=common,
+    )
+
+    assert (staged / "constraints.txt").read_bytes() == constraints.read_bytes()
+    assert (staged / "vllm-common.txt").read_bytes() == common.read_bytes()
+    assert manifest.deps.vllm.common_requirements == "vllm-common.txt"
+    install = (staged / "install.sh").read_text()
+    assert "raw.githubusercontent.com" not in install
+    assert install.count('"${TT_MODEL_CONSTRAINTS_ARGS[@]}"') == 3
+    assert '--constraint "$HERE/constraints.txt"' in install
+    assert '-r "$HERE/vllm-common.txt"' in install
+
+
+def test_thin_constraints_expansion_is_safe_when_empty_on_old_bash(tmp_path):
+    """bash < 4.4 treats "${arr[@]}" of an empty array as unbound under set -u."""
+    staged, _ = _stage_thin(tmp_path)
+    install = (staged / "install.sh").read_text()
+    safe = '${TT_MODEL_CONSTRAINTS_ARGS[@]+"${TT_MODEL_CONSTRAINTS_ARGS[@]}"}'
+    assert install.count(safe) == install.count('"${TT_MODEL_CONSTRAINTS_ARGS[@]}"') > 0
+
+
 def test_thin_no_vllm_skips_the_vllm_step(tmp_path):
     staged, m = _stage_thin(tmp_path, with_vllm=False)
     assert m.deps.vllm is None
@@ -115,9 +151,145 @@ def test_thin_install_sh_builds_venv_from_pins(tmp_path):
     staged, _ = _stage_thin(tmp_path)
     inst = (staged / "install.sh").read_text()
     assert "uv venv --relocatable" in inst and 'UV_PYTHON_INSTALL_DIR="$HERE/.python"' in inst
+    assert 'UV_PYTHON_BIN_DIR="$HERE/.python/bin"' in inst
+    assert 'UV_CACHE_DIR="$HERE/.uv-cache"' in inst
     assert "-r \"$HERE/requirements.txt\"" in inst   # installs from the pins
     assert "--no-index" not in inst                  # thin pulls ttnn/TTTv2 from the index
     assert "wheels/" not in inst                     # no embedded platform wheels
+
+
+def test_thin_installer_can_pin_uv_without_new_schema_field(tmp_path):
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    staged = tmp_path / "thin"
+    packaging.stage_thin_package(
+        staged,
+        name="uv-pinned",
+        arch="blackhole",
+        model_py=model_py,
+        vllm_metadata={"arch": "QwenForCausalLM", "main_class": "model:C"},
+        tt_kernel_version="0.0.0",
+        env={"TT_MODEL_UV_VERSION": "0.12.11"},
+    )
+    install = (staged / "install.sh").read_text()
+    assert 'UVVER="0.12.11"' in install
+    assert "https://astral.sh/uv/0.12.11/install.sh" in install
+    assert "awk '{print $2}'" in install
+
+
+def test_thin_validates_exact_external_sfpi_before_vllm(tmp_path):
+    staged, _ = _stage_thin(tmp_path)
+    inst = (staged / "install.sh").read_text()
+    assert inst.index('sfpi-version') > inst.index('-r "$HERE/requirements.txt"')
+    assert inst.index('sfpi-version') < inst.index("VLLM_TARGET_DEVICE=empty")
+    assert "SFPI mismatch" in inst and "sfpi_version" in inst and "sfpi_build" in inst
+    assert 'local_sfpi="$TTNN_DIR/runtime/sfpi"' in inst
+    assert "system_sfpi=/opt/tenstorrent/sfpi" in inst
+
+
+def test_thin_reconciles_vllm_override_metadata_then_checks_environment(tmp_path):
+    staged, _ = _stage_thin(tmp_path)
+    inst = (staged / "install.sh").read_text()
+    reconcile = inst.index("reconciled vLLM dependency metadata")
+    plugin_install = inst.index('"$HERE/wheels/vllm_tt_plugin') if "vllm_tt_plugin" in inst else -1
+    check = inst.index('uv pip check --python "$PYBIN"')
+    assert reconcile > plugin_install
+    assert check > reconcile
+    assert "opencv-python-headless==" in inst
+    assert 'distribution("vllm")._path' in inst
+    assert "urlsafe_b64encode" in inst and 'record_key = f"{metadata.parent.name}/METADATA"' in inst
+    assert 'lineterminator="\\n"' in inst
+
+
+def test_thin_run_pins_runtime_root_and_revalidates_sfpi(tmp_path):
+    staged, _ = _stage_thin(tmp_path)
+    run = (staged / "run.sh").read_text()
+    assert 'export TT_METAL_RUNTIME_ROOT="$TTNN_DIR"' in run
+    assert run.index('export TT_METAL_RUNTIME_ROOT="$TTNN_DIR"') < run.index("sfpi-version")
+    assert run.index("sfpi-version") < run.index("LD_PRELOAD=")
+    assert 'export TT_METAL_CACHE="${TT_METAL_CACHE:-$HERE/.cache}"' in run
+
+
+def _sfpi_gate(tmp_path, declared="7.78.0[935]", found="7.78.0[935]"):
+    """A runnable SFPI gate over a fake TTNN dir whose local compiler reports ``found``."""
+    from tt_kernel.packaging import _render_sfpi_validation
+
+    version, build = declared.rstrip("]").split("[")
+    ttnn_dir = tmp_path / "ttnn"
+    (ttnn_dir / "tt_metal").mkdir(parents=True)
+    (ttnn_dir / "tt_metal" / "sfpi-version").write_text(
+        f"sfpi_version='{version}'\nsfpi_build='{build}'\n"
+    )
+    compiler = ttnn_dir / "runtime" / "sfpi" / "compiler" / "bin" / "riscv-tt-elf-g++"
+    compiler.parent.mkdir(parents=True)
+    (ttnn_dir / "runtime" / "sfpi" / "include").mkdir(parents=True)
+    (ttnn_dir / "runtime" / "sfpi" / "include" / "sfpi_lib.h").write_text("// test\n")
+    compiler.write_text(f"#!/bin/sh\necho 'riscv-tt-elf-g++ (tenstorrent/sfpi:{found}) 15.1.0'\n")
+    compiler.chmod(0o700)
+    script = tmp_path / "gate.sh"
+    script.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        f"PYBIN={shlex.quote(sys.executable)}\nTTNN_DIR={shlex.quote(str(ttnn_dir))}\n"
+        + _render_sfpi_validation(discover_ttnn=False)
+        + "echo gate-passed\n"
+    )
+    return script, ttnn_dir
+
+
+def _run_gate(script, **env):
+    import os
+
+    return subprocess.run(["bash", str(script)], text=True, capture_output=True,
+                          env={**os.environ, **env})
+
+
+def test_sfpi_gate_prefers_local_and_validates_exact_match(tmp_path):
+    """The rendered gate checks the same local-first path that TT-Metal will select."""
+    script, ttnn_dir = _sfpi_gate(tmp_path)
+    ok = _run_gate(script)
+    assert ok.returncode == 0, ok.stderr
+    assert f"validated SFPI 7.78.0[935] at {ttnn_dir}/runtime/sfpi" in ok.stderr
+
+
+def test_sfpi_gate_warns_and_continues_on_newer_host_sfpi(tmp_path):
+    """ttnn 0.77.0 declares 7.69.0[822]; a host 7.83.0[989] still serves, so only warn."""
+    script, ttnn_dir = _sfpi_gate(tmp_path, declared="7.69.0[822]", found="7.83.0[989]")
+    r = _run_gate(script, TT_MODEL_STRICT_SFPI="0")
+    assert r.returncode == 0, r.stderr
+    assert "gate-passed" in r.stdout
+    assert "warning: SFPI" in r.stderr and "want 7.69.0[822]" in r.stderr
+    assert "7.83.0[989]" in r.stderr and "TT_MODEL_STRICT_SFPI=1" in r.stderr
+
+
+def test_sfpi_gate_refuses_an_older_host_sfpi(tmp_path):
+    """A 7.61.0 host lacks sfpi::clamp/min that ttnn 0.77.0's kernels use; JIT compile fails."""
+    script, ttnn_dir = _sfpi_gate(tmp_path, declared="7.69.0[822]", found="7.61.0[719]")
+    r = _run_gate(script, TT_MODEL_STRICT_SFPI="0")
+    assert r.returncode != 0
+    assert "gate-passed" not in r.stdout
+    assert "older than TTNN needs" in r.stderr and "7.61.0[719]" in r.stderr
+    # `serve --print` only echoes the command, so it is never blocked.
+    printed = _run_gate(script, TT_MODEL_PRINT="1")
+    assert printed.returncode == 0, printed.stderr
+
+
+def test_sfpi_gate_strict_opt_in_makes_mismatch_fatal(tmp_path):
+    script, ttnn_dir = _sfpi_gate(tmp_path, declared="7.69.0[822]", found="7.83.0[989]")
+    r = _run_gate(script, TT_MODEL_STRICT_SFPI="1")
+    assert r.returncode != 0
+    assert "gate-passed" not in r.stdout
+    assert "need 7.69.0[822]" in r.stderr and str(ttnn_dir / "runtime" / "sfpi") in r.stderr
+    # `serve --print` only echoes the command, so a strict mismatch does not block it.
+    printed = _run_gate(script, TT_MODEL_STRICT_SFPI="1", TT_MODEL_PRINT="1")
+    assert printed.returncode == 0, printed.stderr
+
+
+def test_thin_install_and_run_share_the_lenient_sfpi_gate(tmp_path):
+    staged, _ = _stage_thin(tmp_path)
+    for script in ("install.sh", "run.sh"):
+        text = (staged / script).read_text()
+        assert 'TT_MODEL_STRICT_SFPI:-0' in text, script
+        assert "warning: SFPI" in text, script
 
 
 def test_thin_ships_plugin_and_ops_as_wheels_by_path(tmp_path):
@@ -137,21 +309,19 @@ def test_thin_ships_plugin_and_ops_as_wheels_by_path(tmp_path):
     assert '-r "$HERE/requirements.txt"' in inst
 
 
-def test_thin_models_wheel_resolves_a_local_pin_via_find_links(tmp_path):
-    # A hand-built tt-metal-models wheel, staged ahead of tenstorrent/tt-metal#54478 publishing to
-    # an index: it must NOT be installed by path (it's not in deps.wheels) but must still make the
-    # requirements.txt pin resolvable via --find-links.
+def test_thin_models_wheel_is_installed_by_exact_path(tmp_path):
+    # The staged wheel must win even when an index carries the same package version.
     mw = tmp_path / "tt_metal_models-0.77.0-py3-none-any.whl"; mw.write_bytes(b"PK\x03\x04")
     staged, m = _stage_thin(tmp_path, models_wheels=[mw])
     assert m.deps.models_wheels == [f"wheels/{mw.name}"]
-    assert m.deps.wheels == []                    # not installed by explicit path
+    assert m.deps.wheels == []
     assert m.deps.wheels_dir == "wheels"
     assert (staged / "wheels" / mw.name).is_file()
     inst = (staged / "install.sh").read_text()
-    # find-links now precedes the requirements install, not just the by-path wheel step
     req_line = next(line for line in inst.splitlines() if '-r "$HERE/requirements.txt"' in line)
     assert '--find-links "$HERE/wheels"' in req_line
-    assert f'"$HERE/wheels/{mw.name}"' not in inst  # never named as an explicit install target
+    assert f'"$HERE/wheels/{mw.name}"' in req_line
+    assert inst.index(req_line) < inst.index("VLLM_TARGET_DEVICE=empty")
 
 
 def test_thin_scripts_are_owner_rw_only_not_executable(tmp_path):
