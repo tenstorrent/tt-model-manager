@@ -375,10 +375,22 @@ def test_http_server_reads_the_ready_line_from_the_manifest():
     assert launcher_for("http-server").ready_probe(m) == "listening on"
 
 
-def test_http_server_env_is_the_profile_env_verbatim():
+def test_http_server_env_is_the_profile_env_verbatim_when_nothing_is_pinned():
+    """This kind adds nothing of its own to the env except the weights pin, and BASE pins
+    no revision."""
     m = _wire(**{**HTTP, "serve": {"port": 8000, "env": {"QWEN38_LANES": "1"}}})
     env = launcher_for("http-server").serve_env(m, m.container.resolve_profile())
     assert env == {"QWEN38_LANES": "1"}
+
+
+def test_http_server_gets_the_pinned_weights_revision():
+    """Like tt-dit-server: this kind's server downloads its own weights, so the manifest's
+    pin has to arrive in the environment or it does not arrive at all."""
+    from tt_kernel.manifest import WEIGHTS_REVISION_ENV
+
+    m = _wire(**{**HTTP, "weights": {"repo": "org/Weights-7B", "revision": "c" * 40}})
+    env = launcher_for("http-server").serve_env(m, m.container.resolve_profile())
+    assert env[WEIGHTS_REVISION_ENV] == "c" * 40
 
 
 def test_http_server_does_not_need_engine_settings():

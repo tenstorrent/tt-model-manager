@@ -57,7 +57,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from .boot_progress import HTTP_SERVER_PHASES, TT_DIT_PHASES, VLLM_PHASES, Phase
-from .manifest import DEFAULT_PORT, Manifest, ServeProfile
+from .manifest import DEFAULT_PORT, WEIGHTS_REVISION_ENV, Manifest, ServeProfile
 
 if TYPE_CHECKING:
     from .container_manifest import ContainerManifest
@@ -98,6 +98,21 @@ def _revision_argv(m: Manifest) -> List[str]:
     """
     rev = m.weights.revision if m.weights is not None else None
     return ["--revision", rev] if rev else []
+
+
+def _revision_env(m: Manifest) -> Dict[str, str]:
+    """``{TT_MODEL_WEIGHTS_REVISION: <sha>}`` when the manifest pins one, else nothing.
+
+    The vLLM kinds get the pin as a flag; a kind that serves the model's own HTTP app does
+    its own ``snapshot_download`` and has nowhere to read the pin from but the environment.
+    Without this an author has to restate the same sha in ``serve.env`` under a name only
+    their server knows, and the two copies can then drift apart silently — a package that
+    says it is pinned while serving whatever the repo's tip is today. The v6 thin ``run.sh``
+    has exported this variable since the pin landed there; this is the container path
+    catching up, under the same name.
+    """
+    rev = m.weights.revision if m.weights is not None else None
+    return {WEIGHTS_REVISION_ENV: rev} if rev else {}
 
 
 class VllmPluginLauncher:
@@ -885,6 +900,8 @@ class TtDitServerLauncher:
             rows, cols = parse_mesh_device(profile.mesh_device)
             env["MESH_DEVICE"] = profile.mesh_device
             env[_mesh_shape_env(m)] = f"{rows}x{cols}"
+        env.update(_revision_env(m))
+        # Last, so an author who sets the variable themselves still wins.
         env.update(profile.env)
         return env
 
@@ -1079,7 +1096,10 @@ class HttpServerLauncher:
         return argv
 
     def serve_env(self, m: Manifest, profile: ServeProfile) -> Dict[str, str]:
-        return dict(profile.env)
+        env = _revision_env(m)
+        # Last, so an author who sets the variable themselves still wins.
+        env.update(profile.env)
+        return env
 
     def ready_probe(self, m: Manifest) -> str:
         container = getattr(m, "container", None)

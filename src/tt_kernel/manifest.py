@@ -294,6 +294,14 @@ class ImageRef(BaseModel):
 # container.pick_free_port.
 DEFAULT_PORT = 20000
 
+# Env var carrying the manifest's pinned weights revision to a server that is NOT vLLM.
+# vLLM takes the pin as `--revision`/`--tokenizer-revision`; every other serving front end
+# downloads its own weights and has nowhere to learn the pin from but the environment. One
+# name for every bundle shape, so a model's server reads the same variable whether it
+# arrives as a v6 thin bundle (packaging.render_run_sh) or a v5.1 container
+# (launchers, the non-vLLM kinds).
+WEIGHTS_REVISION_ENV = "TT_MODEL_WEIGHTS_REVISION"
+
 
 class ServeSettings(BaseModel):
     """Launch settings for a container package.

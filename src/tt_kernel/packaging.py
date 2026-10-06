@@ -40,6 +40,7 @@ from .manifest import (
     Resources,
     THIN_KINDS,
     Vllm,
+    WEIGHTS_REVISION_ENV,
     WeightsRef,
     WheelArtifact,
 )
@@ -604,7 +605,7 @@ export TT_METAL_VISIBLE_DEVICES
     weights_rev = manifest.weights.revision if manifest.weights else None
     if weights_rev:
         hf_export += (
-            f'export TT_MODEL_WEIGHTS_REVISION="${{TT_MODEL_WEIGHTS_REVISION:-{weights_rev}}}"\n'
+            f'export {WEIGHTS_REVISION_ENV}="${{{WEIGHTS_REVISION_ENV}:-{weights_rev}}}"\n'
         )
     # The TT vLLM backend REQUIRES a supported batch size and a concrete block_size (its default
     # of 256 / None both fail), so always emit them — from the manifest's resources, with the
