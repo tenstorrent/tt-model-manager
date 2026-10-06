@@ -541,7 +541,10 @@ def _render_lines(renderable, width):
                   force_terminal=True if console.is_terminal else None,
                   # Inherit no_color, don't infer it: NO_COLOR on a real tty leaves
                   # is_terminal True, so inferring would re-add the styling Rich stripped.
-                  no_color=console.no_color or not console.is_terminal)
+                  no_color=console.no_color or not console.is_terminal,
+                  # --no-color drops attributes too; NO_COLOR alone keeps them.
+                  color_system=None if console.no_color and console.color_system is None
+                  else "auto")
     tmp.print(renderable)
     return buf.getvalue().rstrip("\n").split("\n")
 
@@ -1029,8 +1032,11 @@ def set_no_color(value=True):
     global console, _real_console
     if not value:
         return
-    console = Console(theme=THEME, highlight=False, soft_wrap=False, no_color=True)
-    _real_console = Console(theme=THEME, file=sys.__stdout__, highlight=False, no_color=True)
+    # color_system=None, not just no_color: no_color keeps bold/dim attributes.
+    console = Console(theme=THEME, highlight=False, soft_wrap=False, no_color=True,
+                      color_system=None)
+    _real_console = Console(theme=THEME, file=sys.__stdout__, highlight=False, no_color=True,
+                            color_system=None)
 
 
 def check_table():
