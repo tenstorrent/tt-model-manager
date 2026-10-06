@@ -163,5 +163,14 @@ def test_push_uploads_an_existing_v6_directory_without_catalog_side_effects(monk
     assert seen["uploaded"] == before
 
 
+def test_push_names_an_unreadable_staged_manifest(monkeypatch, tmp_path):
+    """A broken manifest is its own error, not "not a staged container package"."""
+    (tmp_path / "tt_kernel_manifest.json").write_text("{not json")
+    monkeypatch.setattr(hub, "push_folder", lambda *a, **k: pytest_fail("must not upload"))
+    res = runner.invoke(cli.app, ["push", str(tmp_path), "--repo", "me/x"])
+    assert res.exit_code == 1
+    assert "Cannot read" in res.output and "container" not in res.output
+
+
 def pytest_fail(msg):  # tiny helper so the lambdas above read cleanly
     raise AssertionError(msg)

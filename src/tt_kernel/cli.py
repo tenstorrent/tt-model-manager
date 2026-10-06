@@ -2136,14 +2136,16 @@ def push(
     out = Path(staged_dir).expanduser()
     # v6 exact-directory push: validate the staged manifest, then upload this directory as-is.
     # Do not call tag_repo: it rewrites README frontmatter after upload, violating byte identity.
-    # A catalog mutation happens only for an explicit --publish request.
+    # A catalog mutation happens only for an explicit --publish request. v6 carries no card
+    # sections (only ContainerSpec.card does), so the card-gap gate has nothing to check here.
     wire_manifest: Optional[Manifest] = None
     manifest_path = out / MANIFEST_NAME
     if manifest_path.is_file():
         try:
             wire_manifest = Manifest.from_json(manifest_path.read_text())
-        except (OSError, UnicodeDecodeError, ValueError):
-            wire_manifest = None
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            raise _err(f"Cannot read {manifest_path}: {exc}\n"
+                       "  → re-stage it with a current tt-model, then push again.")
     if wire_manifest is not None and wire_manifest.is_thin:
         if not repo:
             raise _err("A staged v6 directory records no Hub target; pass --repo namespace/name.")
@@ -2167,7 +2169,7 @@ def push(
                 console.note(f"list it with: tt-model publish {repo}", marker="→")
             else:
                 console.milestone(f"listed {repo} in the community catalog")
-        typer.secho(f"✓ Pushed exact staged v6 thin bundle {repo}", fg=typer.colors.GREEN)
+        console.milestone(f"pushed exact staged v6 thin bundle {repo}")
         return
     cmani = container_cli.is_package_dir(out)
     if cmani is None:
