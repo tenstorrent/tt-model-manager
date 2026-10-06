@@ -168,8 +168,9 @@ publishing `device_count: 1` with nothing said. Box names (`QB2`, `T3K`, `TG`) b
   `serve` substitutes (`{port}` is required); every `.py`/`.sh` it runs must be covered by
   the allowlist. Optional: `ready_line` (the log substring that marks the boot done; default
   `"event": "ready"`), `packages` (what the server needs beyond tt-metal's editable
-  install — no engine and no default HTTP stack are installed), and `lock`. Like `tt-dit-server`, it needs only `hardware` and `mesh_device`; the
-  validated serving knobs go in `serve.args`, which merge per profile.
+  install — no engine and no default HTTP stack are installed), and `lock`. Like
+  `tt-dit-server`, it needs only `hardware` and `mesh_device`; the validated serving
+  knobs go in `serve.args`, which merge per profile.
 
 ### Example
 

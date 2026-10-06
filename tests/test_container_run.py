@@ -1150,11 +1150,16 @@ def test_an_unpinned_weights_id_adds_no_revision_flag():
 
 
 def test_every_kind_is_documented():
-    """A registered kind missing from the launcher docstring or the container doc is
-    invisible to authors choosing one."""
+    """A registered kind missing from the launcher docstring, the container doc, the
+    E2E recipe or the annotated example is invisible to authors choosing one."""
     import tt_kernel.launchers as launchers
 
-    doc = (Path(__file__).resolve().parents[1] / "docs" / "container_packages.md").read_text()
+    root = Path(__file__).resolve().parents[1]
+    doc = (root / "docs" / "container_packages.md").read_text()
+    recipe = (root / "docs" / "E2E_RECIPE_V5.1.md").read_text()
+    example = (root / "examples" / "container-example.yaml").read_text()
     for kind in launchers.KINDS:
         assert f"``{kind}``" in launchers.__doc__, kind
         assert f"**`{kind}`**" in doc, kind
+        assert f"`{kind}`" in recipe, kind
+        assert f"#   {kind} " in example, kind

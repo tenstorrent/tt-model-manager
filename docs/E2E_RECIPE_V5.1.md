@@ -128,7 +128,7 @@ What the fields mean:
 | `schema` | `"5.1"`, quoted so YAML does not turn it into a float |
 | `repo` / `name` | the HF repo `push` publishes to, and the model name (also the default image repository) |
 | `weights` | **pointer** to the weights. Never baked in. Pin a `revision` so consumers get what you validated |
-| `kind` | `vllm-plugin` (default, the only kind run on hardware for an LLM), `vllm-fork`, or `tt-dit-server` for diffusion models |
+| `kind` | `vllm-plugin` (default), `vllm-fork`, `tt-dit-server` for diffusion models, or `http-server` for a model that brings its own HTTP server. See [container_packages.md](container_packages.md#kind-the-serving-stack) |
 | `arch` | the card's instruction set architecture (ISA): `blackhole` or `wormhole_b0`. The one **fatal** compatibility gate |
 | `source.tt_metal` | your checkout (hermetic, uncommitted work ships) or `{repo, ref}` for CI |
 | `source.code` | the **allowlist** of paths that ship. Under-listing fails the image's own build-time import check, on your machine |
