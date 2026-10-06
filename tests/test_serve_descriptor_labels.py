@@ -12,10 +12,11 @@ chat.
 
 import json
 
-from tt_kernel import container
+from tt_kernel import container, launchers
 from tt_kernel.container_manifest import ContainerManifest
 
 from test_container_manifest import BASE, FORK
+from test_container_run import HTTP
 
 _NS = container.DESCRIPTOR_LABEL_NS  # "tt.model"
 
@@ -83,6 +84,18 @@ def test_a_dit_server_is_not_openai_compatible():
     assert labels[f"{_NS}.kind"] == "tt-dit-server"
     assert labels[f"{_NS}.openai_compatible"] == "false"
     assert labels[f"{_NS}.tool_calling"] == "false"
+
+
+def test_an_http_server_is_not_openai_compatible():
+    labels = _labels(_wire(**HTTP))
+    assert labels[f"{_NS}.kind"] == "http-server"
+    assert labels[f"{_NS}.openai_compatible"] == "false"
+
+
+def test_openai_compatible_is_read_from_the_launcher(monkeypatch):
+    """The label follows the kind's launcher, not a hardcoded list of kinds."""
+    monkeypatch.setattr(launchers.HttpServerLauncher, "OPENAI_COMPATIBLE", True)
+    assert _labels(_wire(**HTTP))[f"{_NS}.openai_compatible"] == "true"
 
 
 def test_port_label_follows_the_port_serve_uses():

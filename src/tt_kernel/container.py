@@ -69,18 +69,21 @@ def descriptor_labels(m: Manifest, profile: ServeProfile, port: int) -> Dict[str
     """The ``tt.model.*`` descriptor labels for a container serve, derived from the manifest.
 
     Answers a UI's "what is this package?" from what the manifest already encodes: the serving
-    stack (``kind``), whether it speaks the OpenAI API, whether tool calling / reasoning parsing
-    are on for this profile, the port, and the schema. It does not invent a ``task`` value — that
+    stack (``kind``), whether it speaks the OpenAI chat API (the kind's launcher's
+    ``OPENAI_COMPATIBLE``), whether tool calling / reasoning parsing are on for this profile, the
+    port, and the schema. It does not invent a ``task`` value — that
     would need a new authored field (#140 open question) — so an image-gen package is reported as
     ``kind=tt-dit-server`` / ``openai_compatible=false`` (enough to stop a consumer registering it
     as chat) rather than mislabelled.
     """
+    from .launchers import launcher_for  # deferred: launchers -> boot_progress -> container
+
     spec = m.container
     assert spec is not None
     caps = profile.capabilities
     return {
         f"{DESCRIPTOR_LABEL_NS}.kind": spec.kind,
-        f"{DESCRIPTOR_LABEL_NS}.openai_compatible": _b(spec.kind in ("vllm-plugin", "vllm-fork")),
+        f"{DESCRIPTOR_LABEL_NS}.openai_compatible": _b(launcher_for(spec.kind).OPENAI_COMPATIBLE),
         f"{DESCRIPTOR_LABEL_NS}.tool_calling": _b(bool(caps and caps.tool_parser)),
         f"{DESCRIPTOR_LABEL_NS}.reasoning": _b(bool(caps and caps.reasoning_parser)),
         f"{DESCRIPTOR_LABEL_NS}.port": str(port),
