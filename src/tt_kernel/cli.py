@@ -252,22 +252,23 @@ def _ensure_repo(repo_id: str, private: Optional[bool]) -> None:
     """
     private_on_create = True if private is None else private  # private by default
     if not hub.repo_exists(repo_id):
-        typer.echo(f"Creating repo {repo_id} ({'private' if private_on_create else 'public'})")
+        console.note(f"creating repo {repo_id} ({'private' if private_on_create else 'public'})",
+                     marker="•")
         hub.create_repo(repo_id, private=private_on_create)
         return
 
     # The repo already exists and belongs to whoever set its visibility.
     if private is None:
-        typer.echo(f"Repo {repo_id} exists; leaving its visibility unchanged")
+        console.note(f"repo {repo_id} exists; leaving its visibility unchanged", marker="•")
         return
 
     want = "private" if private else "public"
     if hub.is_private_safe(repo_id) is private:
-        typer.echo(f"Repo {repo_id} exists and is already {want}")
+        console.note(f"repo {repo_id} exists and is already {want}", marker="•")
         return
     hub.set_visibility(repo_id, private=private)
-    typer.secho(f"! Changed visibility of {repo_id} to {want} (as requested)",
-                fg=typer.colors.YELLOW)
+    console.note(f"Changed visibility of {repo_id} to {want} (as requested)",
+                 marker="!", style="warning")
 
 
 # -------------------------------------------------------------------------- start
@@ -288,11 +289,11 @@ def _ensure_portable_wheel(wheel: Path, *, repair: bool, plat: Optional[str] = N
     if "manylinux" in wheel.name:
         return wheel  # already repaired/portable
     if not repair:
-        typer.secho(
-            "  ! --no-repair: shipping the ttnn wheel as-is. Its .so RPATH likely points at your "
+        console.note(
+            "--no-repair: shipping the ttnn wheel as-is. Its .so RPATH likely points at your "
             "build tree and external libs aren't vendored, so it will probably fail on another "
             "machine. Only use this if you know the wheel is already portable.",
-            fg=typer.colors.YELLOW,
+            marker="!", style="warning",
         )
         return wheel
     if importlib.util.find_spec("auditwheel") is None:
@@ -301,7 +302,8 @@ def _ensure_portable_wheel(wheel: Path, *, repair: bool, plat: Optional[str] = N
                    "`pip install auditwheel patchelf`, or re-run with --no-repair to ship as-is.")
     outdir = Path(tempfile.mkdtemp(prefix="tt-model-repair-"))
     plat_note = f" targeting {plat}" if plat else ""
-    typer.echo(f"Repairing ttnn wheel for portability (auditwheel: vendor libs + $ORIGIN RPATH){plat_note} ...")
+    console.note(f"repairing the ttnn wheel for portability (auditwheel: vendor libs + "
+                 f"$ORIGIN RPATH){plat_note}", marker="•")
     cmd = [sys.executable, "-m", "auditwheel", "repair", str(wheel), "-w", str(outdir)]
     if plat:
         cmd += ["--plat", plat]
@@ -319,7 +321,7 @@ def _ensure_portable_wheel(wheel: Path, *, repair: bool, plat: Optional[str] = N
     repaired = sorted(outdir.glob("ttnn-*.whl"))
     if not repaired:
         raise _err("auditwheel produced no wheel; re-run with --no-repair or repair manually.")
-    typer.secho(f"  ✓ portable ttnn wheel: {repaired[0].name}", fg=typer.colors.GREEN)
+    console.milestone(f"portable ttnn wheel: {repaired[0].name}")
     return repaired[0]
 
 
@@ -330,9 +332,10 @@ def _vendor_dependencies(bundle_dir: Path, manifest: Manifest) -> None:
     req = bundle_dir / (manifest.bundled.requirements or "requirements.txt")
     wheels = bundle_dir / packaging.WHEELS_DIR
     if not req.is_file():
-        typer.secho("  (no requirements.txt to vendor)", fg=typer.colors.YELLOW)
+        console.note("no requirements.txt to vendor", marker="!", style="warning")
         return
-    typer.echo("Vendoring dependency wheels for offline install (torch/transformers/...) ...")
+    console.note("vendoring dependency wheels for offline install (torch/transformers/...)",
+                 marker="•")
     # uv has no `pip download` and uv-created venvs ship no pip, so use an ephemeral SEEDED venv
     # (uv venv --seed includes pip), pinned to the bundle's target Python so the downloaded wheels
     # match the consumer's interpreter/platform.
@@ -417,7 +420,7 @@ def _vendor_dependencies(bundle_dir: Path, manifest: Manifest) -> None:
             if whl.resolve() in skip:
                 continue
             if packaging.strip_wheel_test_dirs(whl):
-                typer.echo(f"  stripped test dir(s) from {whl.name}")
+                console.note(f"stripped test dir(s) from {whl.name}")
     except subprocess.CalledProcessError as exc:
         raise _err(f"dependency vendoring failed (exit {exc.returncode}). "
                    "Re-run with --no-vendor-deps to install deps from the index instead.")
@@ -653,11 +656,12 @@ def package(
         )
 
     def _report(m: Manifest, where: Path) -> None:
-        typer.secho(f"✓ Staged self-contained bundle {m.name} at {where}", fg=typer.colors.GREEN)
-        typer.echo(f"  wheels: {', '.join(Path(w.path).name for w in m.bundled.wheels)}")
-        typer.echo(f"  arch registration: {m.entrypoint.arch_name}  ->  {m.entrypoint.cls}")
+        console.milestone(f"staged self-contained bundle {m.name} at {where}", wrap=False)
+        console.note(f"wheels: {', '.join(Path(w.path).name for w in m.bundled.wheels)}", marker="•")
+        console.note(f"arch registration: {m.entrypoint.arch_name}  ->  {m.entrypoint.cls}",
+                     marker="•")
         if m.weights:
-            typer.echo(f"  weights (pointer): {m.weights.repo_id}")
+            console.note(f"weights (pointer): {m.weights.repo_id}", marker="•")
 
     if out:
         upload_from = Path(out).expanduser()
@@ -674,7 +678,7 @@ def package(
         _vendor_dependencies(upload_from, manifest)
     _report(manifest, upload_from)
     if repo_id is None:
-        typer.secho("  (no push target — staged only)", fg=typer.colors.CYAN)
+        console.note("no push target — staged only")
         return
 
     # Push (git-LFS handles the large wheels automatically).
@@ -685,14 +689,16 @@ def package(
         tags.append(TT_MODEL_CATALOG_TAG)
     _ensure_repo(repo_id, private)  # private by default; never flips an existing repo silently
     total_mb = sum(w.size for w in manifest.bundled.wheels) / 1e6
-    typer.echo(f"Uploading bundle (~{total_mb:.0f} MB of wheels via LFS) ...")
-    hub.push_folder(repo_id, upload_from, commit_message=f"tt-model package {manifest.name} (self-contained)")
+    with console.step(f"uploading to {repo_id} (~{total_mb:.0f} MB of wheels via LFS)"):
+        hub.push_folder(repo_id, upload_from,
+                        commit_message=f"tt-model package {manifest.name} (self-contained)")
     try:
         hub.tag_repo(repo_id, tags)
     except Exception as exc:  # tagging is best-effort
-        typer.secho(f"  (could not write tags: {exc})", fg=typer.colors.YELLOW)
-    typer.secho(f"✓ Pushed self-contained bundle {repo_id}", fg=typer.colors.GREEN)
-    typer.secho(f"  Anyone: tt-model pull {repo_id} && tt-model serve {repo_id}", fg=typer.colors.CYAN)
+        console.note(f"could not write tags: {exc}", marker="!", style="warning")
+    console.milestone(f"pushed self-contained bundle {repo_id}")
+    console.note(f"anyone:  tt-model pull {repo_id} && tt-model serve {repo_id}", marker="→",
+                 wrap=False)
 
 
 # ------------------------------------------------------------------- package-thin (v6)
@@ -859,34 +865,38 @@ def package_thin(
             or metal.resolve_version() or "unknown"
         ),
     )
-    typer.secho(f"✓ Staged v6 thin bundle {manifest.name} at {staged}", fg=typer.colors.GREEN)
-    typer.echo(f"  runner: {model_path.name}   deps: {manifest.deps.requirements}"
-               + (f" + {len(manifest.deps.wheels)} bundled wheel(s)" if manifest.deps.wheels else ""))
+    console.milestone(f"staged v6 thin bundle {manifest.name} at {staged}", wrap=False)
+    console.note(f"runner: {model_path.name}   deps: {manifest.deps.requirements}"
+                 + (f" + {len(manifest.deps.wheels)} bundled wheel(s)" if manifest.deps.wheels else ""),
+                 marker="•")
     if manifest.deps.models_wheels:
-        typer.echo(f"  local pins: {len(manifest.deps.models_wheels)} models wheel(s) "
-                   "resolved via --find-links (not on an index yet)")
+        console.note(f"local pins: {len(manifest.deps.models_wheels)} models wheel(s) "
+                     "resolved via --find-links (not on an index yet)", marker="•")
     if with_vllm:
         vspec = manifest.deps.vllm
         if vspec and vspec.wheel:
-            typer.echo(f"  vLLM: prebuilt empty-target wheel {Path(vspec.wheel).name} (installed by path)")
+            console.note(f"vLLM: prebuilt empty-target wheel {Path(vspec.wheel).name} "
+                         "(installed by path)", marker="•")
         else:
-            typer.echo(f"  vLLM: stock v{vspec.version if vspec else vllm_version} built empty-target at "
-                       "install (--vllm-wheel ships a prebuilt one for a hermetic install)")
+            console.note(f"vLLM: stock v{vspec.version if vspec else vllm_version} built "
+                         "empty-target at install (--vllm-wheel ships a prebuilt one for a "
+                         "hermetic install)", marker="•")
     if with_vllm and not plugin_wheel:
-        typer.secho("  ! no --plugin-wheel given: the vllm serve path needs vllm-tt-plugin in the "
-                    "bundle (the vLLM integration; we no longer ship a custom vLLM fork).",
-                    fg=typer.colors.YELLOW)
+        console.note("no --plugin-wheel given: the vllm serve path needs vllm-tt-plugin in the "
+                     "bundle (the vLLM integration; we no longer ship a custom vLLM fork).",
+                     marker="!", style="warning")
     if manifest.entrypoint is not None:
-        typer.echo(f"  arch registration: {manifest.entrypoint.arch_name}  ->  {manifest.entrypoint.cls}")
+        console.note(f"arch registration: {manifest.entrypoint.arch_name}  ->  "
+                     f"{manifest.entrypoint.cls}", marker="•")
     else:
         console.note(f"serves: {manifest.deps.app}  (uvicorn, kind={manifest.deps.kind})")
     if manifest.weights:
-        typer.echo(f"  weights (pointer): {manifest.weights.repo_id}")
+        console.note(f"weights (pointer): {manifest.weights.repo_id}", marker="•")
     if requirements is None:
-        typer.secho("  ! requirements.txt has TODO pins for TTTv2 + the models wheel (issue #29 M0) — "
-                    "edit them once those wheels publish.", fg=typer.colors.YELLOW)
+        console.note("requirements.txt has TODO pins for TTTv2 + the models wheel (issue #29 M0) — "
+                     "edit them once those wheels publish.", marker="!", style="warning")
     if repo_id is None:
-        typer.secho("  (no push target — staged only)", fg=typer.colors.CYAN)
+        console.note("no push target — staged only")
         return
 
     tags = [TT_MODEL_TAG, manifest.arch, manifest.deps.kind, "thin"]
@@ -896,16 +906,18 @@ def package_thin(
         tags.append(TT_MODEL_CATALOG_TAG)
     _ensure_repo(repo_id, private)  # private by default; never flips an existing repo silently
     try:
-        hub.push_folder(repo_id, staged, refuse_foreign=True,
-                        commit_message=f"tt-model package-thin {manifest.name} (v6 thin)")
+        with console.step(f"uploading to {repo_id}"):
+            hub.push_folder(repo_id, staged, refuse_foreign=True,
+                            commit_message=f"tt-model package-thin {manifest.name} (v6 thin)")
     except hub.ForeignFilesError as e:
         raise _err(str(e))
     try:
         hub.tag_repo(repo_id, tags)
     except Exception as exc:  # tagging is best-effort
-        typer.secho(f"  (could not write tags: {exc})", fg=typer.colors.YELLOW)
-    typer.secho(f"✓ Pushed v6 thin bundle {repo_id}", fg=typer.colors.GREEN)
-    typer.secho(f"  Anyone: tt-model pull {repo_id} && tt-model serve {repo_id}", fg=typer.colors.CYAN)
+        console.note(f"could not write tags: {exc}", marker="!", style="warning")
+    console.milestone(f"pushed v6 thin bundle {repo_id}")
+    console.note(f"anyone:  tt-model pull {repo_id} && tt-model serve {repo_id}", marker="→",
+                 wrap=False)
 
 
 # ---------------------------------------------------------------------------- pull
