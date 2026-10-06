@@ -399,6 +399,27 @@ def test_http_server_gets_the_pinned_weights_revision():
     assert env[WEIGHTS_REVISION_ENV] == "c" * 40
 
 
+AUX = {"auxiliary_weights": [{"repo": "org/drafter", "revision": "d" * 40}, "org/adapter"]}
+
+
+@pytest.mark.parametrize("kind", [{}, FORK, HTTP], ids=["vllm-plugin", "vllm-fork", "http-server"])
+def test_every_kind_gets_the_auxiliary_weight_pins(kind):
+    """Model code loads its own aux checkpoints, so the pins must reach it in the env."""
+    from tt_kernel.manifest import AUXILIARY_WEIGHTS_ENV
+
+    m = _wire(**{**kind, **AUX})
+    env = launcher_for(m.container.kind).serve_env(m, m.container.resolve_profile())
+    assert env[AUXILIARY_WEIGHTS_ENV] == f"org/drafter@{'d' * 40},org/adapter"
+
+
+def test_no_auxiliary_weights_means_no_auxiliary_variable():
+    from tt_kernel.manifest import AUXILIARY_WEIGHTS_ENV
+
+    m = _wire()
+    assert AUXILIARY_WEIGHTS_ENV not in launcher_for(m.container.kind).serve_env(
+        m, m.container.resolve_profile())
+
+
 def test_http_server_does_not_need_engine_settings():
     """No engine, no max_num_seqs/block_size requirement — hardware and mesh are the
     whole contract."""

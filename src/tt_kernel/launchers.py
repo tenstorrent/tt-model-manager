@@ -57,7 +57,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from .boot_progress import HTTP_SERVER_PHASES, TT_DIT_PHASES, VLLM_PHASES, Phase
-from .manifest import DEFAULT_PORT, WEIGHTS_REVISION_ENV, Manifest, ServeProfile
+from .manifest import (
+    AUXILIARY_WEIGHTS_ENV, DEFAULT_PORT, WEIGHTS_REVISION_ENV, Manifest, ServeProfile,
+)
 
 if TYPE_CHECKING:
     from .container_manifest import ContainerManifest
@@ -113,6 +115,13 @@ def _revision_env(m: Manifest) -> Dict[str, str]:
     """
     rev = m.weights.revision if m.weights is not None else None
     return {WEIGHTS_REVISION_ENV: rev} if rev else {}
+
+
+def _auxiliary_env(m: Manifest) -> Dict[str, str]:
+    """``{TT_AUXILIARY_WEIGHTS: "repo@rev,..."}`` when the manifest declares any, else nothing."""
+    refs = [f"{r.repo_id}@{r.revision}" if r.revision else r.repo_id
+            for r in m.auxiliary_weights]
+    return {AUXILIARY_WEIGHTS_ENV: ",".join(refs)} if refs else {}
 
 
 class VllmPluginLauncher:
@@ -387,6 +396,7 @@ class VllmPluginLauncher:
             # tt_transformers-style adapters read the model id from HF_MODEL, not from
             # vLLM's --model. Both are set; they must agree.
             "HF_MODEL": _weights_id(m),
+            **_auxiliary_env(m),
         }
         env.update(profile.env)
         return env
@@ -615,6 +625,7 @@ class VllmForkLauncher:
             # bare print. Block-buffered, that line sits in Python's buffer for as long
             # as the runner lives, and `serve --follow` times out on a server that is up.
             "PYTHONUNBUFFERED": "1",
+            **_auxiliary_env(m),
         }
         env.update(profile.env)
         return env
@@ -901,6 +912,7 @@ class TtDitServerLauncher:
             env["MESH_DEVICE"] = profile.mesh_device
             env[_mesh_shape_env(m)] = f"{rows}x{cols}"
         env.update(_revision_env(m))
+        env.update(_auxiliary_env(m))
         # Last, so an author who sets the variable themselves still wins.
         env.update(profile.env)
         return env
@@ -1096,7 +1108,7 @@ class HttpServerLauncher:
         return argv
 
     def serve_env(self, m: Manifest, profile: ServeProfile) -> Dict[str, str]:
-        env = _revision_env(m)
+        env = {**_revision_env(m), **_auxiliary_env(m)}
         # Last, so an author who sets the variable themselves still wins.
         env.update(profile.env)
         return env

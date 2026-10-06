@@ -301,6 +301,9 @@ DEFAULT_PORT = 20000
 # arrives as a v6 thin bundle (packaging.render_run_sh) or a v5.1 container
 # (launchers, the non-vLLM kinds).
 WEIGHTS_REVISION_ENV = "TT_MODEL_WEIGHTS_REVISION"
+# Env var carrying `auxiliary_weights` to every server kind: comma-separated `repo@rev`
+# (bare `repo` when unpinned), in declaration order. Same name the v6 run.sh reads.
+AUXILIARY_WEIGHTS_ENV = "TT_AUXILIARY_WEIGHTS"
 
 
 class ServeSettings(BaseModel):

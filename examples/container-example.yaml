@@ -15,7 +15,8 @@ name: my-model
 weights: org/Weights-7B
 # Optional additional checkpoints required by the runtime, such as a speculative-decoding
 # drafter or adapter. `pull --with-weights` and `serve` prefetch every entry into the same
-# host HF cache, and each may be pinned independently:
+# host HF cache, and each may be pinned independently. The container gets them as
+# TT_AUXILIARY_WEIGHTS=org/Drafter-Weights@<sha>,... (bare repo when unpinned):
 auxiliary_weights:
   - {repo: org/Drafter-Weights, revision: <sha>}
 # The serving stack inside the image:

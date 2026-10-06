@@ -287,6 +287,14 @@ def test_the_pinned_weights_revision_reaches_a_dit_server():
     assert env[WEIGHTS_REVISION_ENV] == "a" * 40
 
 
+def test_a_dit_server_gets_the_auxiliary_weight_pins():
+    from tt_kernel.manifest import AUXILIARY_WEIGHTS_ENV
+
+    wire = _wire(_manifest(auxiliary_weights=[{"repo": "org/vae", "revision": "e" * 40}]))
+    env = launcher_for("tt-dit-server").serve_env(wire, wire.container.resolve_profile(None))
+    assert env[AUXILIARY_WEIGHTS_ENV] == f"org/vae@{'e' * 40}"
+
+
 def test_an_unpinned_dit_server_gets_no_revision_variable():
     """An empty value would be worse than no value: a server that reads the variable would
     see "" and have to special-case it."""
