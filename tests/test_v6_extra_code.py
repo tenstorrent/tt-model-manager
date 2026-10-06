@@ -75,6 +75,46 @@ def test_no_extra_code_leaves_the_bundle_and_pythonpath_unchanged(tmp_path):
     assert '"$HERE:' in pp and "extra_code" not in pp
 
 
+@pytest.mark.parametrize("junk", ["venv", ".venv", ".pytest_cache", "myops.egg-info"])
+def test_extra_code_skips_dev_junk(tmp_path, junk):
+    ops = _ops_tree(tmp_path)
+    (ops / junk).mkdir()
+    (ops / junk / "f").write_text("x")
+    staged, _ = _stage(tmp_path, extra_code=ops)
+    assert not (staged / "extra_code" / junk).exists()
+    assert (staged / "extra_code" / "myops" / "__init__.py").is_file()
+
+
+def test_extra_code_symlink_outside_the_tree_is_materialized(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "shared.py").write_text("y = 2\n")
+    ops = _ops_tree(tmp_path)
+    (ops / "myops" / "shared.py").symlink_to(outside / "shared.py")
+    staged, _ = _stage(tmp_path, extra_code=ops)
+    dest = staged / "extra_code" / "myops" / "shared.py"
+    assert dest.is_file() and not dest.is_symlink()
+    assert dest.read_text() == "y = 2\n"
+
+
+def test_extra_code_symlink_into_outside_junk_is_not_shipped(tmp_path):
+    git = tmp_path / "outside" / ".git"
+    git.mkdir(parents=True)
+    (git / "config").write_text("[credential]\n")
+    ops = _ops_tree(tmp_path)
+    (ops / "hist").symlink_to(git)
+    staged, _ = _stage(tmp_path, extra_code=ops)
+    assert not (staged / "extra_code" / "hist").exists()
+
+
+def test_extra_code_dangling_symlink_is_dropped_not_fatal(tmp_path):
+    ops = _ops_tree(tmp_path)
+    (ops / "myops" / "gone.py").symlink_to(tmp_path / "nope.py")
+    staged, _ = _stage(tmp_path, extra_code=ops)
+    assert not (staged / "extra_code" / "myops" / "gone.py").is_symlink()
+    assert (staged / "extra_code" / "myops" / "__init__.py").is_file()
+
+
 def test_a_missing_extra_code_dir_is_an_error_not_a_silent_skip(tmp_path):
     with pytest.raises(ValueError, match="not a directory"):
         _stage(tmp_path, extra_code=tmp_path / "does-not-exist")

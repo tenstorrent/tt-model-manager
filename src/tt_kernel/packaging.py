@@ -102,6 +102,10 @@ _METAL_IGNORE_ROOT_ONLY = frozenset(
 # location-specific patterns above — used to judge a whole resolved path, not just one directory's
 # children.
 _JUNK_ANYWHERE_ON_PATH = shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "venv", ".venv")
+# A shipped extra_code/ tree: the junk above plus byte-code and packaging metadata.
+_EXTRA_CODE_IGNORE = shutil.ignore_patterns(
+    ".git", "__pycache__", ".pytest_cache", "venv", ".venv", "*.pyc", "*.egg-info",
+)
 
 
 def _metal_ignore(anchor: Path):
@@ -1102,8 +1106,9 @@ def stage_thin_package(
         src = Path(extra_code)
         if not src.is_dir():
             raise ValueError(f"extra_code {str(src)!r} is not a directory")
-        shutil.copytree(src, staged / EXTRA_CODE_DIR, dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
+        shutil.copytree(src, staged / EXTRA_CODE_DIR, dirs_exist_ok=True, symlinks=True,
+                        ignore=_EXTRA_CODE_IGNORE)
+        _normalize_staged_symlinks(staged / EXTRA_CODE_DIR)
         extra_code_rel = EXTRA_CODE_DIR
 
     # requirements.txt: the author's index pins, or a #29 template with TODO lines to fill —
