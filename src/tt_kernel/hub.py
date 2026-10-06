@@ -9,6 +9,7 @@ tagged ``tt-model-cache`` so ``search`` can filter for it.
 
 from __future__ import annotations
 
+import glob
 from pathlib import Path
 from typing import List, Optional
 
@@ -106,8 +107,9 @@ def push_folder(
     ``.gitattributes`` is HF's own LFS config, so neither is swept.
 
     ``refuse_foreign`` raises :class:`ForeignFilesError` instead of overwriting files in a
-    repo that is not a tt-model bundle yet. ``replace`` removes every remote file absent
-    from the staged directory except Hugging Face's own ``.gitattributes``.
+    repo that is not a tt-model bundle yet. ``replace`` also removes stale files under the
+    directories the stage ships, in a repo that is already a bundle; top-level files and
+    other directories (card, LICENSE, weights, images) are never swept.
     """
     api = _api()
     if refuse_foreign:
@@ -116,9 +118,11 @@ def push_folder(
             raise ForeignFilesError(repo_id, clobbered)
     delete_patterns = ["code/**", "image/**"]
     if replace:
-        local = {str(path.relative_to(folder)) for path in folder.rglob("*") if path.is_file()}
+        local = {p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file()}
+        shipped_dirs = {f.split("/", 1)[0] for f in local if "/" in f}
         remote = set(api.list_repo_files(repo_id=repo_id, repo_type=_REPO_TYPE))
-        delete_patterns = sorted(remote - local - {".gitattributes"})
+        stale = [f for f in remote - local if "/" in f and f.split("/", 1)[0] in shipped_dirs]
+        delete_patterns = sorted(glob.escape(f) for f in stale) if MANIFEST_NAME in remote else []
     with progress_bridge(f"Uploading to {repo_id}"):
         api.upload_folder(
             repo_id=repo_id,
