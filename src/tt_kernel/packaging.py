@@ -759,7 +759,8 @@ export TT_METAL_VISIBLE_DEVICES
     weight_prefetch = ""
     if weights and not is_dit_kind:
         weight_prefetch = r'''# Resolve pinned weights before vLLM opens the device.
-resolved_hf_model="$("$PYBIN" - "$HF_MODEL" __TT_WEIGHT_REVISION_ARG__ "${TT_AUXILIARY_WEIGHTS:-}" <<'PY'
+resolved_hf_model="$("$PYBIN" - "$HF_MODEL" __TT_WEIGHT_REVISION_ARG__ "${TT_AUXILIARY_WEIGHTS:-}" __TT_WEIGHT_PATTERNS_ARG__ <<'PY'
+import json
 import os
 import re
 import sys
@@ -768,7 +769,7 @@ from pathlib import Path
 from huggingface_hub import snapshot_download
 
 
-def resolve(spec, revision=""):
+def resolve(spec, revision="", patterns=None):
     local = Path(spec).expanduser()
     if local.is_dir():
         return str(local.resolve())
@@ -778,13 +779,14 @@ def resolve(spec, revision=""):
         spec,
         revision=revision or None,
         local_files_only=os.environ.get("HF_HUB_OFFLINE") == "1",
+        **(patterns or {}),
     )
     if revision and re.fullmatch(r"[0-9a-fA-F]{40}", revision) and Path(path).name != revision:
         raise SystemExit(f"resolved {spec} to {Path(path).name}, expected {revision}")
     return path
 
 
-target = resolve(sys.argv[1], sys.argv[2])
+target = resolve(sys.argv[1], sys.argv[2], json.loads(sys.argv[4]))
 for auxiliary in filter(None, (item.strip() for item in sys.argv[3].split(","))):
     resolve(auxiliary)
 print(target)
@@ -794,7 +796,14 @@ export HF_MODEL="$resolved_hf_model"
 export MODEL_WEIGHTS_DIR="$resolved_hf_model"
 '''
         revision_arg = '"${TT_MODEL_WEIGHTS_REVISION:-}"' if weights_rev else '""'
-        weight_prefetch = weight_prefetch.replace("__TT_WEIGHT_REVISION_ARG__", revision_arg)
+        # The same allow/ignore patterns `pull --with-weights` passes (runtime.download_weights).
+        patterns = {
+            "allow_patterns": manifest.weights.allow_patterns,
+            "ignore_patterns": manifest.weights.ignore_patterns,
+        }
+        weight_prefetch = weight_prefetch.replace(
+            "__TT_WEIGHT_REVISION_ARG__", revision_arg
+        ).replace("__TT_WEIGHT_PATTERNS_ARG__", shlex.quote(json.dumps(patterns)))
     # The TT vLLM backend REQUIRES a supported batch size and a concrete block_size (its default
     # of 256 / None both fail), so always emit them — from the manifest's resources, with the
     # known-good tt_transformers defaults when unset.

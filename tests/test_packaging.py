@@ -194,6 +194,42 @@ def test_render_run_sh_prefetches_pinned_target_and_auxiliary_weights():
     assert run.index("resolved_hf_model=") < run.index('exec "${CMD[@]}"')
 
 
+def test_render_run_sh_prefetch_honors_weight_patterns(tmp_path):
+    """The run.sh prefetch downloads the same file set as `pull --with-weights`."""
+    import re
+    import sys
+
+    run = packaging.render_run_sh(_run_sh_manifest(
+        weights=WeightsRef(repo="org/model", allow_patterns=["*.safetensors", "*.json"],
+                           ignore_patterns=["wheels/*"]),
+        env={"TT_AUXILIARY_WEIGHTS": "org/drafter"},
+    ))
+    prefetch = re.search(r'resolved_hf_model="\$\("\$PYBIN" - (.*?) <<\'PY\'\n(.*?)\nPY\n', run, re.S)
+    # A stand-in huggingface_hub records each snapshot_download call.
+    hub = tmp_path / "huggingface_hub"
+    hub.mkdir()
+    (hub / "__init__.py").write_text(
+        "import json, os\n"
+        "def snapshot_download(repo_id, **kw):\n"
+        "    with open(os.environ['CALLS'], 'a') as f:\n"
+        "        f.write(json.dumps([repo_id, kw.get('allow_patterns'), kw.get('ignore_patterns')]) + '\\n')\n"
+        "    return '/snap/' + repo_id\n"
+    )
+    script = tmp_path / "prefetch.sh"
+    script.write_text(
+        f'PYBIN={sys.executable}\nHF_MODEL=org/model\nTT_AUXILIARY_WEIGHTS=org/drafter\n'
+        f'"$PYBIN" - {prefetch.group(1)} <<\'PY\'\n{prefetch.group(2)}\nPY\n'
+    )
+    calls = tmp_path / "calls"
+    out = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                         env={**os.environ, "PYTHONPATH": str(tmp_path), "CALLS": str(calls)})
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "/snap/org/model"
+    got = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert got == [["org/model", ["*.safetensors", "*.json"], ["wheels/*"]],
+                   ["org/drafter", None, None]]
+
+
 def test_render_run_sh_no_tool_flags_without_capability():
     """No tool_parser declared => neither flag appears (bare --enable-auto-tool-choice is an error)."""
     run = packaging.render_run_sh(_run_sh_manifest())
