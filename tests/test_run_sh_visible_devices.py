@@ -150,3 +150,19 @@ def test_a_ttnn_without_sfpi_version_metadata_still_serves(tmp_path):
     code, out, err = _run(b)
     assert (code, out) == (0, "TVD= TMVD=0"), err
     assert "skipping the SFPI version check" in err
+
+
+def test_the_ttnn_cache_is_bundle_local(tmp_path):
+    """ttnn defaults its cache to $HOME/.cache/ttnn and reads only TTNN_CONFIG_OVERRIDES."""
+    import json
+
+    b = _bundle(tmp_path, devices=1)
+    py = b / "venv" / "bin" / "python"
+    py.chmod(0o700)
+    py.write_text(py.read_text() + 'echo "OVR=${TTNN_CONFIG_OVERRIDES:-}" >&2\n')
+    code, _, err = _run(b, TTNN_CONFIG_OVERRIDES="")
+    assert code == 0, err
+    ovr = json.loads(next(l for l in err.splitlines() if l.startswith("OVR=")).removeprefix("OVR="))
+    assert ovr == {"cache_path": f"{b}/.cache/ttnn", "model_cache_path": f"{b}/.cache/ttnn/models"}
+    _, _, err = _run(b, TTNN_CONFIG_OVERRIDES='{"enable_model_cache": true}')
+    assert 'OVR={"enable_model_cache": true}' in err  # the operator's own overrides win

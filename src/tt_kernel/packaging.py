@@ -926,6 +926,10 @@ export XDG_CACHE_HOME="${{XDG_CACHE_HOME:-$HERE/.cache}}"     # generic catch-al
 export TT_METAL_CACHE="${{TT_METAL_CACHE:-$HERE/.cache}}"     # compiled TT-Metal kernels
 export TRITON_CACHE_DIR="${{TRITON_CACHE_DIR:-$HERE/.cache/triton}}"
 export TORCHINDUCTOR_CACHE_DIR="${{TORCHINDUCTOR_CACHE_DIR:-$HERE/.cache/inductor}}"
+# ttnn.CONFIG defaults to $HOME/.cache/ttnn and reads only TTNN_CONFIG_OVERRIDES (not XDG).
+if [ -z "${{TTNN_CONFIG_OVERRIDES:-}}" ]; then
+  export TTNN_CONFIG_OVERRIDES="{{\\"cache_path\\": \\"$HERE/.cache/ttnn\\", \\"model_cache_path\\": \\"$HERE/.cache/ttnn/models\\"}}"
+fi
 {hf_export}{extra_env}{cmd_line}
 # TT_MODEL_PRINT=1 (set by `tt-model serve --print`) echoes the fully-resolved command+env
 if [ "${{TT_MODEL_PRINT:-0}}" = "1" ]; then
