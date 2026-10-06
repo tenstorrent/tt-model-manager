@@ -325,7 +325,7 @@ class ServeSettings(BaseModel):
     server_timeout: Optional[int] = None
 
     # Tool-calling / reasoning parsers. Same block, same field names, same rendering rules
-    # as the v4 path (see ``bundles._compose_launch_*``): ``tool_parser`` emits
+    # as the v5/v6 ``run.sh`` (see ``packaging.render_run_sh``): ``tool_parser`` emits
     # ``--enable-auto-tool-choice --tool-call-parser X`` because vLLM hard-errors on the
     # latter without the former, and ``reasoning_parser`` keeps its underscore on purpose.
     # Mergeable like everything else: declare it once under ``serve:``, override per profile.
