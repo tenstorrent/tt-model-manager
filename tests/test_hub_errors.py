@@ -362,6 +362,25 @@ def test_exact_push_removes_stale_files_only_under_shipped_dirs(monkeypatch, tmp
     assert patterns == ["vllm_models/old/vllm_metadata.json", "wheels/old.whl"]
 
 
+def test_exact_push_removes_old_wheels_when_the_stage_ships_none(monkeypatch, tmp_path):
+    """wheels/ and vllm_models/ are tt-model's own, even in a stage that no longer has them."""
+    from tt_kernel import hub
+
+    (tmp_path / MANIFEST_NAME).write_text("{}")
+    seen = {}
+
+    class _Api:
+        def list_repo_files(self, **kw):
+            return [MANIFEST_NAME, "README.md", "wheels/old.whl", "images/a.png"]
+
+        def upload_folder(self, **kw):
+            seen.update(kw)
+
+    monkeypatch.setattr(hub, "_api", lambda: _Api())
+    hub.push_folder("you/model", tmp_path, "msg", replace=True)
+    assert seen["delete_patterns"] == ["wheels/old.whl"]
+
+
 def test_exact_push_escapes_glob_characters(monkeypatch, tmp_path):
     """An unescaped ``[i]mages/x`` would also delete a foreign ``images/x``."""
     from fnmatch import fnmatchcase

@@ -17,6 +17,7 @@ from tqdm import tqdm as _tqdm
 
 from . import MANIFEST_NAME, TT_MODEL_CATALOG_TAG, TT_MODEL_TAG
 from .manifest import Manifest
+from .packaging import METADATA_DIR, WHEELS_DIR
 
 _REPO_TYPE = "model"
 
@@ -119,7 +120,9 @@ def push_folder(
     delete_patterns = ["code/**", "image/**"]
     if replace:
         local = {p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file()}
-        shipped_dirs = {f.split("/", 1)[0] for f in local if "/" in f}
+        # Dirs the stage ships, plus the ones tt-model always owns, so a bundle that stops
+        # shipping wheels still loses its old ones.
+        shipped_dirs = {f.split("/", 1)[0] for f in local if "/" in f} | {WHEELS_DIR, METADATA_DIR}
         remote = set(api.list_repo_files(repo_id=repo_id, repo_type=_REPO_TYPE))
         stale = [f for f in remote - local if "/" in f and f.split("/", 1)[0] in shipped_dirs]
         delete_patterns = sorted(glob.escape(f) for f in stale) if MANIFEST_NAME in remote else []
