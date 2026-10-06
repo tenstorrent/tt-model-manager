@@ -326,6 +326,10 @@ def search(
     results = api.list_models(
         filter=filter_tags if len(filter_tags) > 1 else base,
         search=query or None,
+        # Newest first, explicitly: the Hub's default order is by trending, so a repo
+        # pushed a minute ago lands below `limit` and the person who pushed it cannot
+        # find it.
+        sort="lastModified",
         limit=limit,
     )
     out: List[dict] = []
