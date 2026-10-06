@@ -187,7 +187,8 @@ def _fail_card(name: str, diagnosis: dict, *, consequence: Optional[str] = None)
     return typer.Exit(code=1)
 
 
-def _hub(op, repo_id: str, *, what: str, consequence: Optional[str] = None):
+def _hub(op, repo_id: str, *, what: str, consequence: Optional[str] = None,
+         classify=None):
     """Run a Hub call, turning any failure into a diagnosis card instead of a traceback.
 
     Every Hub entry point used to be unguarded, so a 404 escaped as a Rich stack — from
@@ -202,7 +203,8 @@ def _hub(op, repo_id: str, *, what: str, consequence: Optional[str] = None):
     except BaseException as exc:  # noqa: BLE001 — classified and re-raised as an Exit
         if console.is_verbose():
             raise
-        raise _fail_card(what, hub.classify_hub_error(exc, repo_id), consequence=consequence)
+        diagnosis = (classify or hub.classify_hub_error)(exc, repo_id)
+        raise _fail_card(what, diagnosis, consequence=consequence)
 
 
 def _require_repo_id(repo_id: str, *, what: str, consequence: Optional[str] = None) -> None:
@@ -1998,7 +2000,19 @@ def verify(
     if _hub(lambda: hub.repo_exists(target), target, what="Verify"):
         review = _hub(lambda: hub.read_review(target), target, what="Verify") or {}
         recorded = review.get(hub.VERIFIED_SOURCE_KEY)
+        recorded_rev = review.get(hub.VERIFIED_REVISION_KEY)
         if recorded and str(recorded).lower() == source.lower():
+            if recorded_rev != state.sha:
+                # Re-recording would claim a revision the copy's files are not.
+                held = (f"at {str(recorded_rev)[:9]}" if recorded_rev
+                        else "with no recorded revision")
+                now = f"now at {state.sha[:9]}" if state.sha else "now at an unknown revision"
+                raise _err(
+                    f"{target} holds {source} {held}, but {source} is {now}.\n"
+                    f"  The copy cannot be re-recorded as a revision it does not contain, so it\n"
+                    f"  stays verified as it is. To verify the newer revision, delete it on the\n"
+                    f"  Hub (https://huggingface.co/{target}/settings) and re-run."
+                )
             resumed = "re-recorded"
             console.note(
                 f"{target} already records {source} — re-recording the review rather than "
@@ -2033,7 +2047,9 @@ def verify(
 
     if resumed is None:
         _hub(lambda: hub.duplicate_into_org(repo_id, target), repo_id, what="Verify",
-             consequence=f"nothing was copied into {TT_ORG}")
+             consequence=(f"nothing was made public; if {target} was created, it is "
+                          "private and unfinished — re-run to finish it"),
+             classify=lambda exc, _: hub.classify_copy_error(exc, repo_id, target))
     reviewed_at = (
         _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     )

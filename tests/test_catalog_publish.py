@@ -335,7 +335,7 @@ def _manifest(weights="Qwen/Qwen3-32B"):
 def _stub_verify(monkeypatch, *, tags=(TT_MODEL_CATALOG_TAG,), private=False,
                     sha="c" * 40, who={"name": "reviewer"}, repo_id=None,
                     target_exists=False, target_review=None, weights="Qwen/Qwen3-32B",
-                    copy_of=False, annotate_error=None):
+                    copy_of=False, annotate_error=None, copy_error=None):
     """Stub every Hub call `verify` makes; returns the ordered list of effects.
 
     Order matters and is asserted: a half-finished run (copied but not annotated) is a
@@ -348,8 +348,13 @@ def _stub_verify(monkeypatch, *, tags=(TT_MODEL_CATALOG_TAG,), private=False,
     monkeypatch.setattr(hub, "repo_exists", lambda rid: target_exists)
     monkeypatch.setattr(hub, "read_review", lambda rid: target_review)
     monkeypatch.setattr(auth, "whoami", lambda: who)
-    monkeypatch.setattr(hub, "duplicate_into_org",
-                        lambda src, dst: effects.append(("copy", src, dst)))
+    def copy(src, dst):
+        if copy_error:
+            raise copy_error
+        effects.append(("copy", src, dst))
+
+    monkeypatch.setattr(hub, "duplicate_into_org", copy)
+
     def annotate(rid, **kw):
         if annotate_error:
             raise annotate_error
@@ -469,7 +474,8 @@ def test_verify_resumes_a_half_finished_run_without_copying_again(monkeypatch):
     than be permanently blocked by its own half-written state."""
     effects = _stub_verify(
         monkeypatch, target_exists=True,
-        target_review={hub.VERIFIED_SOURCE_KEY: "me/listed"})
+        target_review={hub.VERIFIED_SOURCE_KEY: "me/listed",
+                       hub.VERIFIED_REVISION_KEY: "c" * 40})
     res = runner.invoke(cli.app, ["verify", "me/listed"])
     assert res.exit_code == 0, res.output
     assert _kinds(effects) == ["annotate", "list", "publish"]   # no second copy
@@ -479,7 +485,8 @@ def test_verify_resumes_a_half_finished_run_without_copying_again(monkeypatch):
 def test_verify_matches_an_existing_copys_source_case_insensitively(monkeypatch):
     effects = _stub_verify(
         monkeypatch, target_exists=True,
-        target_review={hub.VERIFIED_SOURCE_KEY: "Me/Listed"})
+        target_review={hub.VERIFIED_SOURCE_KEY: "Me/Listed",
+                       hub.VERIFIED_REVISION_KEY: "c" * 40})
     res = runner.invoke(cli.app, ["verify", "me/listed"])
     assert res.exit_code == 0, res.output
     assert _kinds(effects) == ["annotate", "list", "publish"]
@@ -554,6 +561,66 @@ def test_verify_says_so_when_it_cannot_record_a_source_revision(monkeypatch):
     assert res.exit_code == 0, res.output
     assert effects[1][3] is None            # revision recorded as null
     assert "no source revision" in res.output
+
+
+def test_verify_refuses_to_re_record_a_copy_of_an_older_revision(monkeypatch):
+    """The source moved on after the copy was made: recording the new sha would claim a
+    revision the copy's files are not."""
+    effects = _stub_verify(
+        monkeypatch, sha="c" * 40, target_exists=True,
+        target_review={hub.VERIFIED_SOURCE_KEY: "me/listed",
+                       hub.VERIFIED_REVISION_KEY: "a" * 40})
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
+    assert res.exit_code != 0
+    assert effects == []
+    out = " ".join(res.output.split())
+    assert "a" * 9 in out and "c" * 9 in out
+    assert "delete it on the Hub" in out
+    assert "unverify" not in out
+
+
+def test_verify_refuses_to_re_record_a_copy_with_no_recorded_revision(monkeypatch):
+    effects = _stub_verify(
+        monkeypatch, target_exists=True,
+        target_review={hub.VERIFIED_SOURCE_KEY: "me/listed",
+                       hub.VERIFIED_REVISION_KEY: None})
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
+    assert res.exit_code != 0
+    assert effects == []
+    assert "no recorded revision" in " ".join(res.output.split())
+
+
+def _status_error(code):
+    exc = Exception(f"{code} Client Error")
+    exc.response = type("R", (), {"status_code": code})()
+    return exc
+
+
+def test_verify_blames_org_write_access_for_a_403_on_the_copy(monkeypatch):
+    """The source was just confirmed public, so a 403 on the copy is the org refusing the
+    token, not the source."""
+    _stub_verify(monkeypatch, copy_error=_status_error(403))
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
+    assert res.exit_code != 0
+    out = " ".join(res.output.replace("│", " ").split())
+    assert f"cannot write to {TT_ORG}" in out
+    assert "read scope" not in out
+
+
+def test_verify_does_not_claim_nothing_was_copied_when_the_copy_fails(monkeypatch):
+    """A timeout can land after the Hub created the repo, so a private copy may exist."""
+    _stub_verify(monkeypatch, copy_error=TimeoutError("read timed out"))
+    res = runner.invoke(cli.app, ["verify", "me/listed"])
+    assert res.exit_code != 0
+    out = " ".join(res.output.replace("│", " ").split())
+    assert "nothing was copied" not in out
+    assert "re-run to finish" in out
+
+
+def test_classify_copy_error_defers_to_the_general_classifier_for_other_failures():
+    exc = _status_error(404)
+    assert (hub.classify_copy_error(exc, "me/listed", f"{TT_ORG}/x")
+            == hub.classify_hub_error(exc, "me/listed"))
 
 
 def test_unverify_delists_the_copy_and_keeps_it(monkeypatch):

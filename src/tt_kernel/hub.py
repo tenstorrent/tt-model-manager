@@ -742,6 +742,25 @@ def classify_hub_error(exc: BaseException, repo_id: str, *, weights: bool = Fals
     }
 
 
+def classify_copy_error(exc: BaseException, source: str, target: str) -> dict:
+    """``classify_hub_error`` for ``duplicate_into_org``: a 403 is the target org refusing.
+
+    ``verify`` has already read the source as public, so a 403 cannot be about reading it.
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 403:
+        org = target.split("/", 1)[0]
+        return {
+            "cause": f"cannot write to {org}",
+            "detail": f"This token cannot create repos in the {org} org. Verifying needs a "
+                      f"write token from a member of {org} with write access.",
+            "evidence": _evidence(str(exc)),
+            "actions": ["hf auth whoami   # the token's orgs and role",
+                        f"tt-model login   # with a write token for {org}"],
+        }
+    return classify_hub_error(exc, source)
+
+
 # ----------------------------------------------------------------- progress bridge
 # huggingface_hub writes its own tqdm bars, and hf_xet writes more ("Download complete",
 # "Reconstruction complete"). With our spinner or a `secho` also writing, two processes

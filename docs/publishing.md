@@ -154,10 +154,11 @@ What the commands guarantee:
   (it only delists). If the other copy is abandoned, delete it on the Hub and re-run.
 - **A half-finished run resumes.** Re-running `verify` finishes a run that stopped part way
   instead of copying again. The existing copy counts as this run's when its card records this
-  source, or, before the review is recorded, when its files are exactly the source's at the
+  source at the revision being verified, or, before the review is recorded, when its files are exactly the source's at the
   revision being verified. (A server-side copy does not keep the source's commit history, but
   it keeps every file byte for byte.) A copy of an older revision of the source does not count,
-  so it is never finished with a revision it does not contain.
+  so it is never finished or re-recorded with a revision it does not contain. To verify a
+  newer revision, delete the copy on the Hub and re-run.
 - **Withdrawing keeps the artifact.** `unverify` delists the copy and leaves the repo, so
   anyone who pinned it can still reach it, and the original is unaffected. Delete the
   repo by hand on the Hub if it should be gone entirely. It takes the **copy's** id — passing the
