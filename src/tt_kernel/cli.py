@@ -29,6 +29,7 @@ from . import (
 from .manifest import (
     DEFAULT_PORT,
     THIN_KINDS,
+    Capabilities,
     CardSpec,
     CompatibilityReport,
     Manifest,
@@ -739,6 +740,7 @@ def package_thin(
     weights: Optional[str] = typer.Option(None, "--weights", help="HF weights repo id (pointer, never embedded)."),
     weights_revision: Optional[str] = typer.Option(None, "--weights-revision"),
     mesh_topology: Optional[str] = typer.Option(None, "--mesh", help='Device topology, e.g. "P150" / "1x4".'),
+    mesh_fabric: Optional[str] = typer.Option(None, "--mesh-fabric", help="TT fabric configuration, e.g. FABRIC_1D."),
     device_count: int = typer.Option(1, "--device-count"),
     python_version: str = typer.Option("3.12", "--python", help="Pinned interpreter (uv provisions)."),
     tt_metal_version: Optional[str] = typer.Option(
@@ -747,7 +749,17 @@ def package_thin(
     max_num_seqs: Optional[int] = typer.Option(None, "--max-num-seqs"),
     block_size: Optional[int] = typer.Option(None, "--block-size"),
     max_model_len: Optional[int] = typer.Option(None, "--max-model-len"),
+    trace_region_bytes: Optional[int] = typer.Option(None, "--trace-region-bytes"),
+    tool_parser: Optional[str] = typer.Option(None, "--tool-parser"),
+    reasoning_parser: Optional[str] = typer.Option(None, "--reasoning-parser"),
+    extra_arg: Optional[List[str]] = typer.Option(
+        None, "--extra-arg", help="One additional vLLM argv token (repeat once per token)."),
+    tt_config_json: Optional[str] = typer.Option(
+        None, "--tt-config-json", help='JSON object merged into --additional-config {"tt": ...}.'),
     env: Optional[List[str]] = typer.Option(None, "--env", help="KEY=VALUE serving env (repeatable)."),
+    readme: Optional[str] = typer.Option(None, "--readme", help="Authored model card staged verbatim as README.md."),
+    provenance: Optional[str] = typer.Option(
+        None, "--provenance", help="JSON object staged verbatim as PROVENANCE.json."),
     name: Optional[str] = typer.Option(None, "--name"),
     out: Optional[str] = typer.Option(None, "--out", help="Stage the bundle here (kept even without a push target)."),
     private: Optional[bool] = typer.Option(
@@ -823,16 +835,40 @@ def package_thin(
     if not resolved_arch:
         raise _err("Could not detect arch. Pass --arch (blackhole | wormhole_b0 | ...).")
     weights_block = WeightsRef(repo_id=weights, revision=weights_revision) if weights else None
+    tt_config: dict = {}
+    if tt_config_json:
+        try:
+            parsed_tt_config = json.loads(tt_config_json)
+        except json.JSONDecodeError as exc:
+            raise _err(f"--tt-config-json must be valid JSON: {exc}")
+        if not isinstance(parsed_tt_config, dict):
+            raise _err("--tt-config-json must contain a JSON object.")
+        reserved = {"fabric_config", "trace_region_size"}.intersection(parsed_tt_config)
+        if reserved:
+            flags = ", ".join(sorted(reserved))
+            raise _err(f"--tt-config-json cannot set reserved field(s) {flags}; use the dedicated flags.")
+        tt_config = parsed_tt_config
     env_map: dict = {}
     for kv in env or []:
         if "=" not in kv:
             raise _err(f"--env expects KEY=VALUE, got {kv!r}.")
         k, v = kv.split("=", 1)
         env_map[k] = v
-    mesh = Mesh(devices=device_count, topology=mesh_topology) if mesh_topology else None
+    mesh = Mesh(devices=device_count, topology=mesh_topology, fabric=mesh_fabric) \
+        if (mesh_topology or mesh_fabric) else None
     resources = Resources(
-        max_num_seqs=max_num_seqs, block_size=block_size, max_model_len=max_model_len
-    ) if (max_num_seqs or block_size or max_model_len) else None
+        max_num_seqs=max_num_seqs, block_size=block_size, max_model_len=max_model_len,
+        trace_region_bytes=trace_region_bytes, tt_additional_config=tt_config,
+        extra_args=list(extra_arg or []),
+    ) if (max_num_seqs or block_size or max_model_len or trace_region_bytes
+          or tt_config or extra_arg) else None
+    capabilities = Capabilities(tool_parser=tool_parser, reasoning_parser=reasoning_parser) \
+        if (tool_parser or reasoning_parser) else None
+    readme_path = Path(readme).expanduser() if readme else None
+    provenance_path = Path(provenance).expanduser() if provenance else None
+    for label, path in (("--readme", readme_path), ("--provenance", provenance_path)):
+        if path is not None and not path.is_file():
+            raise _err(f"{label} {str(path)!r} is not a file.")
     bundle_name = name or (repo_id.split("/")[-1] if repo_id else model_path.stem)
 
     if out:
@@ -851,7 +887,8 @@ def package_thin(
         vllm_wheel=Path(vllm_wheel).expanduser() if vllm_wheel else None,
         vllm_version=vllm_version, with_vllm=with_vllm,
         weights=weights_block, device_count=device_count, mesh=mesh, env=env_map,
-        resources=resources, python_version=python_version,
+        resources=resources, capabilities=capabilities, readme=readme_path,
+        provenance=provenance_path, python_version=python_version,
         tt_metal_version=(
             tt_metal_version
             or packaging.pinned_ttnn_version(Path(requirements).expanduser().read_text()
