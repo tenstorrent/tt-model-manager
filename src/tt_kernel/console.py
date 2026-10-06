@@ -530,7 +530,7 @@ def skip_phase(title, why=""):
         pinned.repaint()
 
 
-def _render_lines(renderable, width):
+def _render_lines(renderable, width, soft_wrap=False):
     """Render to ANSI text at a fixed width, matching the live console's colour support.
 
     A private Console with a StringIO file, so this works inside step()'s capture without
@@ -545,11 +545,11 @@ def _render_lines(renderable, width):
                   # --no-color drops attributes too; NO_COLOR alone keeps them.
                   color_system=None if console.no_color and console.color_system is None
                   else "auto")
-    tmp.print(renderable)
+    tmp.print(renderable, soft_wrap=soft_wrap)
     return buf.getvalue().rstrip("\n").split("\n")
 
 
-def _body_print(renderable):
+def _body_print(renderable, soft_wrap=False):
     """Print into the phase body without landing on the live activity row, and without
     trailing whitespace.
 
@@ -563,7 +563,7 @@ def _body_print(renderable):
        columns that is ~80 trailing spaces per line in the user's copy buffer. So render at
        a fixed width, then rstrip each line: the indent survives, the padding does not.
     """
-    lines = _render_lines(renderable, rule_width())
+    lines = _render_lines(renderable, rule_width(), soft_wrap)
     with _lock:
         if (activity.running() or checklist_active()) and _isatty():
             _real_console.file.write("\r\033[2K")
@@ -577,17 +577,25 @@ def _body_print(renderable):
             _checklist._rows_written += len(lines)
 
 
-def note(text, marker="○", style="muted"):
+def note(text, marker="○", style="muted", wrap=True):
     """A short note in the phase body's gutter — why something was skipped, what
     happens instead. Padded (not string-indented) so a wrapped line keeps the
-    indent, and rendered as Text so tool-derived content can't trip markup."""
+    indent, and rendered as Text so tool-derived content can't trip markup.
+    ``wrap=False`` keeps a path or pasteable command on one line."""
     prefix = f"{marker} " if marker else "  "
-    _body_print(Padding(Text(f"{prefix}{text}", style=style), (0, 0, 0, 2)))
+    _gutter(f"{prefix}{text}", style, wrap)
 
 
-def milestone(text, style="success", marker="✓"):
+def milestone(text, style="success", marker="✓", wrap=True):
     """One real milestone inside a phase body (`  ✓ chroma pulled`)."""
-    _body_print(Padding(Text(f"{marker} {text}", style=style), (0, 0, 0, 2)))
+    _gutter(f"{marker} {text}", style, wrap)
+
+
+def _gutter(text, style, wrap):
+    if wrap:
+        _body_print(Padding(Text(text, style=style), (0, 0, 0, 2)))
+    else:
+        _body_print(Text(f"  {text}", style=style), soft_wrap=True)
 
 
 # ── the pinned activity row ──────────────────────────────────────────────────

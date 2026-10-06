@@ -422,3 +422,14 @@ def test_no_color_drops_attributes_too(tmp_path):
                       "--out", str(tmp_path / "b")])
     assert "staged v6 thin bundle" in raw
     assert not re.search(r"\x1b\[[0-9;]*m", raw), "--no-color still emitted SGR styling"
+
+
+def test_staged_path_is_never_wrapped(tmp_path):
+    """The staged path is copied out of logs; a wrap at COLUMNS splits it mid-word."""
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    out = tmp_path / ("a-long-directory-name-so-the-path-cannot-fit-in-forty-columns" * 2) / "b"
+    res = run(["package-thin", "--model-py", str(model_py), "--arch", "blackhole",
+               "--arch-name", "X", "--main-class", "model:C", "--out", str(out)], columns=40)
+    assert res.returncode == 0, res.stderr
+    assert f"✓ staged v6 thin bundle model at {out}\n" in plain(res.stdout + res.stderr)

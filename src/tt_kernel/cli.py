@@ -656,7 +656,7 @@ def package(
         )
 
     def _report(m: Manifest, where: Path) -> None:
-        console.milestone(f"staged self-contained bundle {m.name} at {where}")
+        console.milestone(f"staged self-contained bundle {m.name} at {where}", wrap=False)
         console.note(f"wheels: {', '.join(Path(w.path).name for w in m.bundled.wheels)}", marker="•")
         console.note(f"arch registration: {m.entrypoint.arch_name}  ->  {m.entrypoint.cls}",
                      marker="•")
@@ -697,7 +697,8 @@ def package(
     except Exception as exc:  # tagging is best-effort
         console.note(f"could not write tags: {exc}", marker="!", style="warning")
     console.milestone(f"pushed self-contained bundle {repo_id}")
-    console.note(f"anyone:  tt-model pull {repo_id} && tt-model serve {repo_id}", marker="→")
+    console.note(f"anyone:  tt-model pull {repo_id} && tt-model serve {repo_id}", marker="→",
+                 wrap=False)
 
 
 # ------------------------------------------------------------------- package-thin (v6)
@@ -864,7 +865,7 @@ def package_thin(
             or metal.resolve_version() or "unknown"
         ),
     )
-    console.milestone(f"staged v6 thin bundle {manifest.name} at {staged}")
+    console.milestone(f"staged v6 thin bundle {manifest.name} at {staged}", wrap=False)
     console.note(f"runner: {model_path.name}   deps: {manifest.deps.requirements}"
                  + (f" + {len(manifest.deps.wheels)} bundled wheel(s)" if manifest.deps.wheels else ""),
                  marker="•")
@@ -915,7 +916,8 @@ def package_thin(
     except Exception as exc:  # tagging is best-effort
         console.note(f"could not write tags: {exc}", marker="!", style="warning")
     console.milestone(f"pushed v6 thin bundle {repo_id}")
-    console.note(f"anyone:  tt-model pull {repo_id} && tt-model serve {repo_id}", marker="→")
+    console.note(f"anyone:  tt-model pull {repo_id} && tt-model serve {repo_id}", marker="→",
+                 wrap=False)
 
 
 # ---------------------------------------------------------------------------- pull
