@@ -99,7 +99,7 @@ def test_cli_warns_when_a_shipped_ops_wheel_is_not_imported(tmp_path, monkeypatc
         "--arch-name", "M", "--main-class", "model:M", "--weights", "org/w",
         "--ops-wheel", str(ow), "--no-vllm", "--out", str(out)])
     assert res.exit_code == 0, res.output
-    assert "not imported" in res.output and ow.name in res.output
+    assert "not recorded as a custom op" in res.output and ow.name in res.output
 
 
 # -- the pure helpers -----------------------------------------------------------------
@@ -135,3 +135,33 @@ def test_imported_top_level_collects_absolute_imports_only(tmp_path):
 def test_imported_top_level_on_a_syntax_error_is_empty(tmp_path):
     p = tmp_path / "m.py"; p.write_text("def (:\n")
     assert packaging.imported_top_level(p) == set()
+
+
+def test_models_wheel_passed_as_ops_wheel_is_not_recorded(tmp_path):
+    """A tt-metal models wheel (top-level `models`) must not match `from models...` as a custom op."""
+    ow = _wheel(tmp_path / "tt_metal_models-0.1-py3-none-any.whl", top_level=["models"])
+    _staged, m = _stage(tmp_path, model_src="from models.tt_transformers import x\nclass M: pass\n",
+                        extra_wheels=[ow])
+    assert m.deps.custom_ops == []
+    assert m.deps.wheels == [f"wheels/{ow.name}"]
+
+
+def test_empty_custom_ops_is_omitted_from_the_manifest_json(tmp_path):
+    import json
+
+    from tt_kernel.manifest import Manifest
+
+    ow = _wheel(tmp_path / "my_ops-0.1-py3-none-any.whl", top_level=["myops"])
+    staged, _m = _stage(tmp_path, model_src="class M: pass\n", extra_wheels=[ow])
+    text = (staged / "tt_kernel_manifest.json").read_text()
+    assert "custom_ops" not in json.loads(text)["deps"]
+    assert Manifest.from_json(text).deps.custom_ops == []      # reads back as the default
+
+
+def test_populated_custom_ops_round_trips(tmp_path):
+    from tt_kernel.manifest import Manifest
+
+    ow = _wheel(tmp_path / "my_ops-0.1-py3-none-any.whl", top_level=["myops"])
+    staged, _m = _stage(tmp_path, model_src="import myops\nclass M: pass\n", extra_wheels=[ow])
+    m = Manifest.from_json((staged / "tt_kernel_manifest.json").read_text())
+    assert m.deps.custom_ops == [f"wheels/{ow.name}"]

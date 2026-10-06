@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 # Current authored schema. ``stage_package`` writes "5" and ``stage_thin_package`` writes "6";
 # this is only the default for a bare ``Manifest(...)``.
@@ -200,6 +200,14 @@ class Deps(BaseModel):
     # The ASGI entrypoint ("module:attribute") a "tt-dit-server" kind serves with uvicorn — the v6
     # analog of ContainerSpec.runtime["app"]. Unused (must be None) for kind="vllm".
     app: Optional[str] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_custom_ops(self, handler):
+        """Leave ``custom_ops`` out when empty so a bundle with no ops carries no stray field."""
+        data = handler(self)
+        if not self.custom_ops:
+            data.pop("custom_ops", None)
+        return data
 
 
 class Mesh(BaseModel):

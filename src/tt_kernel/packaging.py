@@ -385,6 +385,10 @@ def make_wheel_artifact(src: Path, rel_path: str) -> WheelArtifact:
     )
 
 
+# Top-level packages of the tt-metal platform/models tree: importing one never signals a custom op.
+_PLATFORM_TOP_LEVEL = frozenset({"models", "ttnn", "tt_lib", "tt_metal", "tracy"})
+
+
 def wheel_top_level_packages(wheel_path: Path) -> set:
     """The top-level import names a wheel provides (e.g. {"myops"}), read from the ``.whl`` zip.
 
@@ -1162,7 +1166,7 @@ def stage_thin_package(
     custom_ops: List[str] = [
         f"{WHEELS_DIR}/{Path(w).name}"
         for w in (extra_wheels or [])
-        if wheel_top_level_packages(w) & imported
+        if (wheel_top_level_packages(w) - _PLATFORM_TOP_LEVEL) & imported
     ]
 
     # Wheels that only need to satisfy a requirements.txt pin locally (not installed by path) — a

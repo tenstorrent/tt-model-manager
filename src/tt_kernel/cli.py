@@ -716,7 +716,8 @@ def package_thin(
         None, "--plugin-wheel", help="The vllm-tt-plugin wheel — the vLLM integration (we no longer "
         "ship a custom vLLM fork); shipped in wheels/ and installed by path."),
     ops_wheel: Optional[List[str]] = typer.Option(
-        None, "--ops-wheel", help="A generic_op custom-op wheel to ship in wheels/ (repeatable)."),
+        None, "--ops-wheel", help="A generic_op custom-op wheel to ship in wheels/ (repeatable). Only these wheels "
+             "are scanned for deps.custom_ops; --models-wheel is not."),
     models_wheel: Optional[List[str]] = typer.Option(
         None, "--models-wheel", help="A locally-built wheel that satisfies a requirements.txt pin "
         "not yet on an index (e.g. a hand-built tt-metal-models wheel from tenstorrent/tt-metal#54478, "
@@ -863,14 +864,14 @@ def package_thin(
     typer.echo(f"  runner: {model_path.name}   deps: {manifest.deps.requirements}"
                + (f" + {len(manifest.deps.wheels)} bundled wheel(s)" if manifest.deps.wheels else ""))
     if manifest.deps.custom_ops:
-        typer.echo(f"  custom ops: {len(manifest.deps.custom_ops)} generic_op wheel(s), "
-                   "auto-recorded from model.py imports")
-    unimported_ops = [Path(w).name for w in (ops_wheel or [])
+        console.note(f"custom ops: {len(manifest.deps.custom_ops)} generic_op wheel(s), "
+                     "auto-recorded from model.py imports", marker="", style="")
+    unrecorded_ops = [Path(w).name for w in (ops_wheel or [])
                       if f"{packaging.WHEELS_DIR}/{Path(w).name}" not in manifest.deps.custom_ops]
-    if unimported_ops:
-        typer.secho(f"  ! --ops-wheel not imported by {model_path.name}, so not recorded as a "
-                    f"custom op (shipped and installed regardless): {', '.join(unimported_ops)}",
-                    fg=typer.colors.YELLOW)
+    if unrecorded_ops:
+        console.note(f"--ops-wheel not recorded as a custom op ({model_path.name} imports none of "
+                     f"its op packages; shipped and installed regardless): "
+                     f"{', '.join(unrecorded_ops)}", marker="!", style="warning")
     if manifest.deps.models_wheels:
         typer.echo(f"  local pins: {len(manifest.deps.models_wheels)} models wheel(s) "
                    "resolved via --find-links (not on an index yet)")
