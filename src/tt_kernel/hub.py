@@ -120,29 +120,42 @@ def push_folder(repo_id: str, folder: Path, commit_message: str, *,
 def push_large_folder(repo_id: str, folder: Path, *, num_workers: int = 4) -> None:
     """Upload a container package directory, whose ``image/`` is multi-GB.
 
-    ``upload_large_folder`` rather than ``upload_folder``: it commits in batches, resumes
-    per file after an interruption, and skips blobs the Hub already has. Since the OCI
-    layout is content-addressed, two models built on the same tt-metal commit share most
-    of their layers and the second push uploads only what actually differs.
+    The upload has to commit in batches, resume per file after an interruption, and skip
+    blobs the Hub already has. Since the OCI layout is content-addressed, two models built
+    on the same tt-metal commit share most of their layers and the second push uploads only
+    what actually differs.
 
-    It manages its own progress reporting and takes no ``tqdm_class``, so the bridge here
+    On huggingface_hub 1.x that is ``upload_large_folder``. 2.0 removed it because
+    ``upload_folder`` itself does all three when ``hf_xet`` is installed, so pick whichever
+    the installed hub has.
+
+    Both manage their own progress reporting and take no ``tqdm_class``, so the bridge here
     just silences HF's writers and shows one activity line.
 
-    ``upload_large_folder`` has no ``delete_patterns``, so unlike :func:`push_folder` this
-    path cannot replace as it writes: it only adds. Anything the bundle stops shipping
+    Neither is called with ``delete_patterns``, so unlike :func:`push_folder` this path
+    cannot replace as it writes: it only adds. Anything the bundle stops shipping
     would stay published, which is not cosmetic. Narrowing a ``source.code`` allowlist
     from 651 files to 169 left all 651 on the Hub, so a repo whose card calls ``code/``
     byte-identical to the image described neither; content-addressed image blobs pile up
     the same way across rebuilds. Prune the two directories a bundle owns wholesale after
     the upload, never before, so an interrupted push cannot leave the repo empty.
     """
+    api = _api()
     with progress_bridge(f"Uploading to {repo_id}"):
-        _api().upload_large_folder(
-            repo_id=repo_id,
-            repo_type=_REPO_TYPE,
-            folder_path=str(folder),
-            num_workers=num_workers,
-        )
+        if hasattr(api, "upload_large_folder"):
+            api.upload_large_folder(
+                repo_id=repo_id,
+                repo_type=_REPO_TYPE,
+                folder_path=str(folder),
+                num_workers=num_workers,
+            )
+        else:  # huggingface_hub >= 2.0
+            api.upload_folder(
+                repo_id=repo_id,
+                repo_type=_REPO_TYPE,
+                folder_path=str(folder),
+                commit_message=f"tt-model push {folder.name} (container)",
+            )
     _prune_removed(repo_id, folder)
 
 

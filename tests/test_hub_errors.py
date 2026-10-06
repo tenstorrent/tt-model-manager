@@ -368,6 +368,43 @@ def test_large_push_prunes_what_the_bundle_stopped_shipping(monkeypatch, tmp_pat
     assert calls["deleted"] == ["code/models/tests/gone.py", "image/blobs/sha-stale"]
 
 
+def test_large_push_uses_upload_folder_when_the_hub_has_no_upload_large_folder(
+    monkeypatch, tmp_path
+):
+    """huggingface_hub 2.0 removed ``upload_large_folder``; the push must not crash.
+
+    Every other test here fakes an API object that has the method, so the suite stayed
+    green while a real `tt-model push` of a container package died with AttributeError on
+    any hub >= 2.0. Fake the 2.x surface instead: upload_folder only, and the prune still
+    runs afterwards so the two directories a bundle owns stay in step.
+    """
+    from tt_kernel import hub
+
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "a.py").write_text("x")
+
+    calls = {}
+
+    class _Api2x:  # no upload_large_folder, as on huggingface_hub >= 2.0
+        def upload_folder(self, **kw):
+            calls["upload"] = kw
+
+        def list_repo_files(self, **kw):
+            return ["code/a.py", "code/gone.py"]
+
+        def delete_files(self, **kw):
+            calls["deleted"] = sorted(kw["delete_patterns"])
+
+    monkeypatch.setattr(hub, "_api", lambda: _Api2x())
+    hub.push_large_folder("you/model", tmp_path)
+
+    assert calls["upload"]["folder_path"] == str(tmp_path)
+    assert calls["upload"]["repo_id"] == "you/model"
+    # prune-after is the invariant: deleting as we write could empty a repo mid-push
+    assert "delete_patterns" not in calls["upload"]
+    assert calls["deleted"] == ["code/gone.py"]
+
+
 def test_large_push_makes_no_delete_commit_when_nothing_is_stale(monkeypatch, tmp_path):
     from tt_kernel import hub
 
