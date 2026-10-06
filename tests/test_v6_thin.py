@@ -202,35 +202,74 @@ def test_thin_run_pins_runtime_root_and_revalidates_sfpi(tmp_path):
     assert 'export TT_METAL_CACHE="${TT_METAL_CACHE:-$HERE/.cache}"' in run
 
 
-def test_sfpi_gate_prefers_local_and_rejects_wrong_build(tmp_path):
-    """The rendered gate checks the same local-first path that TT-Metal will select."""
+def _sfpi_gate(tmp_path, declared="7.78.0[935]", found="7.78.0[935]"):
+    """A runnable SFPI gate over a fake TTNN dir whose local compiler reports ``found``."""
     from tt_kernel.packaging import _render_sfpi_validation
 
+    version, build = declared.rstrip("]").split("[")
     ttnn_dir = tmp_path / "ttnn"
     (ttnn_dir / "tt_metal").mkdir(parents=True)
     (ttnn_dir / "tt_metal" / "sfpi-version").write_text(
-        "sfpi_version='7.78.0'\nsfpi_build='935'\n"
+        f"sfpi_version='{version}'\nsfpi_build='{build}'\n"
     )
     compiler = ttnn_dir / "runtime" / "sfpi" / "compiler" / "bin" / "riscv-tt-elf-g++"
     compiler.parent.mkdir(parents=True)
     (ttnn_dir / "runtime" / "sfpi" / "include").mkdir(parents=True)
     (ttnn_dir / "runtime" / "sfpi" / "include" / "sfpi_lib.h").write_text("// test\n")
-    compiler.write_text("#!/bin/sh\necho 'riscv-tt-elf-g++ (tenstorrent/sfpi:7.60.0[704]) 15.1.0'\n")
+    compiler.write_text(f"#!/bin/sh\necho 'riscv-tt-elf-g++ (tenstorrent/sfpi:{found}) 15.1.0'\n")
     compiler.chmod(0o700)
     script = tmp_path / "gate.sh"
     script.write_text(
         "#!/bin/bash\nset -euo pipefail\n"
         f"PYBIN={shlex.quote(sys.executable)}\nTTNN_DIR={shlex.quote(str(ttnn_dir))}\n"
         + _render_sfpi_validation(discover_ttnn=False)
+        + "echo gate-passed\n"
     )
-    wrong = subprocess.run(["bash", str(script)], text=True, capture_output=True)
-    assert wrong.returncode != 0
-    assert "need 7.78.0[935]" in wrong.stderr and str(ttnn_dir / "runtime" / "sfpi") in wrong.stderr
+    return script, ttnn_dir
 
-    compiler.write_text("#!/bin/sh\necho 'riscv-tt-elf-g++ (tenstorrent/sfpi:7.78.0[935]) 15.1.0'\n")
-    ok = subprocess.run(["bash", str(script)], text=True, capture_output=True)
+
+def _run_gate(script, **env):
+    import os
+
+    return subprocess.run(["bash", str(script)], text=True, capture_output=True,
+                          env={**os.environ, **env})
+
+
+def test_sfpi_gate_prefers_local_and_validates_exact_match(tmp_path):
+    """The rendered gate checks the same local-first path that TT-Metal will select."""
+    script, ttnn_dir = _sfpi_gate(tmp_path)
+    ok = _run_gate(script)
     assert ok.returncode == 0, ok.stderr
     assert f"validated SFPI 7.78.0[935] at {ttnn_dir}/runtime/sfpi" in ok.stderr
+
+
+def test_sfpi_gate_warns_and_continues_on_newer_host_sfpi(tmp_path):
+    """ttnn 0.77.0 declares 7.69.0[822]; a host 7.83.0[989] still serves, so only warn."""
+    script, ttnn_dir = _sfpi_gate(tmp_path, declared="7.69.0[822]", found="7.83.0[989]")
+    r = _run_gate(script, TT_MODEL_STRICT_SFPI="0")
+    assert r.returncode == 0, r.stderr
+    assert "gate-passed" in r.stdout
+    assert "warning: SFPI" in r.stderr and "want 7.69.0[822]" in r.stderr
+    assert "7.83.0[989]" in r.stderr and "TT_MODEL_STRICT_SFPI=1" in r.stderr
+
+
+def test_sfpi_gate_strict_opt_in_makes_mismatch_fatal(tmp_path):
+    script, ttnn_dir = _sfpi_gate(tmp_path, declared="7.69.0[822]", found="7.83.0[989]")
+    r = _run_gate(script, TT_MODEL_STRICT_SFPI="1")
+    assert r.returncode != 0
+    assert "gate-passed" not in r.stdout
+    assert "need 7.69.0[822]" in r.stderr and str(ttnn_dir / "runtime" / "sfpi") in r.stderr
+    # `serve --print` only echoes the command, so a strict mismatch does not block it.
+    printed = _run_gate(script, TT_MODEL_STRICT_SFPI="1", TT_MODEL_PRINT="1")
+    assert printed.returncode == 0, printed.stderr
+
+
+def test_thin_install_and_run_share_the_lenient_sfpi_gate(tmp_path):
+    staged, _ = _stage_thin(tmp_path)
+    for script in ("install.sh", "run.sh"):
+        text = (staged / script).read_text()
+        assert 'TT_MODEL_STRICT_SFPI:-0' in text, script
+        assert "warning: SFPI" in text, script
 
 
 def test_thin_ships_plugin_and_ops_as_wheels_by_path(tmp_path):

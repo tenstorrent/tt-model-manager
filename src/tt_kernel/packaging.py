@@ -387,13 +387,14 @@ def make_wheel_artifact(src: Path, rel_path: str) -> WheelArtifact:
 
 
 def _render_sfpi_validation(*, discover_ttnn: bool) -> str:
-    """Render the exact SFPI compatibility gate required by an installed TTNN wheel.
+    """Render the SFPI gate for an installed TTNN wheel: missing SFPI fails, a version mismatch warns.
 
     SFPI is intentionally an external host dependency for schema-6 bundles. TT-Metal's runtime
     selector accepts any compiler found under ``ttnn/runtime/sfpi`` or ``/opt/tenstorrent/sfpi``
     without checking its version, so validate the same winning path before a JIT compile can fail
-    with opaque missing-API errors. ``PYBIN`` must name the bundle interpreter; ``TTNN_DIR`` may
-    already be available in run.sh.
+    with opaque missing-API errors. ``TT_MODEL_STRICT_SFPI=1`` makes a mismatch fatal (except under
+    ``TT_MODEL_PRINT=1``). ``PYBIN`` must name the bundle interpreter; ``TTNN_DIR`` may already be
+    available in run.sh.
     """
     discover = (
         """TTNN_DIR="$("$PYBIN" -I -c 'import importlib.util,pathlib;s=importlib.util.find_spec("ttnn");assert s and s.origin;print(pathlib.Path(s.origin).resolve().parent)')"
@@ -435,14 +436,20 @@ test -r "$selected_sfpi/include/sfpi_lib.h" || {
 }
 actual="$($gxx --version | sed -n '1p')"
 case "$actual" in
-  *"tenstorrent/sfpi:${sfpi_version}[${sfpi_build}]"*) ;;
+  *"tenstorrent/sfpi:${sfpi_version}[${sfpi_build}]"*)
+    printf 'validated SFPI %s[%s] at %s\n' "$sfpi_version" "$sfpi_build" "$selected_sfpi" >&2
+    ;;
   *)
-    printf 'SFPI mismatch at %s: need %s[%s], got: %s\n' \
+    # A mismatch is often still compatible, so it only warns unless TT_MODEL_STRICT_SFPI=1.
+    if [ "${TT_MODEL_STRICT_SFPI:-0}" = "1" ] && [ "${TT_MODEL_PRINT:-0}" != "1" ]; then
+      printf 'SFPI mismatch at %s: need %s[%s], got: %s (TT_MODEL_STRICT_SFPI=1)\n' \
+        "$selected_sfpi" "$sfpi_version" "$sfpi_build" "$actual" >&2
+      exit 1
+    fi
+    printf 'warning: SFPI at %s is not the version TTNN declares (want %s[%s], found: %s); continuing. Set TT_MODEL_STRICT_SFPI=1 to make this fatal.\n' \
       "$selected_sfpi" "$sfpi_version" "$sfpi_build" "$actual" >&2
-    exit 1
     ;;
 esac
-printf 'validated SFPI %s[%s] at %s\n' "$sfpi_version" "$sfpi_build" "$selected_sfpi" >&2
 '''
 
 
@@ -544,8 +551,7 @@ def render_install_sh(manifest: Manifest) -> str:
             f'{pip} {req_find_links}--extra-index-url {_PYTORCH_CPU_INDEX} '
             f'-r "$HERE/{d.requirements}" {model_wheels}'.rstrip()
         )
-        # Fail before the expensive vLLM build when the external SFPI compiler does not match the
-        # exact contract carried by the just-installed TTNN wheel.
+        # Check the external SFPI against the just-installed TTNN wheel before the expensive vLLM build.
         steps.append(_render_sfpi_validation(discover_ttnn=True))
         # (2) vLLM core for the plugin: STOCK upstream vLLM built with VLLM_TARGET_DEVICE=empty (NOT
         # the CUDA `vllm` on PyPI). Mirrors tenstorrent/vllm-tt-plugin docs/install-vllm-tt.sh: install
