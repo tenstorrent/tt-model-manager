@@ -1041,6 +1041,34 @@ def _card_tags(m: ContainerManifest) -> set:
     return tags
 
 
+_LICENSE_NAME_SLUG_DROP = re.compile(r"[^a-z0-9.-]+")
+
+
+def _license_name_slug(name: Optional[str]) -> Optional[str]:
+    """``card.license.name`` as the slug the Hub's ``license_name`` field accepts.
+
+    ``name`` is a human-readable licence title: it is what the card's License row shows a
+    reader, so "MiniMax Model License Agreement" is the right thing for an author to write.
+    The FRONTMATTER key of the same name is not prose — the Hub validates it server-side
+    against a slug shape and rejects the README commit with ``"license_name" must only
+    contain lowercase characters``. That rejection lands inside ``push``, after the
+    multi-hour build and the multi-GB upload, which is the one place this must not be
+    discovered; and on a ``huggingface_hub`` old enough to still have
+    ``upload_large_folder``, there is no client-side YAML validation at all, so it was
+    published invalid and unindexed instead of refused.
+
+    So derive the slug rather than refusing the title: the prose stays prose where a human
+    reads it, and the indexed field gets the shape the index requires.
+    """
+    if not name:
+        return name
+    slug = _LICENSE_NAME_SLUG_DROP.sub("-", name.lower()).strip("-.")
+    # Collapse the runs the substitution can leave ("Apache 2.0 / MIT" -> "apache-2.0-mit").
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug or None
+
+
 def _card_frontmatter(m: ContainerManifest) -> List[str]:
     """The card's YAML frontmatter: the tags, plus the standard HF metadata keys.
 
@@ -1068,7 +1096,7 @@ def _card_frontmatter(m: ContainerManifest) -> List[str]:
         # at commit time — after the build.
         if _flat(card.license.id) == "other":
             if card.license.name:
-                data["license_name"] = _flat(card.license.name)
+                data["license_name"] = _license_name_slug(_flat(card.license.name))
             if card.license.link:
                 data["license_link"] = _flat(card.license.link)
     # Left unset, the Hub shows no task on the repo, so it never appears in the task

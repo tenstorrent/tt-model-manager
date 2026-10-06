@@ -672,14 +672,45 @@ def test_a_standard_license_emits_neither_name_nor_link():
 
 
 def test_a_license_called_other_is_named_and_linked_in_the_frontmatter():
+    """The frontmatter's `license_name` is a slug, not the title. The Hub validates it
+    server-side (`"license_name" must only contain lowercase characters`), so the
+    author's human-readable title is slugified here — see the License row below, which
+    keeps it verbatim."""
     import yaml
 
     card = _card(card={"license": {"id": "other", "name": "Fish Audio Research License",
                                    "link": "https://example.invalid/LICENSE"}})
     meta = yaml.safe_load(card.split("---")[1])
     assert meta["license"] == "other"
-    assert meta["license_name"] == "Fish Audio Research License"
+    assert meta["license_name"] == "fish-audio-research-license"
     assert meta["license_link"] == "https://example.invalid/LICENSE"
+    assert "Fish Audio Research License" in card  # the prose keeps the title
+
+
+def test_a_license_name_is_slugified_before_the_hub_sees_it():
+    """Observed: `MiniMax Model License Agreement` was accepted by every client-side check
+    and refused by the Hub on the README commit — i.e. inside `push`, after the build and
+    the multi-GB upload. On a huggingface_hub old enough to still have
+    `upload_large_folder` there is no client-side YAML validation at all, so it was
+    published invalid and unindexed instead of refused."""
+    import yaml
+
+    from tt_kernel.build import _license_name_slug
+
+    card = _card(card={"license": {"id": "other", "name": "MiniMax Model License Agreement"}})
+    meta = yaml.safe_load(card.split("---")[1])
+    assert meta["license_name"] == "minimax-model-license-agreement"
+
+    # The shape the Hub documents for this field: lowercase, digits, '-' and '.'.
+    for title, slug in [
+        ("Apache 2.0 (see LICENSE)", "apache-2.0-see-license"),
+        ("CC BY-NC 4.0", "cc-by-nc-4.0"),
+        ("  Spaced  Out  ", "spaced-out"),
+    ]:
+        assert _license_name_slug(title) == slug
+    # A title with nothing slug-shaped in it must not become an empty frontmatter value,
+    # which the Hub would reject in its own way.
+    assert _license_name_slug("***") is None
 
 
 def test_the_frontmatter_never_emits_a_multiline_scalar_from_a_wire_manifest():
@@ -698,7 +729,7 @@ def test_the_frontmatter_never_emits_a_multiline_scalar_from_a_wire_manifest():
     block = card.split("---")[1]
     meta = yaml.safe_load(block)
     assert meta["license"] == "other"
-    assert meta["license_name"] == "Custom Licence"
+    assert meta["license_name"] == "custom-licence"
     assert meta["license_link"] == "https://example.invalid/L"
     assert meta["pipeline_tag"] == "text-to-image"
     assert meta["base_model"] == ["org/Upstream-A"]
