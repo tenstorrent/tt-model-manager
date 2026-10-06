@@ -221,6 +221,19 @@ COPY --from=builder --chown=tt:tt /opt/tt-metal/ttnn /opt/tt-metal/ttnn
 COPY --from=builder --chown=tt:tt /opt/tt-metal/tools /opt/tt-metal/tools
 COPY --from=builder --chown=tt:tt /opt/tt-metal/setup.py /opt/tt-metal/pyproject.toml /opt/tt-metal/
 COPY --chown=tt:tt code/ /opt/tt-metal/
+# `serve` runs this image as the INVOKING HOST uid, which owns nothing inside it, so every
+# path the server reads has to be world-readable. The context copy above carries the
+# AUTHOR's umask: 0007 (usual wherever shells are group-private) ships 0770 DIRECTORIES,
+# which the server cannot enter even though every file in them is 0644 and correct. Python
+# reports that EACCES as `ModuleNotFoundError: No module named models.tt_dit`, naming a
+# package that is entirely present, and the build-time verify below cannot catch it because
+# verify runs the image as `tt`, who owns those directories. Nor can the author fix it in
+# their shell: BuildKit's COPY cache key does not include a directory's mode, so a re-staged
+# tree that differs only in directory modes reuses the old layer.
+# Only the paths that need it are touched -- a blanket `chmod -R` would chmod() every file
+# in the multi-GB metal tree and copy all of it up into this layer.
+RUN find /opt/tt-metal \( -type f -o -type d \) \
+      \( ! -perm -o+r -o \( -type d ! -perm -o+x \) \) -exec chmod a+rX {} +
 # --chmod: the context copies carry the AUTHOR's umask (a 007 umask writes 660/770 files), and the
 # runtime user `tt` cannot read a root-owned 660 file. Fix the mode here, not in the author's shell.
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
