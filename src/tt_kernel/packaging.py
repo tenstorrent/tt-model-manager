@@ -678,8 +678,7 @@ fi
 
 # Keep the interpreter, its executable links, and uv's potentially large build/download cache
 # INSIDE the bundle rather than silently filling the host's ~/.local and ~/.cache.  The cache is
-# installation-only and may be removed after a successful install; placing it here also makes the
-# installer obey the folder-wall claim above on space-constrained systems.
+# installation-only and is removed after a successful install.
 export UV_PYTHON_INSTALL_DIR="$HERE/.python"
 export UV_PYTHON_BIN_DIR="$HERE/.python/bin"
 export UV_CACHE_DIR="$HERE/.uv-cache"
@@ -691,6 +690,8 @@ if [ -f "$HERE/{CONSTRAINTS}" ]; then
   TT_MODEL_CONSTRAINTS_ARGS=(--constraint "$HERE/{CONSTRAINTS}")
 fi
 {install}
+# The uv cache is install-only; drop it so it does not sit in the bundle beside the venv.
+rm -rf "$UV_CACHE_DIR"
 echo "installed into $VENV (python $PYVER, interpreter under $HERE/.python)"
 """
 

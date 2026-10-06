@@ -230,6 +230,30 @@ def test_render_run_sh_prefetch_honors_weight_patterns(tmp_path):
                    ["org/drafter", None, None]]
 
 
+def test_install_sh_removes_uv_cache_only_after_success(tmp_path):
+    """The install-only uv cache must not stay in the bundle next to the venv."""
+    bundle = tmp_path / "b"
+    bundle.mkdir()
+    (bundle / "install.sh").write_text(packaging.render_install_sh(_run_sh_manifest()))
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "uv").write_text(
+        '#!/bin/bash\nmkdir -p "$UV_CACHE_DIR" && touch "$UV_CACHE_DIR/blob"\n'
+        '[ "$1" = venv ] && [ -n "${FAIL_VENV:-}" ] && exit 1\nexit 0\n'
+    )
+    (fake_bin / "uv").chmod(0o700)
+    env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+    failed = subprocess.run(["bash", str(bundle / "install.sh")], capture_output=True, text=True,
+                            env={**env, "FAIL_VENV": "1"})
+    assert failed.returncode != 0
+    assert (bundle / ".uv-cache" / "blob").exists()
+
+    ok = subprocess.run(["bash", str(bundle / "install.sh")], capture_output=True, text=True, env=env)
+    assert ok.returncode == 0, ok.stderr
+    assert not (bundle / ".uv-cache").exists()
+
+
 def test_render_run_sh_no_tool_flags_without_capability():
     """No tool_parser declared => neither flag appears (bare --enable-auto-tool-choice is an error)."""
     run = packaging.render_run_sh(_run_sh_manifest())
