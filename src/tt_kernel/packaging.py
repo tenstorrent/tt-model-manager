@@ -721,8 +721,9 @@ export TORCHINDUCTOR_CACHE_DIR="${{TORCHINDUCTOR_CACHE_DIR:-$HERE/.cache/inducto
 {hf_export}{extra_env}{cmd_line}
 # TT_MODEL_PRINT=1 (set by `tt-model serve --print`) echoes the fully-resolved command+env
 if [ "${{TT_MODEL_PRINT:-0}}" = "1" ]; then
-  printf 'LD_PRELOAD=%s TT_METAL_HOME=%s EXTRA_MODELS_DIR=%s MESH_DEVICE=%s HF_MODEL=%s\n  %s\n' \\
-    "$LD_PRELOAD" "$TT_METAL_HOME" "$EXTRA_MODELS_DIR" "$MESH_DEVICE" "${{HF_MODEL:-}}" "${{CMD[*]}}"
+  printf 'LD_PRELOAD=%s TT_METAL_HOME=%s EXTRA_MODELS_DIR=%s MESH_DEVICE=%s HF_MODEL=%s\n  ' \\
+    "$LD_PRELOAD" "$TT_METAL_HOME" "$EXTRA_MODELS_DIR" "$MESH_DEVICE" "${{HF_MODEL:-}}"
+  printf '%q ' "${{CMD[@]}}"; echo  # shell-quoted so the printed command pastes back intact
   exit 0
 fi
 exec "${{CMD[@]}}"

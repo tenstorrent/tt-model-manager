@@ -200,6 +200,11 @@ Pin the versions that actually worked: `pip freeze` in your working venv gives t
    | `--models-wheel` | *(optional)* local `tt-metal-models` wheel, ahead of publish |
    | `--weights` | pointer to the weights. The weights are not embedded |
    | `--out ./bundle` | stage locally. Omit it and pass `<org>/<model>` to push |
+   | `--tt-config-json` | *(optional)* JSON object merged into `--additional-config {"tt": ...}`; stored as `resources.tt_additional_config` |
+
+   A bundle that uses `--tt-config-json` needs a `tt-model` that understands
+   `resources.tt_additional_config`. An older `tt-model` ignores the field without an error and
+   serves without those settings.
 
 7. **Result**: the bundle layout shown above (`model.py`, `requirements.txt`, `vllm-overrides.txt`,
    `wheels/` [`vllm-tt-plugin` + ops (+ optional vLLM wheel + optional local models wheel)],
