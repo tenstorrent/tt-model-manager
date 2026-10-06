@@ -1,6 +1,6 @@
 ---
 name: tt-model-package-test
-description: Package a model as a CONTAINER (v5.1) image from its tt-model.yaml and prove it works — build, serve on hardware, verify the API (tool calling included), stop cleanly, and optionally push. Use for "package this model", "build and test the container", "prove the package serves", "ship this model to HF". Requires an authored tt-model.yaml (use the tt-model-yaml skill to write one) and a box with the target TT devices. Do NOT use for v5 fat / v6 thin bundles — see AGENTS.md "Driving the flow" for those.
+description: Package a model as a CONTAINER (v5.1) image from its tt-model.yaml and prove it works — build, serve on hardware, verify the API (chat and tool calling for a vLLM kind, the model's own routes and its generated artifact for a tt-dit-server / http-server one), stop cleanly, and optionally push. Use for "package this model", "build and test the container", "prove the package serves", "ship this model to HF". Requires an authored tt-model.yaml (use the tt-model-yaml skill to write one) and a box with the target TT devices. Do NOT use for v5 fat / v6 thin bundles — see AGENTS.md "Driving the flow" for those.
 ---
 
 # Package a container model and prove it works
@@ -116,6 +116,15 @@ noticing.
 
 Run every check that applies; each one catches a real, observed failure mode.
 
+Which checks apply is decided by the manifest's `kind`, not by habit. A `vllm-plugin` or
+`vllm-fork` package serves an OpenAI API and gets checks 1–5. A `tt-dit-server` or
+`http-server` package has **no `/v1/chat/completions` at all** — `tt-model curl` itself
+refuses those kinds rather than posting a body that 404s — so for those, run check 1 and
+then the non-chat checks below. Running a chat body against a diffusion server and reading
+the 404 as "the package is broken" is the failure this split exists to stop.
+
+### Chat kinds (`vllm-plugin`, `vllm-fork`)
+
 1. **Identity** — the served model is the manifest's weights id:
    ```bash
    curl -s localhost:<port>/v1/models
@@ -151,6 +160,44 @@ Run every check that applies; each one catches a real, observed failure mode.
 5. **Every profile this box can run** — repeat 1–3 per profile with
    `--profile <name>` (stop between profiles). Report profiles the box CANNOT run as
    not verified; never silently substitute hardware.
+
+### Non-chat kinds (`tt-dit-server`, `http-server`)
+
+These serve the model's own app, so the routes are the model's own. Find them, in this
+order: `GET /v1/capabilities` on the running server if it answers, the server module named
+by `runtime.app` (or `runtime.command`), then the model card. Do not guess a route and
+report a 404 as a defect.
+
+1. **Identity** — `GET /v1/models` (these servers answer it) names the manifest's weights
+   id, and `GET /v1/health` reports ready.
+2. **Generation, end to end** — submit one request on the server's own route and follow it
+   to a finished artifact. These APIs are usually asynchronous: a submit returns a job id,
+   you poll for a terminal status, and then download. A 200 on the submit proves nothing —
+   the job can still fail minutes later.
+   ```bash
+   JOB=$(curl -s -X POST localhost:<port>/<submit-route> \
+         -H 'content-type: application/json' -d '<the model's minimal body>' | jq -r '.id // .job_id')
+   until [ "$(curl -s localhost:<port>/<status-route>/$JOB | jq -r .status)" != running ]; do sleep 5; done
+   curl -s localhost:<port>/<status-route>/$JOB | jq .        # terminal status, not an error
+   curl -s -o out.bin localhost:<port>/<download-route>/$JOB
+   ```
+3. **The artifact is real** — open it, do not just check the byte count. A pipeline that
+   silently produced noise, or the base model under an adapter's name, writes a
+   well-formed file of exactly the right size. For video/audio, `ffprobe out.bin` and
+   check the container, the codecs, the duration, the frame count and the sample rate
+   against what was requested; for an image, the dimensions and that it is not uniform.
+   Say in the report what you looked at, and whether a human looked at the output too —
+   "the file decodes" is not "the output is right".
+4. **Rejection and determinism** — a deliberately bad request (an empty prompt, a size the
+   server's own limits forbid, an unknown field) comes back 4xx with a message naming the
+   field, not a 500 and not a silently clamped job; and the same request with the same seed
+   gives the same bytes twice. Both catch a server whose request model and pipeline have
+   drifted apart.
+5. **Every profile this box can run** — repeat 1–4 per profile with `--profile <name>`
+   (stop between profiles), with the same rule about never substituting hardware.
+
+Checks 3 and 4 of the chat list (tool calling, reasoning) do not apply: a model with no
+tokens has no tool parser, and `capabilities` is not set for these kinds.
 
 ## Step 5 — Stop cleanly
 
