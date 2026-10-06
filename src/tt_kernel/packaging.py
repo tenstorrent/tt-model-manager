@@ -464,8 +464,11 @@ def render_install_sh(manifest: Manifest) -> str:
         # (4) Sanity checks, LAST — the venv is complete, so these run against the real installed
         # deps (e.g. `import <ops pkg>`, or assert ttnn.__version__ is in the validated range). A
         # failing check fails install (the script runs under `set -e`), which is the point.
+        # The shipped ops tree is only on PYTHONPATH via run.sh, so put it there for the checks too.
+        verify_pp = (f'PYTHONPATH="$HERE/{d.extra_code_dir.strip("/")}${{PYTHONPATH:+:$PYTHONPATH}}" '
+                     if d.extra_code_dir else "")
         for stmt in d.verify:
-            steps.append(f'"$VENV/bin/python" -c {shlex.quote(stmt)}')
+            steps.append(f'{verify_pp}"$VENV/bin/python" -c {shlex.quote(stmt)}')
         install = "\n".join(steps)
         deps_note = "v6 thin: ttnn/tt-metal-models (index) + empty-target vLLM + plugin/ops wheels (by path)"
     else:

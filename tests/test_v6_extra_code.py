@@ -10,6 +10,8 @@ installed changes.
 """
 
 import shlex
+import subprocess
+import sys
 
 import pytest
 from typer.testing import CliRunner
@@ -91,6 +93,30 @@ def test_verify_statements_run_last_in_install_sh(tmp_path):
         assert f'"$VENV/bin/python" -c {shlex.quote(stmt)}' in inst
     # runs AFTER the deps/wheels install (it must see the built venv)
     assert inst.index("import myops") > inst.rindex("uv pip install")
+
+
+def _run_verify_steps(staged, tmp_path):
+    """Run install.sh's verify lines for real, with $VENV/bin/python pointing at this interpreter."""
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(sys.executable)
+    lines = [ln for ln in (staged / "install.sh").read_text().splitlines()
+             if '"$VENV/bin/python" -c' in ln]
+    script = "\n".join(["set -euo pipefail", f'HERE="{staged}"', f'VENV="{tmp_path / "venv"}"', *lines])
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, cwd=tmp_path)
+
+
+def test_verify_can_import_the_shipped_tree(tmp_path):
+    staged, _ = _stage(tmp_path, extra_code=_ops_tree(tmp_path),
+                       verify=["import myops; assert hasattr(myops, 'fast_attn')"])
+    res = _run_verify_steps(staged, tmp_path)
+    assert res.returncode == 0, res.stderr
+
+
+def test_a_failing_verify_fails_the_install_step(tmp_path):
+    staged, _ = _stage(tmp_path, extra_code=_ops_tree(tmp_path), verify=["import not_shipped"])
+    res = _run_verify_steps(staged, tmp_path)
+    assert res.returncode != 0 and "ModuleNotFoundError" in res.stderr
 
 
 def test_no_verify_adds_no_python_c_lines(tmp_path):
