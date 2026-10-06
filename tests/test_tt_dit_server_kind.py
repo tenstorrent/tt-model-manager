@@ -16,7 +16,7 @@ import pytest
 
 from tt_kernel.container_manifest import ContainerManifest, ContainerManifestError
 from tt_kernel.launchers import KINDS, launcher_for, required_serve_fields
-from tt_kernel.manifest import Manifest
+from tt_kernel.manifest import WEIGHTS_REVISION_ENV, Manifest
 
 DIT_BASE = {
     "schema": "5.1",
@@ -268,3 +268,40 @@ def test_torch_is_unpinned_when_the_metal_tree_is_not_local(monkeypatch):
     monkeypatch.setattr(launchers, "metal_torch_pin", lambda _tree: None)
     line = launcher_for("tt-dit-server").install_lines(_manifest())[0]
     assert " torch " in line
+
+
+# ------------------------------------------------- the manifest's weights pin reaches the server
+
+
+def test_the_pinned_weights_revision_reaches_a_dit_server():
+    """A diffusion server downloads its own weights, so the pin has to arrive in its env.
+
+    vLLM gets `--revision`; this kind got nothing, so an author had to restate the sha in
+    `serve.env` under a name only their own server knows — two copies of one fact, free to
+    drift. The v6 thin `run.sh` has exported this variable all along; the container path
+    did not.
+    """
+    m = _manifest(weights={"repo": "org/Weights", "revision": "a" * 40})
+    wire = _wire(m)
+    env = launcher_for("tt-dit-server").serve_env(wire, wire.container.resolve_profile(None))
+    assert env[WEIGHTS_REVISION_ENV] == "a" * 40
+
+
+def test_an_unpinned_dit_server_gets_no_revision_variable():
+    """An empty value would be worse than no value: a server that reads the variable would
+    see "" and have to special-case it."""
+    wire = _wire(_manifest())
+    env = launcher_for("tt-dit-server").serve_env(wire, wire.container.resolve_profile(None))
+    assert WEIGHTS_REVISION_ENV not in env
+
+
+def test_an_author_supplied_revision_still_wins():
+    """serve.env is the author's escape hatch and is applied last."""
+    m = _manifest(
+        weights={"repo": "org/Weights", "revision": "a" * 40},
+        serve={"hardware": "p300x2", "mesh_device": "QB2", "port": 8000,
+               "env": {WEIGHTS_REVISION_ENV: "b" * 40}},
+    )
+    wire = _wire(m)
+    env = launcher_for("tt-dit-server").serve_env(wire, wire.container.resolve_profile(None))
+    assert env[WEIGHTS_REVISION_ENV] == "b" * 40
