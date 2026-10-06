@@ -393,7 +393,8 @@ def _render_sfpi_validation(*, discover_ttnn: bool) -> str:
     selector accepts any compiler found under ``ttnn/runtime/sfpi`` or ``/opt/tenstorrent/sfpi``
     without checking its version, so validate the same winning path before a JIT compile can fail
     with opaque missing-API errors. ``TT_MODEL_STRICT_SFPI=1`` makes a mismatch fatal (except under
-    ``TT_MODEL_PRINT=1``). ``PYBIN`` must name the bundle interpreter; ``TTNN_DIR`` may already be
+    ``TT_MODEL_PRINT=1``); a wheel without ``tt_metal/sfpi-version`` skips the version check.
+    ``PYBIN`` must name the bundle interpreter; ``TTNN_DIR`` may already be
     available in run.sh.
     """
     discover = (
@@ -401,7 +402,11 @@ def _render_sfpi_validation(*, discover_ttnn: bool) -> str:
 """
         if discover_ttnn else ""
     )
-    return discover + r'''sfpi_requirements="$("$PYBIN" -I - "$TTNN_DIR/tt_metal/sfpi-version" <<'PY'
+    return discover + r'''sfpi_meta="$TTNN_DIR/tt_metal/sfpi-version"
+sfpi_version=""
+sfpi_build=""
+if [ -f "$sfpi_meta" ]; then
+  sfpi_requirements="$("$PYBIN" -I - "$sfpi_meta" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -416,7 +421,13 @@ if set(values) != {"sfpi_version", "sfpi_build"}:
 print(values["sfpi_version"], values["sfpi_build"], sep="\t")
 PY
 )"
-IFS=$'\t' read -r sfpi_version sfpi_build <<<"$sfpi_requirements"
+  IFS=$'\t' read -r sfpi_version sfpi_build <<<"$sfpi_requirements"
+  sfpi_want="${sfpi_version}[${sfpi_build}]"
+else
+  # An older TTNN wheel declares no SFPI version: it is unknown, so skip that check.
+  printf 'note: %s not found; skipping the SFPI version check\n' "$sfpi_meta" >&2
+  sfpi_want="an unknown version"
+fi
 local_sfpi="$TTNN_DIR/runtime/sfpi"
 system_sfpi=/opt/tenstorrent/sfpi
 if [ -e "$local_sfpi/compiler/bin/riscv-tt-elf-g++" ]; then
@@ -424,8 +435,8 @@ if [ -e "$local_sfpi/compiler/bin/riscv-tt-elf-g++" ]; then
 elif [ -e "$system_sfpi/compiler/bin/riscv-tt-elf-g++" ]; then
   selected_sfpi="$system_sfpi"
 else
-  printf 'SFPI missing: TTNN requires %s[%s]; install the matching external host package\n' \
-    "$sfpi_version" "$sfpi_build" >&2
+  printf 'SFPI missing: TTNN requires %s; install the matching external host package\n' \
+    "$sfpi_want" >&2
   exit 1
 fi
 gxx="$selected_sfpi/compiler/bin/riscv-tt-elf-g++"
@@ -435,7 +446,7 @@ test -r "$selected_sfpi/include/sfpi_lib.h" || {
   exit 1
 }
 actual="$($gxx --version | sed -n '1p')"
-case "$actual" in
+[ -z "$sfpi_version" ] || case "$actual" in
   *"tenstorrent/sfpi:${sfpi_version}[${sfpi_build}]"*)
     printf 'validated SFPI %s[%s] at %s\n' "$sfpi_version" "$sfpi_build" "$selected_sfpi" >&2
     ;;
@@ -538,7 +549,7 @@ def render_install_sh(manifest: Manifest) -> str:
         pyver = d.python or "3.12"
         pip = (
             'uv pip install --python "$VENV/bin/python" --link-mode=copy '
-            '"${TT_MODEL_CONSTRAINTS_ARGS[@]}"'
+            '${TT_MODEL_CONSTRAINTS_ARGS[@]+"${TT_MODEL_CONSTRAINTS_ARGS[@]}"}'
         )
         steps: List[str] = []
         # (1) Engine + models FIRST: ttnn (bundles the tt-metal runtime) and, once published,

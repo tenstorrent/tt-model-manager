@@ -131,6 +131,14 @@ def test_thin_stages_resolved_constraints_and_pinned_vllm_common(tmp_path):
     assert '-r "$HERE/vllm-common.txt"' in install
 
 
+def test_thin_constraints_expansion_is_safe_when_empty_on_old_bash(tmp_path):
+    """bash < 4.4 treats "${arr[@]}" of an empty array as unbound under set -u."""
+    staged, _ = _stage_thin(tmp_path)
+    install = (staged / "install.sh").read_text()
+    safe = '${TT_MODEL_CONSTRAINTS_ARGS[@]+"${TT_MODEL_CONSTRAINTS_ARGS[@]}"}'
+    assert install.count(safe) == install.count('"${TT_MODEL_CONSTRAINTS_ARGS[@]}"') > 0
+
+
 def test_thin_no_vllm_skips_the_vllm_step(tmp_path):
     staged, m = _stage_thin(tmp_path, with_vllm=False)
     assert m.deps.vllm is None

@@ -141,3 +141,12 @@ def test_author_env_is_a_default_not_an_override(tmp_path):
     assert _run(b)[1] == "TVD= TMVD=2,3"                      # used when nothing else says
     assert _run(b, TT_VISIBLE_DEVICES=GRANT)[1] == "TVD=0000:01:00.0,0000:02:00.0 TMVD=0,1"
     assert 'export TT_METAL_VISIBLE_DEVICES="2,3"' not in (b / "run.sh").read_text()
+
+
+def test_a_ttnn_without_sfpi_version_metadata_still_serves(tmp_path):
+    """No tt_metal/sfpi-version means the declared SFPI is unknown: skip the version check."""
+    b = _bundle(tmp_path, devices=1)
+    (b.parent / "site" / "ttnn" / "tt_metal" / "sfpi-version").unlink()
+    code, out, err = _run(b)
+    assert (code, out) == (0, "TVD= TMVD=0"), err
+    assert "skipping the SFPI version check" in err
