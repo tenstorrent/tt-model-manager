@@ -1308,7 +1308,9 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         raise ContainerCliError(summarize(diag, result.tail), diagnosis=diag)
 
     console.milestone(f"{what} ready  {console.fmt_duration(view.elapsed)}")
-    console.console.print(_ready_card(name, endpoint, what))
+    console.console.print(
+        _ready_card(name, endpoint, what, openai_compatible=launcher.OPENAI_COMPATIBLE)
+    )
 
 
 def _host_summary(reqs) -> Optional[str]:
@@ -1339,18 +1341,34 @@ def _feed(tracker: BootTracker, view):
     return on_line
 
 
-def _ready_card(name: str, endpoint: str, target: str):
-    """The end-of-boot card: where the server is and what to do next."""
+def _ready_card(name: str, endpoint: str, target: str, *, openai_compatible: bool = True):
+    """The end-of-boot card: where the server is and what to do next.
+
+    The "what to do next" row is kind-dependent. A chat server gets `tt-model curl`, which
+    posts to ``/v1/chat/completions``; a ``tt-dit-server`` or ``http-server`` package has no
+    such route, and `curl` itself already refuses those rather than posting a body that
+    404s. Suggesting it here anyway sends the reader to a command that cannot work, at the
+    one moment the card exists to answer "it is up — now what". Those kinds get their own
+    routes instead, which only the model card can enumerate.
+    """
+    rows = [
+        ("endpoint", endpoint),
+        ("models", f"curl {endpoint}/v1/models"),
+    ]
+    if openai_compatible:
+        # `curl` takes a prompt, not a package id: it asks the running server which
+        # model it serves. A target here would be parsed as the prompt and "hello"
+        # rejected as an unexpected argument.
+        rows.append(("try", 'tt-model curl "hello"'))
+    else:
+        rows.append(("health", f"curl {endpoint}/v1/health"))
+        # Only a Hub target carries a card to point at; a locally packaged manifest is
+        # served by its own `name`, which is not a repo id.
+        if "/" in target:
+            rows.append(("routes", f"https://huggingface.co/{target}"))
     return console.ready_panel(
         name,
-        [
-            ("endpoint", endpoint),
-            ("models", f"curl {endpoint}/v1/models"),
-            # `curl` takes a prompt, not a package id: it asks the running server which
-            # model it serves. A target here would be parsed as the prompt and "hello"
-            # rejected as an unexpected argument.
-            ("try", 'tt-model curl "hello"'),
-        ],
+        rows,
         footer_lines=[f"[muted]tt-model logs {target} -f   ·   tt-model stop {target}[/muted]"],
     )
 
