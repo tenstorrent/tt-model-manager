@@ -159,7 +159,9 @@ class Deps(BaseModel):
     ``tt-metal-models`` wheel, ahead of its PyPI publish). ``vllm`` describes the separate
     empty-target vLLM install step (see ``Vllm``) — vLLM is NOT in ``requirements`` or ``wheels``
     because it needs its own ordered build. ``model_dir`` is where ``model.py`` lives (added to
-    PYTHONPATH at serve). SFPI and firmware are external, box-managed deps — never in here.
+    PYTHONPATH at serve). ``extra_code_dir`` ships a tree of hand-written pure-Python model ops
+    alongside ``model.py`` and is also put on PYTHONPATH (issue #127); ``verify`` holds install-time
+    ``python -c`` sanity checks. SFPI and firmware are external, box-managed deps — never in here.
 
     ``kind`` picks the serving front end ``render_run_sh`` puts in ``run.sh``, mirroring the v5.1
     container schema's ``ContainerSpec.kind`` (see ``launchers.py``) so an author who has already
@@ -186,6 +188,15 @@ class Deps(BaseModel):
     # vLLM core install (empty-target, for the plugin). None => bundle serves no vLLM (non-vLLM model).
     vllm: Optional["Vllm"] = None
     model_dir: str = "."                     # where model.py lives (bundle root), added to PYTHONPATH
+    # A bundle-relative directory of hand-written, pure-Python model ops that ride WITH the bundle
+    # (issue #127) — custom attention/decode/vision code that composes stock ttnn ops but isn't in
+    # ttnn/tt-metal/tt_transformers. Staged and added to PYTHONPATH ahead of model_dir at serve, so
+    # `import <pkg>` resolves. NOT for new C++ ttnn ops or a forked build — that stays v5/v5.1.
+    extra_code_dir: Optional[str] = None
+    # Python statements run (as `python -c`) at the end of install.sh, after the venv is built — the
+    # v6 analog of the container schema's `verify`. Use to sanity-import the shipped code and assert
+    # the ttnn version it was validated against (the installed ttnn is only known post-install).
+    verify: List[str] = Field(default_factory=list)
     kind: str = "vllm"                       # one of THIN_KINDS (see class docstring)
     # The ASGI entrypoint ("module:attribute") a "tt-dit-server" kind serves with uvicorn — the v6
     # analog of ContainerSpec.runtime["app"]. Unused (must be None) for kind="vllm".
