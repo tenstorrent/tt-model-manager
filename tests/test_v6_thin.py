@@ -261,6 +261,18 @@ def test_sfpi_gate_warns_and_continues_on_newer_host_sfpi(tmp_path):
     assert "7.83.0[989]" in r.stderr and "TT_MODEL_STRICT_SFPI=1" in r.stderr
 
 
+def test_sfpi_gate_refuses_an_older_host_sfpi(tmp_path):
+    """A 7.61.0 host lacks sfpi::clamp/min that ttnn 0.77.0's kernels use; JIT compile fails."""
+    script, ttnn_dir = _sfpi_gate(tmp_path, declared="7.69.0[822]", found="7.61.0[719]")
+    r = _run_gate(script, TT_MODEL_STRICT_SFPI="0")
+    assert r.returncode != 0
+    assert "gate-passed" not in r.stdout
+    assert "older than TTNN needs" in r.stderr and "7.61.0[719]" in r.stderr
+    # `serve --print` only echoes the command, so it is never blocked.
+    printed = _run_gate(script, TT_MODEL_PRINT="1")
+    assert printed.returncode == 0, printed.stderr
+
+
 def test_sfpi_gate_strict_opt_in_makes_mismatch_fatal(tmp_path):
     script, ttnn_dir = _sfpi_gate(tmp_path, declared="7.69.0[822]", found="7.83.0[989]")
     r = _run_gate(script, TT_MODEL_STRICT_SFPI="1")

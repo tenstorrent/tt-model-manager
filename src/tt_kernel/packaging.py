@@ -387,7 +387,7 @@ def make_wheel_artifact(src: Path, rel_path: str) -> WheelArtifact:
 
 
 def _render_sfpi_validation(*, discover_ttnn: bool) -> str:
-    """Render the SFPI gate for an installed TTNN wheel: missing SFPI fails, a version mismatch warns.
+    """Render the SFPI gate for an installed TTNN wheel: missing or older SFPI fails, newer warns.
 
     SFPI is intentionally an external host dependency for schema-6 bundles. TT-Metal's runtime
     selector accepts any compiler found under ``ttnn/runtime/sfpi`` or ``/opt/tenstorrent/sfpi``
@@ -451,7 +451,15 @@ actual="$($gxx --version | sed -n '1p')"
     printf 'validated SFPI %s[%s] at %s\n' "$sfpi_version" "$sfpi_build" "$selected_sfpi" >&2
     ;;
   *)
-    # A mismatch is often still compatible, so it only warns unless TT_MODEL_STRICT_SFPI=1.
+    # An OLDER SFPI lacks APIs the TTNN kernels use and fails at JIT compile, so it is fatal.
+    found="$(printf '%s' "$actual" | sed -n 's/.*tenstorrent\/sfpi:\([0-9.]*\).*/\1/p')"
+    if [ -n "$found" ] && [ "$(printf '%s\n%s\n' "$found" "$sfpi_version" | sort -V | head -1)" = "$found" ] \
+        && [ "$found" != "$sfpi_version" ] && [ "${TT_MODEL_PRINT:-0}" != "1" ]; then
+      printf 'SFPI at %s is older than TTNN needs (want %s[%s], found: %s); its kernels will not compile. Install SFPI %s or newer.\n' \
+        "$selected_sfpi" "$sfpi_version" "$sfpi_build" "$actual" "$sfpi_version" >&2
+      exit 1
+    fi
+    # A newer SFPI is usually compatible, so it only warns unless TT_MODEL_STRICT_SFPI=1.
     if [ "${TT_MODEL_STRICT_SFPI:-0}" = "1" ] && [ "${TT_MODEL_PRINT:-0}" != "1" ]; then
       printf 'SFPI mismatch at %s: need %s[%s], got: %s (TT_MODEL_STRICT_SFPI=1)\n' \
         "$selected_sfpi" "$sfpi_version" "$sfpi_build" "$actual" >&2
