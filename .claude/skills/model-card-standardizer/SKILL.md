@@ -15,34 +15,56 @@ renders it from the manifest, and the author's input is the `card:` block of the
 Read those before relying on the table below. If the fields or sections have changed,
 the code wins.
 
+The rendered card, top to bottom:
+
 | Card section | Filled by |
 | --- | --- |
 | Frontmatter `tags` | the generator (hardware, board, catalog and runtime tags) |
 | Frontmatter `license`, `pipeline_tag`, `base_model` | `card.license`, `card.pipeline_tag`, `card.base_model` |
-| Lead paragraph | `card.description` |
-| At a glance | `card.architecture`, `card.status`, the license; hardware and context come from the serve profiles |
-| Intended use | `card.intended_use`, `card.out_of_scope_use` |
-| Quickstart | the generator (`tt` and `tt-model` commands), then `card.quickstart` |
-| Serve profiles | the generator, when there is more than one profile |
-| Using it | the generator (what the API is), then `card.usage` |
-| Expected performance | `card.performance` — required to list in the catalog |
+| Title | the generator: `<name> on Tenstorrent <boards>` |
+| Attribution block quote | `card.attribution` |
+| Lead paragraph | `card.description`: size, architecture, what it does |
+| Hardware sentence, "Packaged with" line | the generator |
+| At a glance | the generator: hardware, context, license |
+| Intended use | `card.intended_use` |
+| Prerequisites | the generator (tt CLI, Docker, board), then `card.prerequisites` as extra bullets |
+| Quickstart | the generator (`tt serve <repo>`, the boot note, the tt-model-only line), then `card.quickstart` |
+| Serving profiles | the generator, when there is more than one profile |
+| Capabilities | the generator (what the API is, tool calling, reasoning), then `card.usage` |
+| Expected performance | `card.performance`: an eval table against the reference model, then (for an LLM) the speed table — required to list in the catalog |
 | Limitations | `card.limitations` — required to list in the catalog |
-| Risks and safety considerations | `card.risks` |
-| Licensing | `card.licensing` |
-| Related packages | `card.related` |
+| Licensing | `card.licensing` (optional) |
+| Related packages | `card.related` (optional) |
 | Feedback, Provenance | the generator |
 
 What a good value looks like for each field is in `reference/template.md`.
 
-Two things a card cannot carry today, because the generator has no field for them: a
-changelog (the card is rendered fresh on every build) and a machine-readable
-performance summary in the frontmatter. Report these as generator gaps, not author
-fixes.
+What the generator cannot do yet. Report these as generator gaps, not author fixes:
 
-Verified status is never part of a card. A model is verified when Tenstorrent copies
-it into the `Tenstorrent` Hugging Face org; the org is the signal. Anyone can edit their
-own card, so a card that calls itself verified (in `status`, a tag, or prose) is wrong
-and should be flagged.
+- There is no changelog; the card is rendered fresh on every build.
+- There is no machine-readable performance summary in the frontmatter.
+- `performance` is free text. For an LLM, `package` only warns when its table lacks one of
+  the required columns; nothing checks the values.
+
+Verified status is never part of a card. tt-cli decides it: a bundle is verified when it
+is on the curated list tt-cli ships, or when Tenstorrent has copied it into the
+`Tenstorrent` Hugging Face org (`tt-model verify`). Anyone can edit their own card, so a
+card that calls itself verified (in a tag or prose) is wrong and should be flagged.
+
+## What never goes on a card
+
+The card is public and describes the model as it ships. Leave out, and flag when you
+find it:
+
+- **Bring-up history and discoveries.** How the port was made, what was tried, debugged
+  or worked around, earlier versions, and findings from bring-up. A user does not need
+  them, and they can leak internal information. A limitation a user can hit stays, stated
+  as current behaviour, not as the story of how it was found.
+- **Opinion or analysis of the result.** No judgement of how good the port is, no
+  explaining away a gap, no guessing at causes. Report the evals, benchmarks and
+  limitations as measured; the numbers, and the fact the package is published, speak for
+  themselves.
+- **Implementation detail** a user does not need to run the model or trust its output.
 
 ## Step 1 — Find what you are checking
 
@@ -60,25 +82,36 @@ For each row of the table, classify it as:
 - **Author fix**: missing or weak. Name the `card:` field it belongs in.
 - **Generator gap**: the generator cannot express it. Cite the file and line you checked.
 
-A missing section is almost always an author fix now: every section above has its own
-field. Pay most attention to `performance` and `limitations` (the catalog will not list
-a package without them) and to `out_of_scope_use`, the one most often left out.
+Pay most attention to `performance` and `limitations`: the catalog will not list a
+package without them. A `limitations` that does not say what the model should not be
+used for is weak, and is the gap most often left.
+
+Flag author text that repeats what the generator already prints: the board in the
+description, the tt CLI or Docker in prerequisites, the serve command, first-boot time or
+ready line in quickstart. Flag anything from "What never goes on a card" as an author fix:
+delete it, or restate a user-facing limitation as plain current behaviour.
+
+A `card:` block that still uses `architecture`, `status`, `out_of_scope_use` or `risks`
+loads for now, with a warning, but is an author fix: move architecture into
+`description`, out-of-scope uses and risks into `limitations`, and drop `status` (verified
+status is tt-cli's call, not the card's).
 
 ## Step 3 — Interview for the author fixes
 
 Ask for everything missing in one batch, in the style of the `tt-model-yaml` skill:
 give your best guess and where it came from, so the author confirms rather than writes
-from scratch. Then draft a `card:` block with each answer in its own field. Use
-`card.quickstart` only for what the generated commands do not cover, such as first-boot
-time or the log line that means the server is ready.
+from scratch. Then draft a `card:` block with each answer in its own field, following
+"What never goes on a card": facts and measurements only, as the model is now.
 
 ## Step 4 — Offer to write it
 
 - **Unbuilt `tt-model.yaml`**: show the diff to the `card:` block and write it only after
   the author confirms.
-- **Already built or published**: a card change needs a rebuild and re-push
-  (`tt-model package --container`, then `tt-model push`). Say so. Never patch a published
-  README directly; the manifest is the source of truth.
+- **Already built or published**: a card change needs a rebuild and re-push:
+  `tt model package --container tt-model.yaml`, then `tt model push <dir>` (tt-cli newer
+  than 1.0.1), or the same steps as `tt-model package --container` and `tt-model push`
+  without tt-cli. Say so. Never patch a published README directly; the manifest is the
+  source of truth.
 
 ## Step 5 — Report
 
