@@ -51,6 +51,21 @@ is on the curated list tt-cli ships, or when Tenstorrent has copied it into the
 `Tenstorrent` Hugging Face org (`tt-model verify`). Anyone can edit their own card, so a
 card that calls itself verified (in a tag or prose) is wrong and should be flagged.
 
+## What never goes on a card
+
+The card is public and describes the model as it ships. Leave out, and flag when you
+find it:
+
+- **Bring-up history and discoveries.** How the port was made, what was tried, debugged
+  or worked around, earlier versions, and findings from bring-up. A user does not need
+  them, and they can leak internal information. A limitation a user can hit stays, stated
+  as current behaviour, not as the story of how it was found.
+- **Opinion or analysis of the result.** No judgement of how good the port is, no
+  explaining away a gap, no guessing at causes. Report the evals, benchmarks and
+  limitations as measured; the numbers, and the fact the package is published, speak for
+  themselves.
+- **Implementation detail** a user does not need to run the model or trust its output.
+
 ## Step 1 — Find what you are checking
 
 - **An authored `tt-model.yaml`, not yet built**: read its `card:` block (it may be
@@ -73,7 +88,8 @@ used for is weak, and is the gap most often left.
 
 Flag author text that repeats what the generator already prints: the board in the
 description, the tt CLI or Docker in prerequisites, the serve command, first-boot time or
-ready line in quickstart.
+ready line in quickstart. Flag anything from "What never goes on a card" as an author fix:
+delete it, or restate a user-facing limitation as plain current behaviour.
 
 A `card:` block that still uses `architecture`, `status`, `out_of_scope_use` or `risks`
 loads for now, with a warning, but is an author fix: move architecture into
@@ -84,9 +100,8 @@ status is tt-cli's call, not the card's).
 
 Ask for everything missing in one batch, in the style of the `tt-model-yaml` skill:
 give your best guess and where it came from, so the author confirms rather than writes
-from scratch. Then draft a `card:` block with each answer in its own field. Describe the
-model as it is now: no history of the port, and no implementation detail a user does not
-need.
+from scratch. Then draft a `card:` block with each answer in its own field, following
+"What never goes on a card": facts and measurements only, as the model is now.
 
 ## Step 4 — Offer to write it
 

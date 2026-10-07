@@ -196,7 +196,7 @@ verify:                         # build-time assertions run INSIDE the finished 
 # the renderer owns, so a reader finds the same information in the same place on every
 # published card. What the tool CAN derive -- the hardware, context, the tt CLI and Docker
 # prerequisites, the quickstart commands, the tool-calling note, provenance -- is never
-# written here. Describe the model as it is now: no history of the port.
+# written here. Facts and measurements only: no bring-up history, no opinion on the result.
 card:
   # The model this package serves and who made it; rendered as a block quote under the
   # title. (Not the note a verified copy in the Tenstorrent org gets; that one is added

@@ -6,8 +6,14 @@ leave out a field rather than writing filler, and never repeat what the generato
 `performance` and `limitations` are required for the package to be listed in the
 community catalog, and render as "Not provided by the package author." when missing.
 
-Describe the model as it is now. No history of the port, and no implementation detail
-unless a user needs it to run the model or trust its output.
+Describe the model as it is now, in facts and measurements:
+
+- No bring-up history or discoveries: how the port was made, what was tried or worked
+  around, earlier versions. A user does not need them, and they can leak internal
+  information. State a limitation as current behaviour, not as how it was found.
+- No opinion or analysis of the result: no judging the port, explaining away a gap or
+  guessing at causes. The evals, benchmarks and limitations speak for themselves.
+- No implementation detail unless a user needs it to run the model or trust its output.
 
 ```yaml
 card:
