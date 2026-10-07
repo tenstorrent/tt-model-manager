@@ -6,68 +6,68 @@ writing filler. `performance` and `limitations` are required for the package to 
 listed in the community catalog, and render as "Not provided by the package author."
 when missing.
 
+Describe the model as it is now. No history of the port, and no implementation detail
+unless a user needs it to run the model or trust its output.
+
 ```yaml
 card:
-  # One dense paragraph, shown right under the title: what the model is, what it does,
-  # which hardware it runs on, and how mature the port is.
+  # One dense paragraph, shown right under the title: what the model is (size and
+  # architecture), what it does, and which hardware it runs on.
   description: >-
-    Qwen3-32B served with vLLM on a single p150x4 (four Blackhole chips).
-    Experimental community bring-up: text only, tested at up to 32 concurrent users.
+    Qwen3-32B, a 32B-parameter dense decoder-only transformer, served with vLLM on a
+    single p150x4 (four Blackhole chips). Text only, tested at up to 32 concurrent users.
 
-  # At a glance
-  architecture: 32B-parameter dense decoder-only transformer
-  status: Experimental community bring-up   # your port's maturity; never "verified"
+  # The model this package is derived from, rendered as a block quote.
+  attribution: >-
+    This package serves Qwen/Qwen3-32B by the Qwen team, unmodified, on Tenstorrent
+    hardware.
 
-  # Intended use. The out-of-scope half is the one most often left out, and the one that
-  # costs: a text-only port of a multimodal checkpoint looks like the checkpoint until
-  # someone sends an image.
+  # Anything needed outside this package to serve it.
+  prerequisites: |
+    - tt-cli (`pip install tenstorrent`)
+    - Docker
+
+  # What the model is for.
   intended_use: Chat and tool calling for English and Chinese text.
-  out_of_scope_use: Image or audio input; the vision tower is not ported.
 
-  # Added after the generated `tt` / `tt-model` commands. Only what they do not cover:
-  # first-boot time, the log line that means the server is ready, a required env var.
+  # Added after the generated `tt model pull` / `tt serve` commands. Only what they do
+  # not cover: first-boot time, the log line that means the server is ready, a required
+  # env var, a demo URL or test script. For a server that does not speak the OpenAI API,
+  # also the endpoint, request schema and an example response.
   quickstart: |
     The first boot compiles kernels and takes about 10 minutes; later boots take
     about 1. The server is ready when the log shows `Application startup complete`.
 
-  # Added after the generated API description. For a chat model: tool-calling and
-  # sampling notes. For anything else: the real endpoint, request schema and an example
-  # response.
-  usage: |
-    Tool calling works with `"tool_choice": "auto"`. Default sampling is temperature 0.6.
-
-  # Required to list. Accuracy against the reference (PCC, exact match, or the
-  # modality's equivalent) and throughput/latency, plus one sentence on how it was
-  # measured: hardware, concurrency, prompt set.
+  # Required to list. Accuracy against the reference model, then one row per serving
+  # profile. For an LLM every row carries ISL, OSL, concurrency, N (number of runs),
+  # TTFT, prefill and decode tok/s/user, and E2EL. Other modalities: report the metrics
+  # the original Hugging Face card reports, measured the same way, side by side.
   performance: |
-    | metric | value |
-    | --- | --- |
-    | Top-1 agreement with the HF reference | 98.7% |
-    | Decode, batch 1 | 21 tok/s/user |
-    | Decode, batch 32 | 12 tok/s/user |
+    Top-1 token agreement with the HF reference: 98.7%.
 
-    Measured on p150x4 with 128-token prompts and 512-token completions.
+    | profile | ISL | OSL | concurrency | N | TTFT (ms) | prefill tok/s/u | decode tok/s/u | E2EL (s) |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | default | 128 | 512 | 1 | 5 | 180 | 710 | 21 | 24.6 |
+    | default | 128 | 512 | 32 | 5 | 950 | 135 | 12 | 43.6 |
 
-  # Required to list. What is not implemented, known defects and their status, which
-  # hardware was actually validated, and anything declared but untested.
+    Measured on p150x4 with the tt-inference-server benchmark prompt set.
+
+  # Required to list. Three things: what is not implemented or not tested (including
+  # hardware), what the model should not be used for, and failure modes or precision
+  # differences from the reference a user would notice.
   limitations: |
-    - No image input.
+    - No image or audio input; the vision tower is not ported.
     - Contexts above 32k tokens are declared but not validated.
+    - Occasional repetition loops at temperature 0; use the default sampling settings.
 
-  # Recommended. Failure modes with user-facing consequences, uses this model should not
-  # be trusted for, and any precision difference from the reference that could quietly
-  # change results.
-  risks: |
-    Occasional repetition loops at temperature 0; use the default sampling settings.
-
-  # When the weights carry any restriction beyond the port code's own license: the
-  # weights, any vendored upstream code, and the port code, each with its commercial
-  # and redistribution terms stated plainly. Skip it when the weights are unrestricted.
+  # Optional. Only when the weights carry a restriction beyond the port code's own
+  # license: the weights, any vendored upstream code, and the port code, each with its
+  # commercial and redistribution terms.
   licensing: |
     Weights: Apache-2.0. Port and serving code: Apache-2.0.
 
-  # Sibling packages for the same base model on other hardware or precision, and
-  # whether one replaces another.
+  # Optional. Sibling packages for the same base model on other hardware or precision,
+  # and whether one replaces another.
   related: |
     - [someone/qwen3-32b-p300x2](https://huggingface.co/someone/qwen3-32b-p300x2): same model on p300x2.
 
@@ -79,14 +79,14 @@ card:
     - Qwen/Qwen3-32B
 ```
 
-All values above are illustrations, not real measurements.
+All values above are illustrations, not real measurements. Performance guidance for
+image and video generation is still to be written.
 
 ## What the generator adds on its own
 
 - **Tags**: hardware, board, catalog and runtime tags. Never add a tag claiming the model
   is verified; verified means Tenstorrent has copied it into its own Hugging Face org.
-- **Quickstart commands**: `tt model pull` / `tt serve`, then the `tt-model`-only
-  equivalent, so the card never requires tt-cli.
+- **Quickstart commands**: `tt model pull <repo>` and `tt serve <repo>`.
 - **Serve profiles** table, when there is more than one profile.
 - **Using it**: whether the server speaks the OpenAI API, and how to call it.
 - **Feedback**: the repo's Discussions page, `tt report issue` for problems with the `tt`
@@ -95,5 +95,6 @@ All values above are illustrations, not real measurements.
 
 ## Not supported yet
 
-- **Changelog**: there is no field, and the card is rendered fresh on every build.
+- **Changelog**: deferred until users ask for one. The card is rendered fresh on every
+  build.
 - **A machine-readable performance summary** in the frontmatter: not emitted.

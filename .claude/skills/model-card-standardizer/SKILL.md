@@ -19,30 +19,35 @@ the code wins.
 | --- | --- |
 | Frontmatter `tags` | the generator (hardware, board, catalog and runtime tags) |
 | Frontmatter `license`, `pipeline_tag`, `base_model` | `card.license`, `card.pipeline_tag`, `card.base_model` |
-| Lead paragraph | `card.description` |
-| At a glance | `card.architecture`, `card.status`, the license; hardware and context come from the serve profiles |
-| Intended use | `card.intended_use`, `card.out_of_scope_use` |
-| Quickstart | the generator (`tt` and `tt-model` commands), then `card.quickstart` |
+| Lead paragraph | `card.description`, including size and architecture |
+| Attribution | `card.attribution` |
+| Prerequisites | `card.prerequisites` |
+| Intended use | `card.intended_use` |
+| Quickstart | the generator (`tt model pull`, `tt serve`), then `card.quickstart` |
 | Serve profiles | the generator, when there is more than one profile |
-| Using it | the generator (what the API is), then `card.usage` |
+| Using it | the generator (what the API is) |
 | Expected performance | `card.performance` — required to list in the catalog |
-| Limitations | `card.limitations` — required to list in the catalog |
-| Risks and safety considerations | `card.risks` |
-| Licensing | `card.licensing` |
-| Related packages | `card.related` |
+| Limitations | `card.limitations`, including out-of-scope uses and risks — required to list in the catalog |
+| Licensing | `card.licensing` (optional) |
+| Related packages | `card.related` (optional) |
 | Feedback, Provenance | the generator |
 
 What a good value looks like for each field is in `reference/template.md`.
 
-Two things a card cannot carry today, because the generator has no field for them: a
-changelog (the card is rendered fresh on every build) and a machine-readable
-performance summary in the frontmatter. Report these as generator gaps, not author
-fixes.
+This field set is the team's agreed standard, and the generator does not match it yet.
+Report each of these as a generator gap, not an author fix:
+
+- `attribution` and `prerequisites` are rejected by `CardSettings`.
+- `architecture`, `status`, `out_of_scope_use`, `usage` and `risks` are still accepted
+  and rendered, as At a glance, Out-of-scope use, Using it notes and Risks.
+- The Quickstart still prints the `tt-model`-only commands after the `tt` ones.
+- `performance` is free text, so its required columns are not checked.
+- There is no changelog, and no machine-readable performance summary in the frontmatter.
 
 Verified status is never part of a card. A model is verified when Tenstorrent copies
 it into the `Tenstorrent` Hugging Face org; the org is the signal. Anyone can edit their
-own card, so a card that calls itself verified (in `status`, a tag, or prose) is wrong
-and should be flagged.
+own card, so a card that calls itself verified (in a tag or prose) is wrong and should
+be flagged.
 
 ## Step 1 — Find what you are checking
 
@@ -60,9 +65,14 @@ For each row of the table, classify it as:
 - **Author fix**: missing or weak. Name the `card:` field it belongs in.
 - **Generator gap**: the generator cannot express it. Cite the file and line you checked.
 
-A missing section is almost always an author fix now: every section above has its own
-field. Pay most attention to `performance` and `limitations` (the catalog will not list
-a package without them) and to `out_of_scope_use`, the one most often left out.
+Pay most attention to `performance` and `limitations`: the catalog will not list a
+package without them. A `limitations` that does not say what the model should not be
+used for is weak, and is the gap most often left.
+
+A `card:` block that still uses `architecture`, `status`, `out_of_scope_use`, `usage` or
+`risks` is an author fix: move architecture into `description`, out-of-scope uses and
+risks into `limitations`, and non-OpenAI endpoint details into `quickstart`. Drop
+`status`; the Tenstorrent org is the only maturity signal.
 
 ## Step 3 — Interview for the author fixes
 
@@ -70,7 +80,12 @@ Ask for everything missing in one batch, in the style of the `tt-model-yaml` ski
 give your best guess and where it came from, so the author confirms rather than writes
 from scratch. Then draft a `card:` block with each answer in its own field. Use
 `card.quickstart` only for what the generated commands do not cover, such as first-boot
-time or the log line that means the server is ready.
+time, the log line that means the server is ready, or a demo URL. Describe the model as it
+is now: no history of the port, and no implementation detail a user does not need.
+
+Until the generator accepts `attribution` and `prerequisites`, a `card:` block carrying
+them fails to build. Draft them, but write attribution into the end of `description` and
+prerequisites into the start of `quickstart`, and list both as generator gaps.
 
 ## Step 4 — Offer to write it
 
