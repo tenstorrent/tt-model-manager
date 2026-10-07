@@ -228,12 +228,15 @@ card:
     Tool calling works best with `"tool_choice": "auto"`. Default sampling is temperature
     0.6, top-p 0.95; greedy decoding tends to loop on long reasoning chains.
 
-  # Required for a catalog listing -- see docs/publishing.md. Performance: accuracy
-  # against the reference model, then for an LLM a table with one row per serving profile
-  # and the columns below (package warns when any is missing), then one sentence on how
-  # it was measured.
+  # Required for a catalog listing -- see docs/publishing.md. Performance: an eval table
+  # against the reference model, then for an LLM a speed table with one row per serving
+  # profile and the columns below (package warns when any is missing), then one sentence
+  # on how it was measured.
   performance: |
-    Top-1 token agreement with the reference model: 98.7% over 32 prompts.
+    | eval | this package | reference | prompts |
+    | --- | --- | --- | --- |
+    | Top-1 token agreement | 98.7% | — | 32 |
+    | GSM8K (exact match, 8-shot) | 78.1 | 79.0 | 1,319 |
 
     | profile | ISL | OSL | concurrency | N | TTFT (ms) | prefill tok/s/u | decode tok/s/u | E2EL (s) |
     | --- | --- | --- | --- | --- | --- | --- | --- | --- |

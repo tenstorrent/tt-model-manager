@@ -31,7 +31,7 @@ The rendered card, top to bottom:
 | Quickstart | the generator (`tt serve <repo>`, the boot note, the tt-model-only line), then `card.quickstart` |
 | Serving profiles | the generator, when there is more than one profile |
 | Capabilities | the generator (what the API is, tool calling, reasoning), then `card.usage` |
-| Expected performance | `card.performance` — required to list in the catalog |
+| Expected performance | `card.performance`: an eval table against the reference model, then (for an LLM) the speed table — required to list in the catalog |
 | Limitations | `card.limitations` — required to list in the catalog |
 | Licensing | `card.licensing` (optional) |
 | Related packages | `card.related` (optional) |

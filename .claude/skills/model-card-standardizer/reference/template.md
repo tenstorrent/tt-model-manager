@@ -44,12 +44,16 @@ card:
   usage: |
     Tool calling works with `"tool_choice": "auto"`. Default sampling is temperature 0.6.
 
-  # Required to list. Accuracy against the reference model, then for an LLM one row per
-  # serving profile with these columns (package warns when one is missing), then one
-  # sentence on how it was measured: hardware, prompt set, tool. N is the number of
-  # benchmark runs behind each row.
+  # Required to list. First an eval table: each accuracy or eval result against the
+  # reference model, with the reference's own figure beside it and the prompt set. Then
+  # for an LLM a speed table, one row per serving profile, with these columns (package
+  # warns when one is missing), then one sentence on how it was measured: hardware,
+  # prompt set, tool. N is the number of benchmark runs behind each row.
   performance: |
-    Top-1 token agreement with the HF reference: 98.7% over 32 prompts.
+    | eval | this package | reference | prompts |
+    | --- | --- | --- | --- |
+    | Top-1 token agreement with the HF reference | 98.7% | — | 32 |
+    | GSM8K (exact match, 8-shot) | 78.1 | 79.0 | 1,319 |
 
     | profile | ISL | OSL | concurrency | N | TTFT (ms) | prefill tok/s/u | decode tok/s/u | E2EL (s) |
     | --- | --- | --- | --- | --- | --- | --- | --- | --- |
