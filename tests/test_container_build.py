@@ -697,6 +697,27 @@ def test_retired_fields_fold_through_the_real_loader(tmp_path):
     assert len(card_retired_notes(m.card)) == 5
 
 
+@pytest.mark.parametrize("card", [
+    {"risks": ["a", "b"]},
+    {"out_of_scope_use": {"a": 1}},
+    {"architecture": "x", "description": 5},
+])
+def test_a_retired_field_that_is_not_text_is_a_field_error(card):
+    from pydantic import ValidationError
+    from tt_kernel.container_manifest import CardSettings
+
+    with pytest.raises(ValidationError, match="must be text"):
+        CardSettings.model_validate(card)
+
+
+def test_an_empty_retired_field_still_gets_a_note():
+    from tt_kernel.container_manifest import CardSettings, card_retired_notes
+
+    card = CardSettings.model_validate({"status": None, "risks": "  "})
+    assert card_retired_notes(card) == ["card.status is retired and was dropped",
+                                        "card.risks is retired and was dropped"]
+
+
 def test_no_model_ci_row_until_that_gate_exists():
     """DEVSTACK-430 is not built. A "not yet run" row would be a claim frozen at build
     time that no consumer could refresh."""

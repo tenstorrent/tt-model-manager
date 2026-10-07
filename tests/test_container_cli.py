@@ -3038,6 +3038,28 @@ def test_package_emits_the_card_warning_at_its_call_site(
     assert ("the model card has no card." in printed) is warned, printed
 
 
+def test_package_warns_once_per_retired_card_field(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    card = {**_COMPLETE, "risks": "Loops above 25k tokens."}
+    out = _staged(tmp_path, card=card)
+    m = ContainerManifest.model_validate({**json.loads(json.dumps(BASE)), "card": card})
+    staged = SimpleNamespace(
+        manifest=m, ctx=tmp_path, out=out, image="x:y", built={},
+        metal=SimpleNamespace(sha="a" * 40, branch="main", dirty=False, mode="local",
+                              pushed=True),
+        code_tree=["models/common"], code_skipped=[],
+    )
+    monkeypatch.setattr(container_cli, "stage", lambda *a, **k: staged)
+    monkeypatch.setattr(container_cli, "run_build", lambda *a, **k: None)
+    monkeypatch.setattr(container_cli, "finalize", lambda *a, **k: out)
+
+    container_cli.package_container(str(tmp_path / "tt-model.yaml"))
+    printed = capsys.readouterr().out
+    assert printed.count("is retired") == 1
+    assert "card.risks is retired; its text was moved into card.limitations" in printed
+
+
 def _fake_snapshot(tmp_path, sha="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"):
     snap = tmp_path / "hf" / "models--org--w" / "snapshots" / sha
     snap.mkdir(parents=True)

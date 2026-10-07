@@ -303,18 +303,24 @@ class CardSettings(CardSpec):
             return handler(data)
         data, notes = dict(data), []
         for key, target in RETIRED_CARD_FIELDS.items():
-            text = str(data.pop(key, None) or "").strip()
-            if not text:
+            if key not in data:
                 continue
-            if target is None:
+            value = data.pop(key)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"card.{key} must be text")
+            text = (value or "").strip()
+            if target is None or not text:
                 notes.append(f"card.{key} is retired and was dropped")
                 continue
+            current = data.get(target)
+            if current is not None and not isinstance(current, str):
+                raise ValueError(f"card.{target} must be text")
             if key == "architecture":
                 text = f"Architecture: {text.rstrip('.')}."
             elif key == "out_of_scope_use":
                 text = f"Out of scope: {text}"
             sep = " " if key == "architecture" else "\n\n"
-            current = (data.get(target) or "").strip()
+            current = (current or "").strip()
             data[target] = f"{current}{sep}{text}" if current else text
             notes.append(f"card.{key} is retired; its text was moved into card.{target}")
         card = handler(data)
