@@ -751,6 +751,46 @@ def test_an_empty_retired_field_still_gets_a_note():
                                         "card.risks is retired and was dropped"]
 
 
+# -- the LLM performance-table check ----------------------------------------------------
+
+_PERF_TABLE = """Top-1 agreement with the reference: 98.7%.
+
+| profile | ISL | OSL | concurrency | N | TTFT (ms) | prefill tok/s/u | decode tok/s/u | E2EL (s) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| default | 128 | 128 | 1 | 1 | 11 | 11,402 | 189 | 0.69 |
+"""
+
+
+def _perf_gaps(performance, kind="vllm-plugin"):
+    from tt_kernel.container_manifest import CardSettings, card_performance_gaps
+
+    return card_performance_gaps(CardSettings.model_validate({"performance": performance}), kind)
+
+
+def test_a_full_performance_table_has_no_gaps():
+    assert _perf_gaps(_PERF_TABLE) == []
+
+
+def test_a_performance_table_missing_a_column_names_it():
+    assert _perf_gaps(_PERF_TABLE.replace(" E2EL (s) |", "").replace(" 0.69 |", "")) == ["e2el"]
+
+
+def test_prose_performance_lacks_every_column():
+    from tt_kernel.container_manifest import PERFORMANCE_COLUMNS
+
+    assert _perf_gaps("41 ms/token at batch 1.") == list(PERFORMANCE_COLUMNS)
+
+
+def test_the_best_of_several_tables_is_judged():
+    accuracy = "| metric | value |\n| --- | --- |\n| top-1 | 98.7% |\n\n"
+    assert _perf_gaps(accuracy + _PERF_TABLE) == []
+
+
+def test_the_performance_check_skips_non_llm_kinds_and_empty_text():
+    assert _perf_gaps("2.1 s per image at 1024x1024.", kind="tt-dit-server") == []
+    assert _perf_gaps("") == []
+
+
 def test_no_model_ci_row_until_that_gate_exists():
     """DEVSTACK-430 is not built. A "not yet run" row would be a claim frozen at build
     time that no consumer could refresh."""

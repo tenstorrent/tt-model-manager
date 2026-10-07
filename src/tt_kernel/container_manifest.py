@@ -407,6 +407,40 @@ def card_retired_notes(card: Optional[CardSpec]) -> List[str]:
     return list(getattr(card, "_retired_notes", None) or [])
 
 
+#: Columns an LLM card's performance table carries, one row per serving profile.
+PERFORMANCE_COLUMNS = ("profile", "isl", "osl", "concurrency", "n", "ttft", "prefill",
+                       "decode", "e2el")
+_LLM_KINDS = ("vllm-plugin", "vllm-fork")
+
+
+def _header_words(row: str) -> List[List[str]]:
+    """Each cell of a Markdown table row as lowercase words, units and rate suffixes dropped."""
+    cells = []
+    for cell in row.strip().strip("|").split("|"):
+        cell = re.sub(r"\([^)]*\)", " ", cell.lower())
+        cell = re.sub(r"tok/s(/u)?", " ", cell)
+        cells.append(cell.split())
+    return cells
+
+
+def card_performance_gaps(card: Optional[CardSpec], kind: str) -> List[str]:
+    """Required columns an LLM card's best performance table lacks (all, if it has none).
+
+    vLLM kinds only; an empty ``performance`` is :func:`card_publish_gaps`' job."""
+    if kind not in _LLM_KINDS or card is None or not (card.performance or "").strip():
+        return []
+    rows = [l for l in card.performance.splitlines() if l.strip().startswith("|")]
+    headers = [r for r, nxt in zip(rows, rows[1:]) if re.fullmatch(r"[|\s:-]+", nxt.strip())]
+    best = list(PERFORMANCE_COLUMNS)
+    for header in headers:
+        cells = _header_words(header)
+        missing = [c for c in PERFORMANCE_COLUMNS
+                   if not any((words == ["n"]) if c == "n" else c in words for words in cells)]
+        if len(missing) < len(best):
+            best = missing
+    return best
+
+
 def card_publish_gaps(card: Optional[CardSpec]) -> List[str]:
     """Which required card sections are missing. Pure, so every call site agrees.
 

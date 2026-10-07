@@ -3056,6 +3056,45 @@ def test_package_warns_once_per_retired_card_field(tmp_path, monkeypatch, capsys
     assert "card.risks is retired; its text was moved into card.limitations" in printed
 
 
+def test_the_performance_warning_wording():
+    from tt_kernel.container_cli import card_performance_warning
+    from tt_kernel.container_manifest import PERFORMANCE_COLUMNS
+
+    assert card_performance_warning([]) is None
+    assert card_performance_warning(["e2el"]) == "card.performance's table has no E2EL column"
+    assert (card_performance_warning(["concurrency", "decode"])
+            == "card.performance's table has no concurrency, decode columns")
+    assert "has no table" in card_performance_warning(list(PERFORMANCE_COLUMNS))
+
+
+@pytest.mark.parametrize(("performance", "warned"), [
+    ("41 ms/token", True),
+    ("| profile | ISL | OSL | concurrency | N | TTFT | prefill | decode | E2EL |\n"
+     "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n", False),
+])
+def test_package_warns_about_an_incomplete_performance_table(
+    tmp_path, monkeypatch, capsys, performance, warned
+):
+    from types import SimpleNamespace
+
+    card = {**_COMPLETE, "performance": performance}
+    out = _staged(tmp_path, card=card)
+    m = ContainerManifest.model_validate({**json.loads(json.dumps(BASE)), "card": card})
+    staged = SimpleNamespace(
+        manifest=m, ctx=tmp_path, out=out, image="x:y", built={},
+        metal=SimpleNamespace(sha="a" * 40, branch="main", dirty=False, mode="local",
+                              pushed=True),
+        code_tree=["models/common"], code_skipped=[],
+    )
+    monkeypatch.setattr(container_cli, "stage", lambda *a, **k: staged)
+    monkeypatch.setattr(container_cli, "run_build", lambda *a, **k: None)
+    monkeypatch.setattr(container_cli, "finalize", lambda *a, **k: out)
+
+    container_cli.package_container(str(tmp_path / "tt-model.yaml"))
+    printed = " ".join(capsys.readouterr().out.split())
+    assert ("card.performance has no table" in printed) is warned, printed
+
+
 def _fake_snapshot(tmp_path, sha="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"):
     snap = tmp_path / "hf" / "models--org--w" / "snapshots" / sha
     snap.mkdir(parents=True)

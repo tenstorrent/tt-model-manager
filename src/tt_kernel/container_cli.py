@@ -28,6 +28,8 @@ from .boot_progress import BootTracker, diagnose_boot, summarize
 from .build import BuildError, build_log_path, finalize, run_build, stage
 from .container_manifest import (
     ContainerManifestError,
+    PERFORMANCE_COLUMNS,
+    card_performance_gaps,
     card_publish_gaps,
     card_retired_notes,
     hardware_chip_count,
@@ -86,6 +88,18 @@ def card_gap_warning(gaps: List[str]) -> Optional[str]:
     )
 
 
+def card_performance_warning(gaps: List[str]) -> Optional[str]:
+    """The one-line warning `package` prints when an LLM performance table is incomplete."""
+    if not gaps:
+        return None
+    names = [g.upper() if g in ("isl", "osl", "n", "ttft", "e2el") else g for g in gaps]
+    if len(gaps) == len(PERFORMANCE_COLUMNS):
+        return ("card.performance has no table with the required columns ("
+                + ", ".join(names) + "), one row per serving profile")
+    return ("card.performance's table has no " + ", ".join(names)
+            + " column" + ("s" if len(gaps) > 1 else ""))
+
+
 def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> Path:
     """``tt-model package --container <manifest.yaml>``.
 
@@ -132,6 +146,10 @@ def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> 
     # editing the YAML and running all of it again. A warning only — a private or
     # experimental build has every right to skip them.
     warning = card_gap_warning(card_publish_gaps(staged.manifest.card))
+    if warning:
+        console.note(warning, marker="!", style="warning")
+    warning = card_performance_warning(
+        card_performance_gaps(staged.manifest.card, staged.manifest.kind))
     if warning:
         console.note(warning, marker="!", style="warning")
     for note in card_retired_notes(staged.manifest.card):
