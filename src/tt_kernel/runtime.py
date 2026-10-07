@@ -85,14 +85,16 @@ def install_self_contained(bundle_dir: Path, venv_dir: Path) -> Path:
 
 
 # ------------------------------------------------------------------ verify (tt-model curl)
-# The consumer's last step is "did it actually answer?". Everything below builds that one
-# OpenAI chat request so the user never has to retype the model id, the endpoint or the JSON
+# The consumer's last step is "did it actually answer?". Everything below (with probe.py) builds
+# that one request so the user never has to retype the model id, the endpoint or the JSON
 # body. Stdlib only — tt-model takes no HTTP dependency.
 # Tracks manifest.DEFAULT_PORT, where `tt-model serve` puts a server when nothing names a
 # port. If serve had to walk past a busy 20000 (it says so, and prints the endpoint),
 # point curl there with --base-url or TT_MODEL_BASE_URL.
 DEFAULT_BASE_URL = "http://localhost:20000"
 ENV_BASE_URL = "TT_MODEL_BASE_URL"
+# Optional: only a server started with authentication on checks the bearer token.
+ENV_API_KEY = "TT_MODEL_API_KEY"
 DEFAULT_PROMPT = "Say hello in one sentence."
 DEFAULT_MAX_TOKENS = 64
 
@@ -181,35 +183,25 @@ def parse_extra_params(extra: List[str]) -> dict:
     return params
 
 
-def chat_payload(model: str, prompt: str, *, params: Optional[dict] = None) -> dict:
-    """The ``/v1/chat/completions`` body for a one-shot prompt.
-
-    ``max_tokens`` is a default rather than a fixed field, so ``--max-tokens 200`` (or any
-    other sampling param) simply overrides it.
-    """
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": DEFAULT_MAX_TOKENS,
-    }
-    body.update(params or {})
-    return body
-
-
-def curl_argv(base_url: str, payload: dict) -> List[str]:
-    """The real ``curl`` argv for a chat request — what the command runs verbatim.
+def curl_argv(base_url: str, payload: Optional[dict] = None, *,
+              path: str = "/v1/chat/completions", api_key: Optional[str] = None,
+              max_time: Optional[int] = None) -> List[str]:
+    """The real ``curl`` argv for a request — what the command runs verbatim.
 
     ``-sS``: no progress meter, but transport errors still surface (bare ``-s`` would make a
-    refused connection look like an empty reply).
+    refused connection look like an empty reply). No ``payload`` makes it a GET.
     """
     import json as _json
 
-    return [
-        "curl", "-sS", base_url.rstrip("/") + "/v1/chat/completions",
+    argv = [
+        "curl", "-sS", base_url.rstrip("/") + path,
         *(["--noproxy", "*"] if _is_loopback(base_url) else []),
-        "-H", "Content-Type: application/json",
-        "-d", _json.dumps(payload),
+        *(["--max-time", str(max_time)] if max_time else []),
+        *(["-H", f"Authorization: Bearer {api_key}"] if api_key else []),
     ]
+    if payload is not None:
+        argv += ["-H", "Content-Type: application/json", "-d", _json.dumps(payload)]
+    return argv
 
 
 def render_curl(argv: List[str]) -> str:
@@ -236,12 +228,12 @@ __all__ = [
     "install_self_contained",
     "DEFAULT_BASE_URL",
     "ENV_BASE_URL",
+    "ENV_API_KEY",
     "DEFAULT_PROMPT",
     "DEFAULT_MAX_TOKENS",
     "list_models",
     "parse_param",
     "parse_extra_params",
-    "chat_payload",
     "curl_argv",
     "render_curl",
 ]
