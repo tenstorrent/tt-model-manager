@@ -385,9 +385,9 @@ def _card(**over):
 
 def test_a_single_profile_card_states_the_hardware_up_front_with_no_table():
     card = _card()
-    assert "Runs on **p150x4**" in card
+    assert "Runs on Tenstorrent **p150x4**" in card
     assert "--profile" not in card
-    assert "## Serve profiles" not in card
+    assert "## Serving profiles" not in card
 
 
 def test_a_multi_profile_card_lists_every_profile_and_marks_the_default():
@@ -399,8 +399,29 @@ def test_a_multi_profile_card_lists_every_profile_and_marks_the_default():
     ]
     card = _card(serve_profiles=profiles, default_profile="p150x4")
     assert "`p150x2`" in card and "`p150x4` *(default)*" in card
-    assert "--profile" in card
-    assert "Runs on **p150x2** or **p150x4**" in card
+    assert "## Serving profiles\n\nSelect a different serving profile using `--profile`." in card
+    assert "Runs on Tenstorrent **p150x2** or **p150x4**" in card
+    assert "| description |" not in card          # no profile described one
+
+
+def test_a_described_profile_gets_a_description_column():
+    profiles = [
+        {"name": "fast", "hardware": "p150", "mesh_device": "P150",
+         "description": "Lowest latency | one user"},
+        {"name": "wide", "hardware": "p150x4", "mesh_device": "P150x4"},
+    ]
+    card = _card(serve_profiles=profiles, default_profile="fast")
+    assert "| profile | hardware | mesh | description |" in card
+    assert "| `fast` *(default)* | p150 | P150 | Lowest latency \\| one user |" in card
+    assert "| `wide` | p150x4 | P150x4 |  |" in card
+
+
+def test_the_title_names_the_boards():
+    assert "\n# my-model on Tenstorrent p150x4\n" in _card()
+    profiles = [{"name": "a", "hardware": "p150", "mesh_device": "P150"},
+                {"name": "b", "hardware": "p150x4", "mesh_device": "P150x4"}]
+    card = _card(serve_profiles=profiles, default_profile="a")
+    assert "\n# my-model on Tenstorrent p150 and p150x4\n" in card
 
 
 def test_the_card_names_the_tool_and_schema_and_links_the_repo():
@@ -415,53 +436,59 @@ def test_the_card_leads_with_the_authors_description():
     assert card.index("Intended for agentic coding.") < card.index("## Quickstart")
 
 
-def test_attribution_is_a_block_quote_under_the_description():
+def test_attribution_is_a_block_quote_under_the_title_before_the_description():
     card = _card(card={"description": "A small model.",
                        "attribution": "Serves org/Upstream-7B\nby the Upstream team."})
     assert "> Serves org/Upstream-7B\n> by the Upstream team." in card
-    assert card.index("A small model.") < card.index("> Serves") < card.index("Runs on")
+    assert card.index("# my-model") < card.index("> Serves") < card.index("A small model.")
 
 
-def test_prerequisites_come_before_intended_use_and_the_quickstart():
-    card = _card(card={"prerequisites": "Docker and one p150.",
-                       "intended_use": "Chat."})
-    assert "## Prerequisites\n\nDocker and one p150." in card
-    assert card.index("## Prerequisites") < card.index("## Intended use")
-    assert card.index("## Intended use") < card.index("## Quickstart")
+def test_intended_use_comes_before_prerequisites_and_the_quickstart():
+    card = _card(card={"intended_use": "Chat."})
+    assert card.index("## Intended use") < card.index("## Prerequisites")
+    assert card.index("## Prerequisites") < card.index("## Quickstart")
 
 
-def test_attribution_and_prerequisites_are_absent_when_unset():
-    card = _card(card={"description": "x"})
-    assert "## Prerequisites" not in card
-    assert "\n> " not in card
+def test_prerequisites_are_derived_and_the_authors_extras_follow():
+    bare = _card()
+    section = bare[bare.index("## Prerequisites"):bare.index("## Quickstart")]
+    assert "[Tenstorrent CLI](https://github.com/tenstorrent/tt-cli)" in section
+    assert "uv tool install tenstorrent" in section
+    assert "or use tt-model alone" in section     # invariant 1: tt-cli is optional
+    assert "- Docker" in section
+    assert "- Tenstorrent hardware: **p150x4**" in section
+
+    card = _card(card={"prerequisites": "- 64 GB of host RAM\n\nA PCIe Gen5 slot"})
+    section = card[card.index("## Prerequisites"):card.index("## Quickstart")]
+    # one list: the author's lines follow the derived bullets with no blank line between
+    assert "**p150x4**\n- 64 GB of host RAM\n- A PCIe Gen5 slot\n" in section
+
+    # numbered items and indented continuation lines are kept as written
+    card = _card(card={"prerequisites": "1. A PCIe Gen5 slot\n   in an x16 lane"})
+    assert "**p150x4**\n1. A PCIe Gen5 slot\n   in an x16 lane\n" in card
 
 
-def test_the_quickstart_sets_expectations():
+def test_no_attribution_quote_when_unset():
+    assert "\n> " not in _card(card={"description": "x"})
+
+
+def test_the_quickstart_is_tt_serve_with_a_tt_model_only_line():
+    """`tt serve` installs and serves, so the fence is that one command. The tt-model line
+    stays because AGENTS.md invariant 1 says the card must never need tt-cli."""
     card = _card()
-    assert "tt model pull you/my-model" in card
-    assert "tt serve you/my-model" in card
-    assert "several minutes" in card
-    assert "Application startup complete" in card
-    assert "`tt model pull` downloads" in card
-    assert "`tt serve` starts" in card
-
-
-def test_the_quickstart_leads_with_tt_and_keeps_a_tt_model_only_line():
-    """`tt` is the consumer path, so it gets the fence. The tt-model line stays because
-    AGENTS.md invariant 1 says the card must never need tt-cli. Only that line carries
-    `--with-weights`: `tt model pull` asks tt-model for the weights itself."""
-    card = _card()
-    assert "uv tool install tenstorrent" in card
-    assert card.count("```bash") == 1
-    assert ("Without tt-cli: `tt-model pull you/my-model --with-weights`, then "
-            "`tt-model serve you/my-model`.") in card
-    assert card.index("tt serve you/my-model") < card.index("Without tt-cli")
-    assert "tt model pull you/my-model --with-weights" not in card
+    quick = card[card.index("## Quickstart"):card.index("## Capabilities")]
+    assert "```bash\ntt serve you/my-model\n```" in quick
+    assert quick.count("```bash") == 1
+    assert "Without tt-cli: `tt-model serve you/my-model`." in quick
+    assert "tt model pull" not in quick
+    assert "`tt serve` downloads the Docker image" in quick
+    assert "several minutes" in quick
+    assert "Application startup complete" in quick
 
 
 def test_a_vllm_card_names_the_openai_endpoint_and_the_weights_id():
     card = _card()
-    assert "## Using it" in card
+    assert "## Capabilities" in card
     assert "http://127.0.0.1:20000/v1" in card
     # Flow-neutral: the Quickstart offers a tt-model-only path, so a reader may never
     # have run `tt serve` at all.
@@ -471,6 +498,13 @@ def test_a_vllm_card_names_the_openai_endpoint_and_the_weights_id():
     assert '"model": "org/Weights-7B"' in card
 
 
+def test_usage_is_the_authors_notes_under_capabilities():
+    card = _card(card={"usage": "Send `tools` for function calling."})
+    caps = card[card.index("## Capabilities"):card.index("## Expected performance")]
+    assert "Send `tools` for function calling." in caps
+    assert caps.index("http://127.0.0.1") < caps.index("Send `tools`")
+
+
 def test_a_fork_card_names_the_openai_endpoint_and_its_own_ready_line():
     """`vllm-fork` has a different launcher, ready line and serve path; until now no card
     test exercised it, which is how a reworded SERVER_DESC could break every fork card
@@ -478,7 +512,7 @@ def test_a_fork_card_names_the_openai_endpoint_and_its_own_ready_line():
     from test_container_manifest import FORK
 
     card = _card(**FORK)
-    assert "## Using it" in card
+    assert "## Capabilities" in card
     assert "http://127.0.0.1:20000/v1" in card
     assert '"model": "org/Weights-7B"' in card
     assert "Server ready after" in card
@@ -563,9 +597,10 @@ def test_every_card_tells_readers_how_to_reach_the_author_and_the_tooling():
 _FULL_CARD = {
     "description": "A 7B dense decoder-only instruct model for chat and code.",
     "attribution": "Serves org/Upstream-7B by the Upstream team, unmodified.",
-    "prerequisites": "tt-cli, Docker and a p150x4.",
+    "prerequisites": "- 64 GB of host RAM",
     "intended_use": "General chat and code assistance.",
-    "quickstart": "First boot takes about 10 minutes.",
+    "quickstart": "Run `scripts/demo.py` for a chat demo.",
+    "usage": "Send `tools` for function calling.",
     "performance": "78.1% GSM8K; 41 ms/token at batch 1 on p150x4.",
     "limitations": "No image input; only p150x4 was validated.",
     "licensing": "Weights under Apache-2.0; port code Apache-2.0.",
@@ -583,12 +618,15 @@ def test_the_authored_sections_render_in_template_order():
     limitations in a different place on every card."""
     card = _card(card=_FULL_CARD)
     order = [
+        "# my-model on Tenstorrent p150x4",
         "> Serves org/Upstream-7B",
+        "A 7B dense decoder-only instruct model",
+        "Runs on Tenstorrent",
         "## At a glance",
-        "## Prerequisites",
         "## Intended use",
+        "## Prerequisites",
         "## Quickstart",
-        "## Using it",
+        "## Capabilities",
         "## Expected performance",
         "## Limitations",
         "## Licensing",
@@ -602,8 +640,8 @@ def test_the_authored_sections_render_in_template_order():
 
 def test_each_authored_section_carries_the_authors_words():
     card = _card(card=_FULL_CARD)
-    for key in ("description", "prerequisites", "intended_use", "quickstart",
-                "performance", "limitations", "licensing", "related"):
+    for key in ("description", "attribution", "prerequisites", "intended_use", "quickstart",
+                "usage", "performance", "limitations", "licensing", "related"):
         assert _FULL_CARD[key] in card, key
 
 
@@ -612,7 +650,6 @@ def test_an_optional_section_the_author_skipped_is_absent_not_empty():
     assert "## Licensing" not in card
     assert "## Related packages" not in card
     assert "## Intended use" not in card
-    assert "## Prerequisites" not in card
 
 
 def test_performance_and_limitations_are_always_rendered():
@@ -645,7 +682,6 @@ _RETIRED_CARD = {
     "architecture": "7B dense decoder-only",
     "status": "Experimental community bring-up",
     "out_of_scope_use": "Image input.",
-    "usage": "Send `tools` for function calling.",
     "limitations": "Only p150x4 was validated.",
     "risks": "Repetition loops above 25k tokens.",
 }
@@ -658,16 +694,14 @@ def test_retired_card_fields_fold_into_their_replacements():
     assert card.description == "A chat model. Architecture: 7B dense decoder-only."
     assert card.limitations == ("Only p150x4 was validated.\n\nOut of scope: Image input."
                                 "\n\nRepetition loops above 25k tokens.")
-    assert card.quickstart == "Send `tools` for function calling."
-    assert not any((card.architecture, card.status, card.out_of_scope_use, card.usage,
-                    card.risks))
+    assert not any((card.architecture, card.status, card.out_of_scope_use, card.risks))
 
 
 def test_each_retired_field_gets_one_note():
     from tt_kernel.container_manifest import CardSettings, card_retired_notes
 
     notes = card_retired_notes(CardSettings.model_validate(_RETIRED_CARD))
-    assert len(notes) == 5
+    assert len(notes) == 4
     assert "card.status is retired and was dropped" in notes
     assert "card.risks is retired; its text was moved into card.limitations" in notes
     assert card_retired_notes(CardSettings.model_validate({"description": "x"})) == []
@@ -679,7 +713,6 @@ def test_a_card_with_retired_fields_renders_none_of_the_retired_sections():
                  "## Risks and safety considerations", "Experimental community bring-up"):
         assert gone not in card, gone
     assert "Repetition loops above 25k tokens." in card     # moved, not lost
-    assert "Send `tools` for function calling." in card
 
 
 def test_retired_fields_fold_through_the_real_loader(tmp_path):
@@ -694,7 +727,7 @@ def test_retired_fields_fold_through_the_real_loader(tmp_path):
     path.write_text(yaml.safe_dump(raw))
     m = load_container_manifest(path)
     assert "Out of scope: Image input." in m.card.limitations
-    assert len(card_retired_notes(m.card)) == 5
+    assert len(card_retired_notes(m.card)) == 4
 
 
 @pytest.mark.parametrize("card", [
@@ -882,7 +915,7 @@ def test_a_whitespace_only_description_renders_nothing():
     the title and the hardware sentence."""
     card = _card(card={"description": "  \n"})
     title_to_hardware = card[card.index("# my-model"):card.index("Runs on")]
-    assert title_to_hardware.strip() == "# my-model"
+    assert title_to_hardware.strip() == "# my-model on Tenstorrent p150x4"
 
 
 def test_the_card_pins_provenance():
@@ -1699,9 +1732,11 @@ def test_a_diffusion_card_points_at_author_notes_only_when_there_are_some():
     raw["runtime"] = {"app": "models.tt_dit.server.flux2.app:app"}
     raw.pop("serve_profiles", None)
     raw["serve"] = {"hardware": "p150x4", "mesh_device": "P150x4", "port": 8000}
-    raw["card"] = {"quickstart": "POST /predict with a base64 image."}
+    raw["card"] = {"usage": "POST /predict with a base64 image."}
     with_notes = build.render_model_card(ContainerManifest.model_validate(raw), _built())
-    assert "See the author's notes above" in with_notes
+    caps = with_notes[with_notes.index("## Capabilities"):with_notes.index("## Expected")]
+    assert "See the author's notes for the payload it expects." in caps
+    assert caps.index("See the author's notes") < caps.index("POST /predict")
 
 
 def test_a_vllm_card_still_says_openai_compatible():
@@ -1723,7 +1758,7 @@ def test_a_diffusion_profile_table_omits_the_capacity_columns():
     ]
     raw["default_profile"] = "p150x4"
     card = build.render_model_card(ContainerManifest.model_validate(raw), _built())
-    assert "## Serve profiles" in card
+    assert "## Serving profiles" in card
     assert "max_num_seqs" not in card
     assert "max_model_len" not in card
     assert "| profile | hardware | mesh |" in card

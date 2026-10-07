@@ -184,28 +184,14 @@ def is_package_dir(path: Path) -> Optional[Manifest]:
     return m if m.is_container else None
 
 
-# The generated Quickstart's command lines, anchored on the COMMAND, not the repo that
-# happens to be on them. `render_model_card` emits two `tt` fence lines and one inline
-# `tt-model` line (below); cards staged by older versions carry a `tt-model` fence instead:
-#     tt model pull <repo>
-#     tt serve <repo>
-#     tt-model pull  <repo> --with-weights
-#     tt-model serve <repo>
-# Anchoring on the old repo instead (an earlier version of this fix) only worked for the
-# FIRST redirected push: `built.repo` never moves, so once the card no longer literally
-# contains it every later push matched nothing and silently did nothing — #109 again, and
-# worse when a plain push after a redirected one left the canonical repo's card naming
-# someone else's repo (thanks @anirudTT for catching this). The command prefix is fixed, so
-# the swap works no matter what repo is currently on the line and is idempotent by nature.
-# The `\S+/\S+` (a `namespace/name`) means a stray prose line like `tt serve is fast` is not
-# mistaken for a command — a repo id always has exactly one slash, prose words do not.
+# Generated Quickstart command lines, anchored on the command (never the old repo) so every
+# push repoints correctly; the fence patterns also cover cards staged by older versions.
 _QUICKSTART_CMD = re.compile(
     r"(?m)^(tt model pull |tt serve |tt-model pull  |tt-model serve )(\S+/\S+)"
 )
 # The generated one-line tt-model path; anchored on its fixed prefix so author prose is safe.
 _QUICKSTART_INLINE = re.compile(
-    r"(?m)^(Without tt-cli: `tt-model pull )[^\s`]+/[^\s`]+( --with-weights`, then "
-    r"`tt-model serve )[^\s`]+/[^\s`]+(`\.)$"
+    r"(?m)^(Without tt-cli: `tt-model serve )[^\s`]+/[^\s`]+(`\.)$"
 )
 
 
@@ -225,8 +211,7 @@ def _repoint_card_quickstart(readme: Path, new_repo: str) -> bool:
         return False
     text = readme.read_text()
     swapped = _QUICKSTART_CMD.sub(lambda mo: mo.group(1) + new_repo, text)
-    swapped = _QUICKSTART_INLINE.sub(
-        lambda mo: mo.group(1) + new_repo + mo.group(2) + new_repo + mo.group(3), swapped)
+    swapped = _QUICKSTART_INLINE.sub(lambda mo: mo.group(1) + new_repo + mo.group(2), swapped)
     if swapped == text:
         return False
     readme.write_text(swapped)

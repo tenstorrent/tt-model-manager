@@ -1009,6 +1009,7 @@ def _pinned_sha(sha: str, repo: Optional[str], *, public: bool = True,
 
 
 TT_MODEL_MANAGER_URL = "https://github.com/tenstorrent/tt-model-manager"
+TT_CLI_URL = "https://github.com/tenstorrent/tt-cli"
 
 
 def _card_tags(m: ContainerManifest) -> set:
@@ -1168,8 +1169,37 @@ def _card_at_a_glance(m: ContainerManifest) -> List[str]:
     return lines
 
 
-def _card_using_it(m: ContainerManifest) -> List[str]:
-    """The ``## Using it`` section: what a client actually sends.
+def _card_boards(m: ContainerManifest) -> List[str]:
+    """Every board a profile targets, in profile order, once each."""
+    boards: List[str] = []
+    for name in m.profile_names():
+        hw = m.resolve_profile(name).hardware
+        if hw and hw not in boards:
+            boards.append(hw)
+    return boards
+
+
+def _card_prerequisites(m: ContainerManifest) -> List[str]:
+    """What a box needs before the Quickstart works: derived, then the author's extras."""
+    boards = _card_boards(m)
+    lines = [
+        "## Prerequisites",
+        "",
+        f"- The [Tenstorrent CLI]({TT_CLI_URL}), `tt`: `uv tool install tenstorrent` "
+        "(or use tt-model alone, see the Quickstart)",
+        "- Docker",
+    ]
+    if boards:
+        lines.append("- Tenstorrent hardware: " + " or ".join(f"**{b}**" for b in boards))
+    # Same list as the derived bullets: a blank line or a bare line would split it in two.
+    extra = (m.card.prerequisites or "") if m.card else ""
+    lines += [l if l.startswith(" ") or re.match(r"([-*]|\d+[.)]) ", l) else f"- {l}"
+              for l in extra.strip().splitlines() if l.strip()]
+    return lines + [""]
+
+
+def _card_capabilities(m: ContainerManifest) -> List[str]:
+    """The ``## Capabilities`` section: what a client actually sends.
 
     Derived, not authored. The endpoint shape follows from ``kind``, and the two
     capability parsers are already in the manifest because the launcher turns them into
@@ -1182,7 +1212,7 @@ def _card_using_it(m: ContainerManifest) -> List[str]:
     from .manifest import DEFAULT_PORT
 
     launcher = launcher_for(m.kind)
-    lines = ["## Using it", ""]
+    lines = ["## Capabilities", ""]
     if launcher.OPENAI_COMPATIBLE:
         lines += [
             f"The server speaks the OpenAI API at `http://127.0.0.1:{DEFAULT_PORT}/v1` "
@@ -1200,8 +1230,9 @@ def _card_using_it(m: ContainerManifest) -> List[str]:
             "**not** an OpenAI-compatible chat API — its request and response shapes are "
             "the model's own. "
             + (
-                "See the author's notes above for the payload it expects."
-                if m.card and ((m.card.quickstart or "").strip()
+                "See the author's notes for the payload it expects."
+                if m.card and ((m.card.usage or "").strip()
+                               or (m.card.quickstart or "").strip()
                                or (m.card.description or "").strip())
                 # No author text to point at: sending the reader "above" would be a dead
                 # end, so name the two places the contract actually lives.
@@ -1210,6 +1241,10 @@ def _card_using_it(m: ContainerManifest) -> List[str]:
             ),
             "",
         ]
+    # After the derived text: the author adds to a described endpoint (a request schema,
+    # an example payload). Most needed by the kinds whose API only they can document.
+    if m.card and (m.card.usage or "").strip():
+        lines += [m.card.usage.rstrip(), ""]
     return lines
 
 
@@ -1263,7 +1298,7 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
 
     The order is the reader's order: what the model is and what hardware it needs
     first, then how to run it, then (only when there is a choice) the profile table,
-    then what a client actually sends (``Using it``), then where to report a problem,
+    then what a client actually sends (``Capabilities``), then where to report a problem,
     then provenance. Provenance names each component by its official name and shows a
     commit only as a working public link.
     """
@@ -1272,12 +1307,14 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     from .manifest import DEFAULT_PORT
 
     tt_metal = built.get("tt_metal") or {}
-    lines = _card_frontmatter(m) + [f"# {m.name}", ""]
-    if m.card and (m.card.description or "").strip():
-        lines += [m.card.description.strip(), ""]
+    boards = _card_boards(m)
+    title = m.name + (" on Tenstorrent " + " and ".join(boards) if boards else "")
+    lines = _card_frontmatter(m) + [f"# {title}", ""]
     if m.card and (m.card.attribution or "").strip():
         lines += ["\n".join(f"> {l}".rstrip() for l in m.card.attribution.strip().splitlines()),
                   ""]
+    if m.card and (m.card.description or "").strip():
+        lines += [m.card.description.strip(), ""]
 
     # Hardware requirement, up front. One profile: the whole launch config in a
     # sentence. Several: the targets here, the details in the table below.
@@ -1290,13 +1327,13 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         if p.max_num_seqs:
             detail.append(f"up to {p.max_num_seqs} concurrent sequences")
         lines += [
-            f"Runs on **{p.hardware}** (mesh `{p.mesh_device}`)"
+            f"Runs on Tenstorrent **{p.hardware}** (mesh `{p.mesh_device}`)"
             + (" — " + ", ".join(detail) if detail else "") + ".",
             "",
         ]
     else:
-        targets = " or ".join(f"**{p.hardware}**" for p in profiles if p.hardware)
-        lines += [f"Runs on {targets} — see the serve profiles below.", ""]
+        targets = " or ".join(f"**{b}**" for b in boards)
+        lines += [f"Runs on Tenstorrent {targets} — see the serving profiles below.", ""]
 
     lines += [
         f"Packaged and published with [tt-model-manager]({TT_MODEL_MANAGER_URL}) "
@@ -1304,36 +1341,29 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         "",
     ]
     lines += _card_at_a_glance(m)
-    lines += _card_section("Prerequisites", m.card.prerequisites if m.card else None)
     lines += _card_section("Intended use", m.card.intended_use if m.card else None)
+    lines += _card_prerequisites(m)
     lines += [
         "## Quickstart",
         "",
-        # `tt` (the Tenstorrent CLI) leads: it installs and drives tt-model, so one tool
-        # covers a fresh box to a served model.
         "```bash",
-        "uv tool install tenstorrent   # once — the Tenstorrent CLI, `tt`",
-        f"tt model pull {m.repo}",
         f"tt serve {m.repo}",
         "```",
         "",
-        "`tt model pull` downloads the Docker image "
-        f"and the [`{m.weights_repo}`](https://huggingface.co/{m.weights_repo}) weights"
+        "`tt serve` downloads the Docker image and the "
+        f"[`{m.weights_repo}`](https://huggingface.co/{m.weights_repo}) weights"
         + (f" at `{m.weights_ref.revision}`" if m.weights_ref.revision else "")
-        + " (into your HF cache; they are not in the image). `tt serve` starts "
+        + " (into your HF cache; they are not in the image), then starts "
         # DEFAULT_PORT, never the manifest's `port`. Serve deliberately ignores the
         # manifest port as a seed: authors write 8000 there for the bare-`docker run`
         # CMD, which is exactly the port that collides on a shared box.
         f"{launcher_for(m.kind).SERVER_DESC} on port {DEFAULT_PORT} (or the next free "
-        "port, if that one is busy)"
-        + "; the first "
-        "start compiles kernels for your device, which takes several minutes, and the "
-        f"server is ready when it logs `{launcher_for(m.kind).READY_LINE}`.",
+        "port, if that one is busy). The first start compiles kernels for your device, "
+        "which takes several minutes; the server is ready when it logs "
+        f"`{launcher_for(m.kind).READY_LINE}`.",
         "",
-        # Required by AGENTS.md invariant 1: the card must never need tt-cli. Only this
-        # path takes --with-weights; `tt model pull` asks for the weights itself.
-        f"Without tt-cli: `tt-model pull {m.repo} --with-weights`, then "
-        f"`tt-model serve {m.repo}`.",
+        # Required by AGENTS.md invariant 1: the card must never need tt-cli.
+        f"Without tt-cli: `tt-model serve {m.repo}`.",
         "",
     ]
     if m.card and m.card.quickstart:
@@ -1345,28 +1375,34 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         # diffusion card — a table that states nothing. Include them only when some
         # profile actually fills them.
         capacity = any(p.max_num_seqs or p.max_model_len for p in profiles)
+        described = any((p.description or "").strip() for p in m.serve_profiles)
         header = ["profile", "hardware", "mesh"]
         if capacity:
             header += ["max_num_seqs", "max_model_len"]
+        if described:
+            header.append("description")
         lines += [
-            "## Serve profiles",
+            "## Serving profiles",
             "",
-            "One image serves every profile below; pick one with `--profile`.",
+            "Select a different serving profile using `--profile`.",
             "",
             "| " + " | ".join(header) + " |",
             "| " + " | ".join("---" for _ in header) + " |",
         ]
         default = m.resolved_default()
+        descriptions = {p.name: p.description for p in m.serve_profiles}
         for name in m.profile_names():
             p = m.resolve_profile(name)
             label = f"`{name}`" + (" *(default)*" if name == default else "")
             cells = [label, p.hardware or "", p.mesh_device or ""]
             if capacity:
                 cells += [str(p.max_num_seqs or ""), str(p.max_model_len or "")]
+            if described:
+                cells.append(_cell(descriptions.get(name) or ""))
             lines.append("| " + " | ".join(cells) + " |")
         lines.append("")
 
-    lines += _card_using_it(m)
+    lines += _card_capabilities(m)
     card = m.card
     # Template order. The two required sections render even when empty, so their absence
     # is visible on the Hub rather than indistinguishable from "nothing to say".

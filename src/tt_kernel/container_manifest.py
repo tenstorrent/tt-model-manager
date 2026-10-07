@@ -399,7 +399,6 @@ RETIRED_CARD_FIELDS = {
     "status": None,
     "out_of_scope_use": "limitations",
     "risks": "limitations",
-    "usage": "quickstart",
 }
 
 
