@@ -415,6 +415,27 @@ def test_the_card_leads_with_the_authors_description():
     assert card.index("Intended for agentic coding.") < card.index("## Quickstart")
 
 
+def test_attribution_is_a_block_quote_under_the_description():
+    card = _card(card={"description": "A small model.",
+                       "attribution": "Serves org/Upstream-7B\nby the Upstream team."})
+    assert "> Serves org/Upstream-7B\n> by the Upstream team." in card
+    assert card.index("A small model.") < card.index("> Serves") < card.index("Runs on")
+
+
+def test_prerequisites_come_before_intended_use_and_the_quickstart():
+    card = _card(card={"prerequisites": "Docker and one p150.",
+                       "intended_use": "Chat."})
+    assert "## Prerequisites\n\nDocker and one p150." in card
+    assert card.index("## Prerequisites") < card.index("## Intended use")
+    assert card.index("## Intended use") < card.index("## Quickstart")
+
+
+def test_attribution_and_prerequisites_are_absent_when_unset():
+    card = _card(card={"description": "x"})
+    assert "## Prerequisites" not in card
+    assert "\n> " not in card
+
+
 def test_the_quickstart_sets_expectations():
     card = _card()
     assert "tt model pull you/my-model" in card

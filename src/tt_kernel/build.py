@@ -1301,6 +1301,9 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     lines = _card_frontmatter(m) + [f"# {m.name}", ""]
     if m.card and (m.card.description or "").strip():
         lines += [m.card.description.strip(), ""]
+    if m.card and (m.card.attribution or "").strip():
+        lines += ["\n".join(f"> {l}".rstrip() for l in m.card.attribution.strip().splitlines()),
+                  ""]
 
     # Hardware requirement, up front. One profile: the whole launch config in a
     # sentence. Several: the targets here, the details in the table below.
@@ -1327,6 +1330,7 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         "",
     ]
     lines += _card_at_a_glance(m)
+    lines += _card_section("Prerequisites", m.card.prerequisites if m.card else None)
     lines += _card_intended_use(m)
     lines += [
         "## Quickstart",

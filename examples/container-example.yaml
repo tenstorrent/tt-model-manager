@@ -202,6 +202,10 @@ card:
   # omit it and the card jumps straight from the title to the hardware sentence.
   description: >
     A 7B instruct model for general chat and code, served on Blackhole via vLLM.
+  # The model this package serves and who made it; rendered as a block quote.
+  attribution: Serves org/Weights-7B by the Org team, unmodified.
+  # Anything needed outside this package to run it.
+  prerequisites: tt-cli (`pip install tenstorrent`), Docker, and a p150x4 or p150x2.
 
   # Required for a catalog listing -- see docs/publishing.md. They are the two questions
   # every reader of a listing asks, and the two only the author can answer.
