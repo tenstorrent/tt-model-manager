@@ -906,6 +906,20 @@ def test_repoint_card_quickstart_swaps_the_command_lines_not_prose(tmp_path):
     assert container_cli._repoint_card_quickstart(readme, "override/y") is False
 
 
+def test_repoint_swaps_the_inline_tt_model_line_but_not_author_prose(tmp_path):
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        "Without tt-cli: `tt-model pull authored/x --with-weights`, then "
+        "`tt-model serve authored/x`.\n"
+        "See also `tt-model serve other/model` for the large variant.\n")
+    assert container_cli._repoint_card_quickstart(readme, "pushed/x") is True
+    out = readme.read_text()
+    assert ("Without tt-cli: `tt-model pull pushed/x --with-weights`, then "
+            "`tt-model serve pushed/x`.") in out
+    assert "`tt-model serve other/model` for the large variant" in out
+    assert container_cli._repoint_card_quickstart(readme, "pushed/x") is False
+
+
 def test_repoint_is_anchored_on_the_command_so_repeated_pushes_stay_correct(tmp_path):
     """@anirudTT's catch: the fix must not anchor on the OLD repo, which never moves in the
     manifest. package for canonical, push --repo a/x, then a plain push back to canonical must
@@ -967,13 +981,13 @@ def test_a_rendered_card_repoints_cleanly_end_to_end(tmp_path):
     m.validate_semantics()
     readme = tmp_path / "README.md"
     readme.write_text(build.render_model_card(m, {"repo": m.repo, "tt_metal": {}}))
-    assert "tt-model serve authored/model" in readme.read_text()   # sanity: rendered as authored
+    assert "`tt-model serve authored/model`" in readme.read_text()  # sanity: rendered as authored
     assert container_cli._repoint_card_quickstart(readme, "pushed/model") is True
     out = readme.read_text()
     assert "tt model pull pushed/model" in out
     assert "tt serve pushed/model" in out
-    assert "tt-model pull  pushed/model --with-weights" in out
-    assert "tt-model serve pushed/model" in out
+    assert ("Without tt-cli: `tt-model pull pushed/model --with-weights`, then "
+            "`tt-model serve pushed/model`.") in out
     # No generated Quickstart COMMAND still names the authored repo (prose lede may).
     assert "pull  authored/model" not in out and "serve authored/model" not in out
 

@@ -442,30 +442,20 @@ def test_the_quickstart_sets_expectations():
     assert "tt serve you/my-model" in card
     assert "several minutes" in card
     assert "Application startup complete" in card
-    # The prose explaining the flow names BOTH spellings, because the fence below it is
-    # an equal path: a reader who took it must not have to infer that this paragraph
-    # describes what they ran.
-    assert "`tt model pull` (or `tt-model pull --with-weights`) downloads" in card
-    assert "`tt serve` (or `tt-model serve`) starts" in card
+    assert "`tt model pull` downloads" in card
+    assert "`tt serve` starts" in card
 
 
-def test_the_quickstart_shows_the_tt_flow_first_and_tt_model_alone_second():
-    """Both fences, in this order, both required.
-
-    `tt` is the consumer path and drives tt-model itself, so it comes first with the
-    one-line install. But AGENTS.md invariant 1 says tt-model alone must do the whole job
-    and no step may need tt-cli — the card is the consumer-facing artifact that rule is
-    about, so the `tt-model` fence is what keeps it true. And the two fences differ on
-    `--with-weights` on purpose: `tt model pull` has no such flag (it asks tt-model for
-    the weights on your behalf), while bare `tt-model pull` skips them unless told.
-    """
+def test_the_quickstart_leads_with_tt_and_keeps_a_tt_model_only_line():
+    """`tt` is the consumer path, so it gets the fence. The tt-model line stays because
+    AGENTS.md invariant 1 says the card must never need tt-cli. Only that line carries
+    `--with-weights`: `tt model pull` asks tt-model for the weights itself."""
     card = _card()
-    assert card.index("tt model pull you/my-model") < card.index("tt-model pull  you/my-model")
     assert "uv tool install tenstorrent" in card
-    assert "Without tt-cli" in card
-    assert "tt-model pull  you/my-model --with-weights" in card
-    assert "tt-model serve you/my-model" in card
-    # the flag appears in the tt-model fence only
+    assert card.count("```bash") == 1
+    assert ("Without tt-cli: `tt-model pull you/my-model --with-weights`, then "
+            "`tt-model serve you/my-model`.") in card
+    assert card.index("tt serve you/my-model") < card.index("Without tt-cli")
     assert "tt model pull you/my-model --with-weights" not in card
 
 

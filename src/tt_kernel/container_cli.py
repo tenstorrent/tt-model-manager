@@ -181,7 +181,8 @@ def is_package_dir(path: Path) -> Optional[Manifest]:
 
 
 # The generated Quickstart's command lines, anchored on the COMMAND, not the repo that
-# happens to be on them. `render_model_card` emits four (two `tt` CLI, two `tt-model`):
+# happens to be on them. `render_model_card` emits two `tt` fence lines and one inline
+# `tt-model` line (below); cards staged by older versions carry a `tt-model` fence instead:
 #     tt model pull <repo>
 #     tt serve <repo>
 #     tt-model pull  <repo> --with-weights
@@ -196,6 +197,11 @@ def is_package_dir(path: Path) -> Optional[Manifest]:
 # mistaken for a command — a repo id always has exactly one slash, prose words do not.
 _QUICKSTART_CMD = re.compile(
     r"(?m)^(tt model pull |tt serve |tt-model pull  |tt-model serve )(\S+/\S+)"
+)
+# The generated one-line tt-model path; anchored on its fixed prefix so author prose is safe.
+_QUICKSTART_INLINE = re.compile(
+    r"(?m)^(Without tt-cli: `tt-model pull )[^\s`]+/[^\s`]+( --with-weights`, then "
+    r"`tt-model serve )[^\s`]+/[^\s`]+(`\.)$"
 )
 
 
@@ -215,6 +221,8 @@ def _repoint_card_quickstart(readme: Path, new_repo: str) -> bool:
         return False
     text = readme.read_text()
     swapped = _QUICKSTART_CMD.sub(lambda mo: mo.group(1) + new_repo, text)
+    swapped = _QUICKSTART_INLINE.sub(
+        lambda mo: mo.group(1) + new_repo + mo.group(2) + new_repo + mo.group(3), swapped)
     if swapped == text:
         return False
     readme.write_text(swapped)

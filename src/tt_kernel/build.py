@@ -1335,27 +1335,18 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     lines += [
         "## Quickstart",
         "",
-        # Two fences, in this order, both required. `tt` (the Tenstorrent CLI, PyPI
-        # package `tenstorrent`) is the consumer path: it installs and drives tt-model
-        # itself, so one tool covers a fresh box to a served model. The second fence is
-        # not a courtesy — AGENTS.md invariant 1 says tt-model alone must do the whole
-        # job and no step may need tt-cli, and the card is the consumer-facing artifact
-        # that rule is about. Drop it and the card requires a tool the repo says is
-        # optional.
+        # `tt` (the Tenstorrent CLI) leads: it installs and drives tt-model, so one tool
+        # covers a fresh box to a served model.
         "```bash",
         "uv tool install tenstorrent   # once — the Tenstorrent CLI, `tt`",
         f"tt model pull {m.repo}",
         f"tt serve {m.repo}",
         "```",
         "",
-        # Both spellings named once, because the fence below is an equal path and not a
-        # footnote: a reader who took it should not have to infer that the paragraph
-        # explaining the flow also describes what they ran.
-        "`tt model pull` (or `tt-model pull --with-weights`) downloads the Docker image "
+        "`tt model pull` downloads the Docker image "
         f"and the [`{m.weights_repo}`](https://huggingface.co/{m.weights_repo}) weights"
         + (f" at `{m.weights_ref.revision}`" if m.weights_ref.revision else "")
-        + " (into your HF cache; they are not in the image). `tt serve` (or "
-        "`tt-model serve`) starts "
+        + " (into your HF cache; they are not in the image). `tt serve` starts "
         # DEFAULT_PORT, never the manifest's `port`. Serve deliberately ignores the
         # manifest port as a seed: authors write 8000 there for the bare-`docker run`
         # CMD, which is exactly the port that collides on a shared box.
@@ -1365,15 +1356,10 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         "start compiles kernels for your device, which takes several minutes, and the "
         f"server is ready when it logs `{launcher_for(m.kind).READY_LINE}`.",
         "",
-        "Without tt-cli — tt-model alone does the whole job:",
-        "",
-        "```bash",
-        # `tt-model pull` skips weights unless asked (the model class fetches them at
-        # load); `tt model pull` asks for them on your behalf, which is why only this
-        # fence carries the flag.
-        f"tt-model pull  {m.repo} --with-weights",
-        f"tt-model serve {m.repo}",
-        "```",
+        # Required by AGENTS.md invariant 1: the card must never need tt-cli. Only this
+        # path takes --with-weights; `tt model pull` asks for the weights itself.
+        f"Without tt-cli: `tt-model pull {m.repo} --with-weights`, then "
+        f"`tt-model serve {m.repo}`.",
         "",
     ]
     if m.card and m.card.quickstart:
