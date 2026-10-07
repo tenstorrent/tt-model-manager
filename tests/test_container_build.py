@@ -561,15 +561,13 @@ def test_every_card_tells_readers_how_to_reach_the_author_and_the_tooling():
 # place on every card; the author owns the words.
 
 _FULL_CARD = {
-    "description": "A 7B instruct model for chat and code.",
-    "architecture": "7B dense decoder-only",
-    "status": "Experimental community bring-up",
+    "description": "A 7B dense decoder-only instruct model for chat and code.",
+    "attribution": "Serves org/Upstream-7B by the Upstream team, unmodified.",
+    "prerequisites": "tt-cli, Docker and a p150x4.",
     "intended_use": "General chat and code assistance.",
-    "out_of_scope_use": "Image input — the vision tower is not ported.",
-    "usage": "Send `tools` for function calling.",
+    "quickstart": "First boot takes about 10 minutes.",
     "performance": "78.1% GSM8K; 41 ms/token at batch 1 on p150x4.",
-    "limitations": "No speculative decoding; only p150x4 was validated.",
-    "risks": "Repetition loops above 25k reasoning tokens.",
+    "limitations": "No image input; only p150x4 was validated.",
     "licensing": "Weights under Apache-2.0; port code Apache-2.0.",
     "related": "See `you/my-model-p300x2` for the two-board build.",
     "license": {"id": "apache-2.0"},
@@ -585,13 +583,14 @@ def test_the_authored_sections_render_in_template_order():
     limitations in a different place on every card."""
     card = _card(card=_FULL_CARD)
     order = [
+        "> Serves org/Upstream-7B",
         "## At a glance",
+        "## Prerequisites",
         "## Intended use",
         "## Quickstart",
         "## Using it",
         "## Expected performance",
         "## Limitations",
-        "## Risks and safety considerations",
         "## Licensing",
         "## Related packages",
         "## Feedback",
@@ -603,24 +602,17 @@ def test_the_authored_sections_render_in_template_order():
 
 def test_each_authored_section_carries_the_authors_words():
     card = _card(card=_FULL_CARD)
-    for text in (_FULL_CARD["performance"], _FULL_CARD["limitations"],
-                 _FULL_CARD["risks"], _FULL_CARD["licensing"],
-                 _FULL_CARD["related"], _FULL_CARD["usage"]):
-        assert text in card
-
-
-def test_intended_use_labels_both_halves():
-    card = _card(card=_FULL_CARD)
-    assert "**Direct use:** General chat and code assistance." in card
-    assert "**Out-of-scope use:** Image input" in card
+    for key in ("description", "prerequisites", "intended_use", "quickstart",
+                "performance", "limitations", "licensing", "related"):
+        assert _FULL_CARD[key] in card, key
 
 
 def test_an_optional_section_the_author_skipped_is_absent_not_empty():
     card = _card(card={"description": "x", "performance": "fast", "limitations": "none"})
-    assert "## Risks and safety considerations" not in card
     assert "## Licensing" not in card
     assert "## Related packages" not in card
     assert "## Intended use" not in card
+    assert "## Prerequisites" not in card
 
 
 def test_performance_and_limitations_are_always_rendered():
@@ -636,17 +628,73 @@ def test_at_a_glance_derives_what_the_manifest_already_knows():
     card = _card(card=_FULL_CARD)
     assert "| Hardware | p150x4 |" in card
     assert "| Context | 131,072 tokens |" in card
-    assert "| Architecture | 7B dense decoder-only |" in card
-    assert "| Status | Experimental community bring-up |" in card
     assert "| License | apache-2.0 |" in card
 
 
 def test_at_a_glance_omits_a_row_it_cannot_fill():
     """A row reading "unknown" is worse than a shorter table."""
     card = _card()  # no card block at all
-    assert "| Architecture |" not in card
-    assert "| Status |" not in card
+    assert "| License |" not in card
     assert "| Hardware | p150x4 |" in card  # still derived
+
+
+# -- retired card fields ---------------------------------------------------------------
+
+_RETIRED_CARD = {
+    "description": "A chat model.",
+    "architecture": "7B dense decoder-only",
+    "status": "Experimental community bring-up",
+    "out_of_scope_use": "Image input.",
+    "usage": "Send `tools` for function calling.",
+    "limitations": "Only p150x4 was validated.",
+    "risks": "Repetition loops above 25k tokens.",
+}
+
+
+def test_retired_card_fields_fold_into_their_replacements():
+    from tt_kernel.container_manifest import CardSettings
+
+    card = CardSettings.model_validate(_RETIRED_CARD)
+    assert card.description == "A chat model. Architecture: 7B dense decoder-only."
+    assert card.limitations == ("Only p150x4 was validated.\n\nOut of scope: Image input."
+                                "\n\nRepetition loops above 25k tokens.")
+    assert card.quickstart == "Send `tools` for function calling."
+    assert not any((card.architecture, card.status, card.out_of_scope_use, card.usage,
+                    card.risks))
+
+
+def test_each_retired_field_gets_one_note():
+    from tt_kernel.container_manifest import CardSettings, card_retired_notes
+
+    notes = card_retired_notes(CardSettings.model_validate(_RETIRED_CARD))
+    assert len(notes) == 5
+    assert "card.status is retired and was dropped" in notes
+    assert "card.risks is retired; its text was moved into card.limitations" in notes
+    assert card_retired_notes(CardSettings.model_validate({"description": "x"})) == []
+
+
+def test_a_card_with_retired_fields_renders_none_of_the_retired_sections():
+    card = _card(card=_RETIRED_CARD)
+    for gone in ("| Architecture |", "| Status |", "Out-of-scope use",
+                 "## Risks and safety considerations", "Experimental community bring-up"):
+        assert gone not in card, gone
+    assert "Repetition loops above 25k tokens." in card     # moved, not lost
+    assert "Send `tools` for function calling." in card
+
+
+def test_retired_fields_fold_through_the_real_loader(tmp_path):
+    """Through load_container_manifest, not model_validate, so the canary sees whatever
+    validation production applies."""
+    import yaml
+    from tt_kernel.container_manifest import card_retired_notes, load_container_manifest
+
+    raw = json.loads(json.dumps(BASE))
+    raw["card"] = _RETIRED_CARD
+    path = tmp_path / "tt-model.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    m = load_container_manifest(path)
+    assert "Out of scope: Image input." in m.card.limitations
+    assert len(card_retired_notes(m.card)) == 5
 
 
 def test_no_model_ci_row_until_that_gate_exists():
@@ -794,19 +842,17 @@ def test_every_kind_declares_a_default_pipeline_tag():
 
 
 def test_at_a_glance_cells_survive_pipes_and_newlines():
-    """A `|` in a value added a column; a trailing newline — which every `>`-folded YAML
-    scalar carries — ended the table mid-row and spilled Hardware, Context and Status out
-    as loose text. Both are author-typed values, so both must be neutralised."""
-    card = _card(card={"architecture": "30B MoE | 3B active\n",
-                       "status": "alpha\nsecond line"})
+    """A `|` in a value added a column, and a trailing newline ended the table mid-row.
+    The licence name is the author-typed value left in the table, so it must be
+    neutralised."""
+    card = _card(card={"license": {"id": "other", "name": "Org | Research License\n"}})
     table = card[card.index("## At a glance"):card.index("## Quickstart")]
     rows = [l for l in table.splitlines() if l.startswith("| ") and "---" not in l
             and l != "| | |"]
     assert rows == [
-        "| Architecture | 30B MoE \\| 3B active |",
         "| Hardware | p150x4 |",
         "| Context | 131,072 tokens |",
-        "| Status | alpha second line |",
+        "| License | Org \\| Research License |",
     ]
 
 

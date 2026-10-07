@@ -1154,12 +1154,10 @@ def _card_at_a_glance(m: ContainerManifest) -> List[str]:
     boards = sorted({p.hardware for p in profiles if p.hardware})
     contexts = [p.max_model_len for p in profiles if p.max_model_len]
     rows = [
-        ("Architecture", card.architecture if card else None),
         ("Hardware", ", ".join(boards) if boards else None),
         ("Context", f"{max(contexts):,} tokens" if contexts else None),
         ("License", (card.license.name or card.license.id)
          if (card and card.license) else None),
-        ("Status", card.status if card else None),
     ]
     present = [(label, value) for label, value in rows if value]
     if not present:
@@ -1167,25 +1165,6 @@ def _card_at_a_glance(m: ContainerManifest) -> List[str]:
     lines = ["## At a glance", "", "| | |", "| --- | --- |"]
     lines += [f"| {label} | {_cell(value)} |" for label, value in present]
     lines.append("")
-    return lines
-
-
-def _card_intended_use(m: ContainerManifest) -> List[str]:
-    """What the package is for, and what it is not.
-
-    The second half is the one that gets left out, and the one that costs: a text-only
-    port of a multimodal checkpoint looks exactly like the checkpoint until someone sends
-    an image.
-    """
-    card = m.card
-    if not card or not ((card.intended_use or "").strip()
-                        or (card.out_of_scope_use or "").strip()):
-        return []
-    lines = ["## Intended use", ""]
-    if (card.intended_use or "").strip():
-        lines += [f"**Direct use:** {card.intended_use.strip()}", ""]
-    if (card.out_of_scope_use or "").strip():
-        lines += [f"**Out-of-scope use:** {card.out_of_scope_use.strip()}", ""]
     return lines
 
 
@@ -1231,11 +1210,6 @@ def _card_using_it(m: ContainerManifest) -> List[str]:
             ),
             "",
         ]
-    # After the derived text: the author is adding to a described endpoint (a request
-    # schema, an example payload), not introducing it. Most needed by the kinds whose
-    # API only they can document.
-    if m.card and (m.card.usage or "").strip():
-        lines += [m.card.usage.rstrip(), ""]
     return lines
 
 
@@ -1331,7 +1305,7 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     ]
     lines += _card_at_a_glance(m)
     lines += _card_section("Prerequisites", m.card.prerequisites if m.card else None)
-    lines += _card_intended_use(m)
+    lines += _card_section("Intended use", m.card.intended_use if m.card else None)
     lines += [
         "## Quickstart",
         "",
@@ -1402,7 +1376,6 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     lines += _card_required_section(
         "Limitations", card.limitations if card else None,
         "Not provided by the package author.")
-    lines += _card_section("Risks and safety considerations", card.risks if card else None)
     lines += _card_section("Licensing", card.licensing if card else None)
     lines += _card_section("Related packages", card.related if card else None)
     lines += [

@@ -28,7 +28,14 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from .manifest import (
     CONTAINER_SCHEMA,
@@ -286,6 +293,34 @@ class CardSettings(CardSpec):
     # checks below. What each field means is documented once, for authors, in
     # examples/container-example.yaml and docs/container_packages.md.
 
+    _retired_notes: List[str] = PrivateAttr(default_factory=list)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _fold_retired_fields(cls, data, handler):
+        """Accept the retired keys for one release, moved into the field that replaced them."""
+        if not isinstance(data, dict) or not RETIRED_CARD_FIELDS.keys() & data.keys():
+            return handler(data)
+        data, notes = dict(data), []
+        for key, target in RETIRED_CARD_FIELDS.items():
+            text = str(data.pop(key, None) or "").strip()
+            if not text:
+                continue
+            if target is None:
+                notes.append(f"card.{key} is retired and was dropped")
+                continue
+            if key == "architecture":
+                text = f"Architecture: {text.rstrip('.')}."
+            elif key == "out_of_scope_use":
+                text = f"Out of scope: {text}"
+            sep = " " if key == "architecture" else "\n\n"
+            current = (data.get(target) or "").strip()
+            data[target] = f"{current}{sep}{text}" if current else text
+            notes.append(f"card.{key} is retired; its text was moved into card.{target}")
+        card = handler(data)
+        card._retired_notes = notes
+        return card
+
     @field_validator("license", "pipeline_tag", "base_model", mode="before")
     @classmethod
     def _collapse_authored_whitespace(cls, v):
@@ -350,6 +385,21 @@ _HUB_LICENSE_ID_RE = re.compile(r"[a-z0-9][a-z0-9.+-]*")
 #: scores and how fast it is, and where it falls short. A listing without them is the
 #: state the catalog is already full of — see DEVSTACK-447.
 REQUIRED_CARD_SECTIONS = ("performance", "limitations")
+
+#: Card fields retired by the template review, and the field each one folds into
+#: (``None``: dropped). Still read on the wire so published manifests stay valid.
+RETIRED_CARD_FIELDS = {
+    "architecture": "description",
+    "status": None,
+    "out_of_scope_use": "limitations",
+    "risks": "limitations",
+    "usage": "quickstart",
+}
+
+
+def card_retired_notes(card: Optional[CardSpec]) -> List[str]:
+    """One line per retired card key the author still wrote."""
+    return list(getattr(card, "_retired_notes", None) or [])
 
 
 def card_publish_gaps(card: Optional[CardSpec]) -> List[str]:

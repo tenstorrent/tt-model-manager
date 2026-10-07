@@ -29,6 +29,7 @@ from .build import BuildError, build_log_path, finalize, run_build, stage
 from .container_manifest import (
     ContainerManifestError,
     card_publish_gaps,
+    card_retired_notes,
     hardware_chip_count,
 )
 from .launchers import launcher_for
@@ -133,6 +134,9 @@ def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> 
     warning = card_gap_warning(card_publish_gaps(staged.manifest.card))
     if warning:
         console.note(warning, marker="!", style="warning")
+    for note in card_retired_notes(staged.manifest.card):
+        console.note(f"{note} — update tt-model.yaml before these keys are removed",
+                     marker="!", style="warning")
 
     console.phase("Stage")
     console.note(f"{len(staged.code_tree)} code path(s) → code/", marker="•")
