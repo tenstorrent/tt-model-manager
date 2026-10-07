@@ -1009,7 +1009,7 @@ def _pinned_sha(sha: str, repo: Optional[str], *, public: bool = True,
 
 
 TT_MODEL_MANAGER_URL = "https://github.com/tenstorrent/tt-model-manager"
-TT_CLI_URL = "https://github.com/tenstorrent/tt-cli"
+TT_CLI_PREREQUISITES_URL = "https://github.com/tenstorrent/tt-cli/blob/main/docs/prerequisites.md"
 
 
 def _card_tags(m: ContainerManifest) -> set:
@@ -1185,7 +1185,7 @@ def _card_prerequisites(m: ContainerManifest) -> List[str]:
     lines = [
         "## Prerequisites",
         "",
-        f"- The [Tenstorrent CLI]({TT_CLI_URL}), `tt`: `uv tool install tenstorrent` "
+        f"- The [Tenstorrent CLI]({TT_CLI_PREREQUISITES_URL}), `tt`: `uv tool install tenstorrent` "
         "(or use tt-model alone, see the Quickstart)",
         "- Docker",
     ]

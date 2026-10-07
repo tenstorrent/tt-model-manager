@@ -452,7 +452,8 @@ def test_intended_use_comes_before_prerequisites_and_the_quickstart():
 def test_prerequisites_are_derived_and_the_authors_extras_follow():
     bare = _card()
     section = bare[bare.index("## Prerequisites"):bare.index("## Quickstart")]
-    assert "[Tenstorrent CLI](https://github.com/tenstorrent/tt-cli)" in section
+    assert ("[Tenstorrent CLI](https://github.com/tenstorrent/tt-cli/blob/main/docs/"
+            "prerequisites.md)") in section
     assert "uv tool install tenstorrent" in section
     assert "or use tt-model alone" in section     # invariant 1: tt-cli is optional
     assert "- Docker" in section
