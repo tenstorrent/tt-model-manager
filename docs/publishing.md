@@ -48,7 +48,9 @@ Three rules make this predictable and safe:
 - **A listing needs a card that says something.** A container package must carry
   `card.performance` and `card.limitations` to be listed — how the model performs and where it
   falls short are the two questions a stranger picking from the catalog asks, and the two only its
-  author can answer. `package` warns when they are missing; `tt-model publish` and `push --publish`
+  author can answer. For an LLM, `package` also warns when the performance table lacks one of the
+  columns the template asks for (see [container_packages.md](container_packages.md)); that is a
+  warning only. `package` warns when either section is missing; `tt-model publish` and `push --publish`
   refuse, and so does a plain `push` of a bundle that is *already* listed (a re-push re-applies the
   listing, so it is held to the same bar — add the sections, or `tt-model unpublish` first).
   Pushing an unlisted bundle and serving are unaffected, so an experimental or private bundle is
@@ -114,8 +116,9 @@ to keep in sync: "has Tenstorrent reviewed this" reduces to "is this repo ours",
 consumer can answer from the repo id alone. It is deliberately **not a repo tag** and **not a
 manifest field** — a tag lives in the author's own README frontmatter, which they can edit from
 the Hub UI, and the manifest is written by whoever publishes the model, so neither can carry a
-review someone *else* granted. `tt model list` shows verified models by default; the original
-stays listed as unverified, shown with `tt model list --unverified`.
+review someone *else* granted. tt-cli also treats the bundles on the curated list it ships as
+verified. `tt model list` shows verified models by default; the original stays listed as
+unverified, shown with `tt model list --include-unverified`.
 
 The copy is named after the **weights** repo, not the bundle: a bundle published as
 `someone/qwen3-32b-blackhole-v51` with weights `Qwen/Qwen3-32B` becomes
