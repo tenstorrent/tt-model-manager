@@ -8,6 +8,7 @@ important — that the v5 flow through the SAME commands is unchanged.
 """
 
 import errno
+import hashlib
 import json
 import pathlib
 import shlex
@@ -1556,17 +1557,30 @@ def test_include_weights_purges_them_too(tmp_path, monkeypatch):
     assert purged == ["org/x", "org/Weights-7B"]
 
 
-def _cached_repo(cache, repo_id, blob_dir=None):
-    """One cached revision holding a file whose blob lives in `blob_dir` (default: the repo's own)."""
+XET_HASH = "ab" * 32
+
+
+def _cached_repo(cache, repo_id, *, shared=False):
+    """A cached repo with one file; `shared` puts its blob in the hub's shared store, as a Xet download does."""
+    from huggingface_hub.utils import _shared_blobs as sb
+
     repo = cache / ("models--" + repo_id.replace("/", "--"))
-    snap = repo / "snapshots" / ("a" * 40)
+    commit = hashlib.sha1(repo_id.encode()).hexdigest()
+    snap = repo / "snapshots" / commit
     snap.mkdir(parents=True)
     (repo / "refs").mkdir()
-    (repo / "refs" / "main").write_text("a" * 40)
-    blobs = blob_dir or repo / "blobs"
-    blobs.mkdir(exist_ok=True)
-    (blobs / "etag").write_bytes(b"x" * 100)
-    (snap / "w.bin").symlink_to(blobs / "etag")
+    (repo / "refs" / "main").write_text(commit)
+    (repo / "blobs").mkdir()
+    blob = repo / "blobs" / ("etag-" + commit[:8])
+    if shared and sb.has_shared_blob(xet_hash=XET_HASH, cache_dir=cache, expected_size=100):
+        assert sb.try_link_from_shared_store(
+            blob_path=str(blob), xet_hash=XET_HASH, cache_dir=cache, expected_size=100)
+    else:
+        blob.write_bytes(b"x" * 100)
+        if shared:
+            assert sb.publish_blob_to_shared_store(
+                blob_path=str(blob), xet_hash=XET_HASH, cache_dir=cache, expected_size=100)
+    (snap / "shared.bin" if shared else snap / "w.bin").symlink_to(Path("../../blobs") / blob.name)
     return repo
 
 
@@ -1586,16 +1600,45 @@ def test_purge_hf_deletes_every_blob_and_leaves_other_repos(hf_cache, capsys):
     assert "kept" not in capsys.readouterr().out
 
 
-def test_purge_hf_lists_shared_files_another_model_still_uses(hf_cache, tmp_path, capsys):
-    shared = tmp_path / "shared"
-    _cached_repo(hf_cache, "org/gone", blob_dir=shared)
+def test_purge_hf_matches_the_repo_id_case_insensitively(hf_cache):
+    gone = _cached_repo(hf_cache, "Org/Gone")
     container_cli._purge_hf("org/gone", "weights")
-    assert (shared / "etag").exists()
-    assert "kept w.bin" in " ".join(capsys.readouterr().out.split())
+    assert not gone.exists()
+
+
+def test_purge_hf_frees_a_shared_blob_nobody_else_uses(hf_cache):
+    from huggingface_hub.utils import _shared_blobs as sb
+    gone = _cached_repo(hf_cache, "org/gone", shared=True)
+    container_cli._purge_hf("org/gone", "weights")
+    assert not gone.exists()
+    assert not sb.shared_blob_path(hf_cache, XET_HASH).exists()
+
+
+def test_purge_hf_keeps_and_lists_a_shared_blob_another_model_uses(hf_cache, capsys):
+    from huggingface_hub.utils import _shared_blobs as sb
+    _cached_repo(hf_cache, "org/gone", shared=True)
+    other = _cached_repo(hf_cache, "org/other", shared=True)
+    container_cli._purge_hf("org/gone", "weights")
+    assert sb.shared_blob_path(hf_cache, XET_HASH).exists() and other.exists()
+    assert "kept shared.bin" in " ".join(capsys.readouterr().out.split())
 
 
 def test_purge_hf_is_a_noop_when_not_cached(hf_cache):
     container_cli._purge_hf("org/absent", "weights")
+
+
+def test_purge_hf_is_a_noop_without_a_cache_dir(tmp_path, monkeypatch):
+    from huggingface_hub.utils import _cache_manager
+    monkeypatch.setattr(_cache_manager, "HF_HUB_CACHE", str(tmp_path / "missing"))
+    container_cli._purge_hf("org/x", "weights")
+
+
+def test_purge_hf_warns_when_the_repo_could_not_be_removed(hf_cache, monkeypatch, capsys):
+    from huggingface_hub import DeleteCacheStrategy
+    monkeypatch.setattr(DeleteCacheStrategy, "execute", lambda self: None)
+    _cached_repo(hf_cache, "org/stuck")
+    container_cli._purge_hf("org/stuck", "weights")
+    assert "could not fully remove" in " ".join(capsys.readouterr().out.split())
 
 
 def test_tree_size_skips_symlinks_and_counts_hard_links_once(tmp_path):
@@ -1603,22 +1646,6 @@ def test_tree_size_skips_symlinks_and_counts_hard_links_once(tmp_path):
     (tmp_path / "link").symlink_to(tmp_path / "a")
     (tmp_path / "hard").hardlink_to(tmp_path / "a")
     assert container_cli._tree_size(tmp_path) == console.fmt_bytes(1024)
-
-
-def test_hf_cache_dir_uses_hubs_own_layout(tmp_path, monkeypatch):
-    """Computed with hub's helpers, not a formatted path, so HF_HOME and any future
-    layout change are followed."""
-    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path))
-    d = tmp_path / "models--org--x"
-    d.mkdir()
-    import importlib
-    import huggingface_hub.constants as c
-    importlib.reload(c)
-    assert container_cli.hf_cache_dir("org/x") is not None or True  # layout resolved
-
-
-def test_a_missing_hf_snapshot_is_not_an_error(tmp_path, monkeypatch):
-    assert container_cli.hf_cache_dir("org/definitely-not-cached-here") is None
 
 
 def test_the_include_weights_flag_reaches_the_implementation(tmp_path, monkeypatch):

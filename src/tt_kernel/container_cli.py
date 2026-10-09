@@ -1484,21 +1484,6 @@ def describe_pulled(entry: dict) -> dict:
 # --------------------------------------------------------------------------------- rm
 
 
-def hf_cache_dir(repo_id: str) -> Optional[Path]:
-    """Where huggingface_hub keeps this repo's snapshot, or None if it cannot be located.
-
-    Computed with hub's own helpers rather than by string-formatting a path, so it follows
-    HF_HOME / HF_HUB_CACHE and any future layout change.
-    """
-    try:
-        from huggingface_hub.constants import HF_HUB_CACHE
-        from huggingface_hub.file_download import repo_folder_name
-    except ImportError:  # pragma: no cover - hub is a hard dependency
-        return None
-    d = Path(HF_HUB_CACHE) / repo_folder_name(repo_id=repo_id, repo_type="model")
-    return d if d.is_dir() else None
-
-
 def _tree_size(d: Path) -> str:
     """Formatted size of a directory tree, counting each file once and skipping symlinks."""
     seen = set()
@@ -1517,15 +1502,25 @@ def _tree_size(d: Path) -> str:
 def _purge_hf(repo_id: str, what: str) -> None:
     """Delete every cached revision of a repo through the hub, which owns the shared blob store."""
     from huggingface_hub import scan_cache_dir
+    from huggingface_hub.utils import CacheNotFound
 
-    cache = scan_cache_dir()
-    repo = next((r for r in cache.repos if r.repo_type == "model" and r.repo_id == repo_id), None)
+    try:
+        cache = scan_cache_dir()
+    except CacheNotFound:
+        return
+    repo = next((r for r in cache.repos
+                 if r.repo_type == "model" and r.repo_id.lower() == repo_id.lower()), None)
     if repo is None:
         return
+    # Resolved before the delete: a shared file's own link goes, the store file it targets stays.
+    targets = {f.file_name: f.blob_path.resolve() for r in repo.revisions for f in r.files}
     strategy = cache.delete_revisions(*(r.commit_hash for r in repo.revisions))
     with console.step(f"removing the cached {what} ({console.fmt_bytes(strategy.expected_freed_size)})"):
         strategy.execute()
-    kept = sorted({f.file_name for r in repo.revisions for f in r.files if f.blob_path.exists()})
+    if any(p.exists() for p in strategy.repos):
+        console.note(f"could not fully remove {repo.repo_path} — check its permissions",
+                     marker="!", style="warning")
+    kept = sorted(n for n, t in targets.items() if t.exists())
     if kept:
         console.note(f"kept {', '.join(kept)} — another cached model still uses them", marker="○")
 
