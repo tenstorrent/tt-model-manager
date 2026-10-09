@@ -1556,6 +1556,55 @@ def test_include_weights_purges_them_too(tmp_path, monkeypatch):
     assert purged == ["org/x", "org/Weights-7B"]
 
 
+def _cached_repo(cache, repo_id, blob_dir=None):
+    """One cached revision holding a file whose blob lives in `blob_dir` (default: the repo's own)."""
+    repo = cache / ("models--" + repo_id.replace("/", "--"))
+    snap = repo / "snapshots" / ("a" * 40)
+    snap.mkdir(parents=True)
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text("a" * 40)
+    blobs = blob_dir or repo / "blobs"
+    blobs.mkdir(exist_ok=True)
+    (blobs / "etag").write_bytes(b"x" * 100)
+    (snap / "w.bin").symlink_to(blobs / "etag")
+    return repo
+
+
+@pytest.fixture
+def hf_cache(tmp_path, monkeypatch):
+    from huggingface_hub.utils import _cache_manager
+    monkeypatch.setattr(_cache_manager, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    (tmp_path / "hub").mkdir()
+    return tmp_path / "hub"
+
+
+def test_purge_hf_deletes_every_blob_and_leaves_other_repos(hf_cache, capsys):
+    gone = _cached_repo(hf_cache, "org/gone")
+    other = _cached_repo(hf_cache, "org/other")
+    container_cli._purge_hf("org/gone", "weights")
+    assert not gone.exists() and other.exists()
+    assert "kept" not in capsys.readouterr().out
+
+
+def test_purge_hf_lists_shared_files_another_model_still_uses(hf_cache, tmp_path, capsys):
+    shared = tmp_path / "shared"
+    _cached_repo(hf_cache, "org/gone", blob_dir=shared)
+    container_cli._purge_hf("org/gone", "weights")
+    assert (shared / "etag").exists()
+    assert "kept w.bin" in " ".join(capsys.readouterr().out.split())
+
+
+def test_purge_hf_is_a_noop_when_not_cached(hf_cache):
+    container_cli._purge_hf("org/absent", "weights")
+
+
+def test_tree_size_skips_symlinks_and_counts_hard_links_once(tmp_path):
+    (tmp_path / "a").write_bytes(b"x" * 1024)
+    (tmp_path / "link").symlink_to(tmp_path / "a")
+    (tmp_path / "hard").hardlink_to(tmp_path / "a")
+    assert container_cli._tree_size(tmp_path) == console.fmt_bytes(1024)
+
+
 def test_hf_cache_dir_uses_hubs_own_layout(tmp_path, monkeypatch):
     """Computed with hub's helpers, not a formatted path, so HF_HOME and any future
     layout change are followed."""
