@@ -38,10 +38,11 @@ def _extract_safely(tar: tarfile.TarFile, dest: Path) -> None:
     """Extract a docker-save stream, refusing members that escape ``dest``.
 
     ``extractall(filter="data")`` is the one-liner for this, but it only exists from
-    Python 3.11.4 — and this package declares ``requires-python = ">=3.9"``, where the
-    keyword is a TypeError. ``tarfile.data_filter`` is the documented way to detect the
-    feature, so use it when present and hand-check otherwise. The stream comes from the
-    local docker daemon, but "trusted input" is not a reason to extract `../` paths.
+    Python 3.10.12 / 3.11.4 — and this package declares ``requires-python = ">=3.10"``, so
+    on an earlier 3.10 patch release the keyword is a TypeError. ``tarfile.data_filter`` is
+    the documented way to detect the feature, so use it when present and hand-check
+    otherwise. The stream comes from the local docker daemon, but "trusted input" is not
+    a reason to extract `../` paths.
     """
     if hasattr(tarfile, "data_filter"):
         tar.extractall(dest, filter="data")

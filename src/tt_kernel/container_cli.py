@@ -19,6 +19,7 @@ import errno
 import re
 import shlex
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import List, Optional
@@ -1483,44 +1484,54 @@ def describe_pulled(entry: dict) -> dict:
 # --------------------------------------------------------------------------------- rm
 
 
-def hf_cache_dir(repo_id: str) -> Optional[Path]:
-    """Where huggingface_hub keeps this repo's snapshot, or None if it cannot be located.
-
-    Computed with hub's own helpers rather than by string-formatting a path, so it follows
-    HF_HOME / HF_HUB_CACHE and any future layout change.
-    """
-    try:
-        from huggingface_hub.constants import HF_HUB_CACHE
-        from huggingface_hub.file_download import repo_folder_name
-    except ImportError:  # pragma: no cover - hub is a hard dependency
-        return None
-    d = Path(HF_HUB_CACHE) / repo_folder_name(repo_id=repo_id, repo_type="model")
-    return d if d.is_dir() else None
-
-
 def _tree_size(d: Path) -> str:
-    """Formatted size of a directory tree, for a message about removing or keeping it.
-
-    A cache is only worth a sentence because of how big it is — the converted-weight tree
-    is 105 GB for FLUX.2 — so the number is the message. Broken files are skipped rather
-    than raising: this only ever decorates a note.
-    """
+    """Formatted size of a directory tree, counting each file once and skipping symlinks."""
+    seen = set()
     total = 0
     for f in d.rglob("*"):
         try:
-            if f.is_file():
-                total += f.stat().st_size
+            st = f.lstat()
         except OSError:
             continue
+        if stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) not in seen:
+            seen.add((st.st_dev, st.st_ino))
+            total += st.st_size
     return console.fmt_bytes(total)
 
 
 def _purge_hf(repo_id: str, what: str) -> None:
-    d = hf_cache_dir(repo_id)
-    if d is None:
+    """Delete every cached revision of a repo through the hub, which owns the shared blob store."""
+    from huggingface_hub import scan_cache_dir
+    from huggingface_hub.file_download import repo_folder_name
+    from huggingface_hub.utils import CacheNotFound
+
+    try:
+        cache = scan_cache_dir()
+    except CacheNotFound:
         return
-    with console.step(f"removing the cached {what} ({_tree_size(d)})"):
-        shutil.rmtree(d, ignore_errors=True)
+    repo = next((r for r in cache.repos
+                 if r.repo_type == "model" and r.repo_id.lower() == repo_id.lower()), None)
+    if repo is None:
+        # An unparseable repo lands in `warnings`, not `repos`; rmtree would orphan its shared blobs.
+        folder = re.compile(re.escape(repo_folder_name(repo_id=repo_id, repo_type="model"))
+                            + r"(?![^/\\])", re.IGNORECASE)
+        for warning in cache.warnings:
+            if folder.search(str(warning)):
+                console.note(f"could not remove the cached {what} — the cache entry is "
+                             f"damaged: {warning}", marker="!", style="warning")
+        return
+    # Resolved before the delete: a shared file's own link goes, the store file it targets stays.
+    # Pairs: two revisions can hold same-named files with different blobs.
+    targets = {(f.file_name, f.blob_path.resolve()) for r in repo.revisions for f in r.files}
+    strategy = cache.delete_revisions(*(r.commit_hash for r in repo.revisions))
+    with console.step(f"removing the cached {what} ({console.fmt_bytes(strategy.expected_freed_size)})"):
+        strategy.execute()
+    if any(p.exists() for p in strategy.repos):
+        console.note(f"could not fully remove {repo.repo_path} — check its permissions",
+                     marker="!", style="warning")
+    kept = sorted({name for name, target in targets if target.exists()})
+    if kept:
+        console.note(f"kept {', '.join(kept)} — another cached model still uses them", marker="○")
 
 
 def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = False,
