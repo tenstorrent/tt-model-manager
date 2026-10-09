@@ -1623,6 +1623,28 @@ def test_purge_hf_keeps_and_lists_a_shared_blob_another_model_uses(hf_cache, cap
     assert "kept shared.bin" in " ".join(capsys.readouterr().out.split())
 
 
+def test_purge_hf_lists_a_shared_file_even_when_another_revision_reuses_its_name(hf_cache, capsys):
+    gone = _cached_repo(hf_cache, "org/gone", shared=True)
+    _cached_repo(hf_cache, "org/other", shared=True)
+    # A second revision whose same-named file has its own, unshared blob.
+    snap = gone / "snapshots" / ("f" * 40)
+    snap.mkdir()
+    (gone / "blobs" / "etag-own").write_bytes(b"y" * 50)
+    (snap / "shared.bin").symlink_to(Path("../../blobs/etag-own"))
+    container_cli._purge_hf("org/gone", "weights")
+    assert not gone.exists()
+    assert "kept shared.bin" in " ".join(capsys.readouterr().out.split())
+
+
+def test_purge_hf_warns_about_a_damaged_cache_entry_instead_of_skipping_it(hf_cache, capsys):
+    (hf_cache / "models--org--broken" / "blobs").mkdir(parents=True)  # no snapshots/
+    (hf_cache / "models--org--broken-instruct" / "blobs").mkdir(parents=True)
+    container_cli._purge_hf("org/broken", "weights")
+    out = " ".join(capsys.readouterr().out.split())
+    assert "the cache entry is damaged" in out
+    assert out.count("damaged") == 1  # not org/broken-instruct's entry too
+
+
 def test_purge_hf_is_a_noop_when_not_cached(hf_cache):
     container_cli._purge_hf("org/absent", "weights")
 
