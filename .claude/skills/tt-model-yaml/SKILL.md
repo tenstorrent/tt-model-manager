@@ -74,6 +74,7 @@ Read, skipping what does not exist:
 | stock `vllm==X.Y.Z` from PyPI + a separate `vllm-tt-plugin`; launch is `vllm serve …` | `vllm-plugin` |
 | the `tenstorrent/vllm` **fork** (plugin in-tree); launch is `python -m models.common.readiness_check.run_vllm_server …` | `vllm-fork` |
 | a diffusion model — no tokens, no KV cache; an ASGI app under `models/tt_dit/server/<model>`; launch is uvicorn | `tt-dit-server` |
+| the model's **own HTTP server** (neither vLLM nor an ASGI app — e.g. a stdlib server behind a `serve*.sh`); launch is its own argv | `http-server` |
 
 No local `tenstorrent/vllm` clone and a standalone plugin checkout ⇒ `vllm-plugin`.
 `vllm-fork` additionally needs `runtime.model_dir` (the launcher's `--model-dir`), covered
@@ -83,6 +84,12 @@ by `source.code`.
 by `source.code`. Do **not** invent `max_num_seqs` / `block_size` for it: they configure a
 continuous-batching engine this kind does not have, and it does not ask for them. It needs
 only `hardware` and `mesh_device`.
+
+`http-server` needs `runtime.command` — the validated launch argv as a list, with `{host}` /
+`{port}` placeholders (`{port}` is required). Every `.py`/`.sh` it runs must be covered by
+the allowlist. Set `runtime.ready_line` if the server's ready log line is not the default
+`"event": "ready"`, and put serving knobs in `serve.args`. Like `tt-dit-server`, it needs
+only `hardware` and `mesh_device`. See `examples/container-example.yaml`.
 
 ## Step 4 — Build the `source.code` allowlist (the part agents get wrong)
 
@@ -159,15 +166,16 @@ and where it came from, so the user is confirming rather than composing:
 | `additional_config.tt` | `trace_region_size`, `fabric_config`, `sample_on_device_mode` | model-specific tuning |
 | `capabilities.tool_parser` | tool-calling model? which parser | otherwise tool calls come back as prose |
 | `ubuntu` / `python` | base image + interpreter | must match a published tt-metalium dev image tag |
-| `card.description` | one or two sentences: what the model is and what it is for | leads the generated model card; the checkout cannot state intent |
+| `card.description` | one or two sentences: what the model is (size, architecture) and what it does | leads the generated model card; `card.intended_use` says what it is for |
 
 If a launch script exists, transcribe from it and ask only to confirm. If the README states
 a context or hardware target, quote it in the question.
 
 Write `card.description` even when the README gave you a usable sentence — the card leads
 with it, and without it a reader meets the hardware requirement before learning what the
-model does. Keep it to what the model IS and is FOR; the hardware, port and quickstart are
-generated around it, so do not restate them.
+model does. Keep it to what the model IS and DOES; what it is for goes in
+`card.intended_use`, and the hardware, port and quickstart are generated around it, so do
+not restate them. The rest of the `card:` block is the model-card-standardizer skill's job.
 
 `serve_profiles:` is OPTIONAL — omit it for a single configuration and put everything in a
 flat `serve:` block. Add profiles only when ONE image should serve several configs the user

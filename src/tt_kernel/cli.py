@@ -21,7 +21,13 @@ import typer
 from typer.core import TyperGroup
 
 from . import console
-from . import MANIFEST_NAME, TT_MODEL_CATALOG_TAG, TT_MODEL_TAG, __version__
+from . import (
+    MANIFEST_NAME,
+    TT_MODEL_CATALOG_TAG,
+    TT_MODEL_TAG,
+    TT_ORG,
+    __version__,
+)
 from . import (
     auth, compat, container, hub, localdb, metal,
     packaging, runtime,
@@ -29,6 +35,7 @@ from . import (
 from .manifest import (
     DEFAULT_PORT,
     THIN_KINDS,
+    Capabilities,
     CardSpec,
     CompatibilityReport,
     Manifest,
@@ -181,7 +188,8 @@ def _fail_card(name: str, diagnosis: dict, *, consequence: Optional[str] = None)
     return typer.Exit(code=1)
 
 
-def _hub(op, repo_id: str, *, what: str, consequence: Optional[str] = None):
+def _hub(op, repo_id: str, *, what: str, consequence: Optional[str] = None,
+         classify=None):
     """Run a Hub call, turning any failure into a diagnosis card instead of a traceback.
 
     Every Hub entry point used to be unguarded, so a 404 escaped as a Rich stack — from
@@ -196,7 +204,8 @@ def _hub(op, repo_id: str, *, what: str, consequence: Optional[str] = None):
     except BaseException as exc:  # noqa: BLE001 — classified and re-raised as an Exit
         if console.is_verbose():
             raise
-        raise _fail_card(what, hub.classify_hub_error(exc, repo_id), consequence=consequence)
+        diagnosis = (classify or hub.classify_hub_error)(exc, repo_id)
+        raise _fail_card(what, diagnosis, consequence=consequence)
 
 
 def _require_repo_id(repo_id: str, *, what: str, consequence: Optional[str] = None) -> None:
@@ -718,20 +727,33 @@ def package_thin(
     requirements: Optional[str] = typer.Option(
         None, "--requirements", help="requirements.txt of pip pins (ttnn/TTTv2/models wheel). "
         "Omitted => a #29 template with TODO pins for the not-yet-published wheels."),
+    constraints: Optional[str] = typer.Option(
+        None, "--constraints", help="Optional fully resolved constraints file applied to every "
+        "dependency-resolving install step."),
     plugin_wheel: Optional[str] = typer.Option(
         None, "--plugin-wheel", help="The vllm-tt-plugin wheel — the vLLM integration (we no longer "
         "ship a custom vLLM fork); shipped in wheels/ and installed by path."),
     ops_wheel: Optional[List[str]] = typer.Option(
-        None, "--ops-wheel", help="A generic_op custom-op wheel to ship in wheels/ (repeatable)."),
+        None, "--ops-wheel", help="A generic_op custom-op wheel to ship in wheels/ (repeatable). Only these wheels "
+             "are scanned for deps.custom_ops; --models-wheel is not."),
+    extra_code: Optional[str] = typer.Option(
+        None, "--extra-code", help="A directory of hand-written pure-Python model ops to ship with "
+        "the bundle (issue #127) — its top-level packages go on PYTHONPATH ahead of the runner. For "
+        "code that composes stock ttnn ops; NOT for a new C++ ttnn op or a forked build."),
+    verify: Optional[List[str]] = typer.Option(
+        None, "--verify", help="A python -c statement run at the end of install.sh, after the venv "
+        "is built (repeatable). Use to sanity-import the shipped code or assert the ttnn version it "
+        "was validated against; a failing check fails the install."),
     models_wheel: Optional[List[str]] = typer.Option(
-        None, "--models-wheel", help="A locally-built wheel that satisfies a requirements.txt pin "
-        "not yet on an index (e.g. a hand-built tt-metal-models wheel from tenstorrent/tt-metal#54478, "
-        "ahead of its publish). Staged in wheels/ and added to --find-links so the pin resolves "
-        "locally instead of failing; NOT installed by path itself. Repeatable."),
+        None, "--models-wheel", help="A qualified model-library wheel staged and installed by "
+        "exact path rather than resolved from an index. Repeatable."),
     vllm_wheel: Optional[str] = typer.Option(
         None, "--vllm-wheel", help="Optional PREBUILT empty-target vLLM wheel (stock vLLM built with "
         "VLLM_TARGET_DEVICE=empty — NOT the CUDA vllm, NOT a fork). Ships in wheels/ for a hermetic "
         "install; omit and install.sh builds vLLM from source per the plugin's install-vllm-tt.sh."),
+    vllm_common_requirements: Optional[str] = typer.Option(
+        None, "--vllm-common-requirements", help="Pinned copy of upstream vLLM common.txt. "
+        "Staged into the bundle so installation does not fetch mutable dependency input."),
     vllm_version: str = typer.Option(
         packaging.VLLM_VERSION, "--vllm-version", help="Upstream vLLM tag the plugin builds against "
         "(empty target)."),
@@ -744,7 +766,14 @@ def package_thin(
     metadata: Optional[str] = typer.Option(None, "--metadata", help="Authored vllm_metadata.json instead of --arch-name/--main-class."),
     weights: Optional[str] = typer.Option(None, "--weights", help="HF weights repo id (pointer, never embedded)."),
     weights_revision: Optional[str] = typer.Option(None, "--weights-revision"),
+    weights_allow: Optional[List[str]] = typer.Option(
+        None, "--weights-allow", help="Glob limiting what the weights prefetch downloads "
+        "(repeatable). Needed when the weights repo is the bundle repo itself, so the prefetch "
+        "does not also pull wheels/ and vllm_models/."),
+    weights_ignore: Optional[List[str]] = typer.Option(
+        None, "--weights-ignore", help="Glob excluded from the weights prefetch (repeatable)."),
     mesh_topology: Optional[str] = typer.Option(None, "--mesh", help='Device topology, e.g. "P150" / "1x4".'),
+    mesh_fabric: Optional[str] = typer.Option(None, "--mesh-fabric", help="TT fabric configuration, e.g. FABRIC_1D."),
     device_count: int = typer.Option(1, "--device-count"),
     python_version: str = typer.Option("3.12", "--python", help="Pinned interpreter (uv provisions)."),
     tt_metal_version: Optional[str] = typer.Option(
@@ -753,7 +782,17 @@ def package_thin(
     max_num_seqs: Optional[int] = typer.Option(None, "--max-num-seqs"),
     block_size: Optional[int] = typer.Option(None, "--block-size"),
     max_model_len: Optional[int] = typer.Option(None, "--max-model-len"),
+    trace_region_bytes: Optional[int] = typer.Option(None, "--trace-region-bytes"),
+    tool_parser: Optional[str] = typer.Option(None, "--tool-parser"),
+    reasoning_parser: Optional[str] = typer.Option(None, "--reasoning-parser"),
+    extra_arg: Optional[List[str]] = typer.Option(
+        None, "--extra-arg", help="One additional vLLM argv token (repeat once per token)."),
+    tt_config_json: Optional[str] = typer.Option(
+        None, "--tt-config-json", help='JSON object merged into --additional-config {"tt": ...}.'),
     env: Optional[List[str]] = typer.Option(None, "--env", help="KEY=VALUE serving env (repeatable)."),
+    readme: Optional[str] = typer.Option(None, "--readme", help="Authored model card staged verbatim as README.md."),
+    provenance: Optional[str] = typer.Option(
+        None, "--provenance", help="JSON object staged verbatim as PROVENANCE.json."),
     name: Optional[str] = typer.Option(None, "--name"),
     out: Optional[str] = typer.Option(None, "--out", help="Stage the bundle here (kept even without a push target)."),
     private: Optional[bool] = typer.Option(
@@ -770,7 +809,7 @@ def package_thin(
 
     This command is beta and unsupported: the v6 thin format is still a draft, its flags and
     on-disk layout may change without notice, and bundles it produces are not guaranteed to
-    install or serve. Use ``tt-model package`` (v5 self-contained) for supported packaging.
+    install or serve. Use ``tt-model package --container`` (v5.1 container) for supported packaging.
 
     DRAFT (reflects the plan): fully installable once TTTv2 + the models wheel publish so the pins are
     real; until then the generated requirements.txt carries TODO pins for those two (ttnn already
@@ -781,7 +820,7 @@ def package_thin(
         ["[muted]The v6 thin format is a draft: flags and layout may change without notice,[/muted]",
          "[muted]and the bundles it produces are not guaranteed to install or serve.[/muted]",
          "",
-         "[muted]supported path:  tt-model package  (v5 self-contained)[/muted]"],
+         "[muted]supported path:  tt-model package --container tt-model.yaml  (v5.1)[/muted]"],
     ))
     if publish and private is True:  # explicit --private contradicts --publish
         raise _err("--publish and --private conflict: a catalog listing is public by definition. "
@@ -828,17 +867,55 @@ def package_thin(
     resolved_arch = arch or metal.detect_device(arch_override=arch).arch
     if not resolved_arch:
         raise _err("Could not detect arch. Pass --arch (blackhole | wormhole_b0 | ...).")
-    weights_block = WeightsRef(repo_id=weights, revision=weights_revision) if weights else None
+    if (weights_allow or weights_ignore) and not weights:
+        raise _err("--weights-allow/--weights-ignore need --weights.")
+    weights_block = WeightsRef(
+        repo_id=weights,
+        revision=weights_revision,
+        allow_patterns=weights_allow or None,
+        ignore_patterns=weights_ignore or None,
+    ) if weights else None
+    tt_config: dict = {}
+    if tt_config_json:
+        try:
+            parsed_tt_config = json.loads(tt_config_json)
+        except json.JSONDecodeError as exc:
+            raise _err(f"--tt-config-json must be valid JSON: {exc}")
+        if not isinstance(parsed_tt_config, dict):
+            raise _err("--tt-config-json must contain a JSON object.")
+        reserved = {"fabric_config", "trace_region_size"}.intersection(parsed_tt_config)
+        if reserved:
+            flags = ", ".join(sorted(reserved))
+            raise _err(f"--tt-config-json cannot set reserved field(s) {flags}; use the dedicated flags.")
+        tt_config = parsed_tt_config
     env_map: dict = {}
     for kv in env or []:
         if "=" not in kv:
             raise _err(f"--env expects KEY=VALUE, got {kv!r}.")
         k, v = kv.split("=", 1)
         env_map[k] = v
-    mesh = Mesh(devices=device_count, topology=mesh_topology) if mesh_topology else None
+    mesh = Mesh(devices=device_count, topology=mesh_topology, fabric=mesh_fabric) \
+        if (mesh_topology or mesh_fabric) else None
     resources = Resources(
-        max_num_seqs=max_num_seqs, block_size=block_size, max_model_len=max_model_len
-    ) if (max_num_seqs or block_size or max_model_len) else None
+        max_num_seqs=max_num_seqs, block_size=block_size, max_model_len=max_model_len,
+        trace_region_bytes=trace_region_bytes, tt_additional_config=tt_config,
+        extra_args=list(extra_arg or []),
+    ) if (max_num_seqs or block_size or max_model_len or trace_region_bytes
+          or tt_config or extra_arg) else None
+    capabilities = Capabilities(tool_parser=tool_parser, reasoning_parser=reasoning_parser) \
+        if (tool_parser or reasoning_parser) else None
+    readme_path = Path(readme).expanduser() if readme else None
+    provenance_path = Path(provenance).expanduser() if provenance else None
+    constraints_path = Path(constraints).expanduser() if constraints else None
+    common_path = Path(vllm_common_requirements).expanduser() if vllm_common_requirements else None
+    for label, path in (
+        ("--constraints", constraints_path),
+        ("--vllm-common-requirements", common_path),
+        ("--readme", readme_path),
+        ("--provenance", provenance_path),
+    ):
+        if path is not None and not path.is_file():
+            raise _err(f"{label} {str(path)!r} is not a file.")
     bundle_name = name or (repo_id.split("/")[-1] if repo_id else model_path.stem)
 
     if out:
@@ -851,13 +928,18 @@ def package_thin(
         staged, name=bundle_name, arch=resolved_arch, model_py=model_path,
         kind=kind, vllm_metadata=vmeta, app=asgi_app, tt_kernel_version=__version__,
         requirements=Path(requirements).expanduser() if requirements else None,
+        constraints=constraints_path,
         plugin_wheel=Path(plugin_wheel).expanduser() if plugin_wheel else None,
         extra_wheels=[Path(w).expanduser() for w in (ops_wheel or [])],
+        extra_code=Path(extra_code).expanduser() if extra_code else None,
+        verify=list(verify or []),
         models_wheels=[Path(w).expanduser() for w in (models_wheel or [])],
         vllm_wheel=Path(vllm_wheel).expanduser() if vllm_wheel else None,
+        vllm_common_requirements=common_path,
         vllm_version=vllm_version, with_vllm=with_vllm,
         weights=weights_block, device_count=device_count, mesh=mesh, env=env_map,
-        resources=resources, python_version=python_version,
+        resources=resources, capabilities=capabilities, readme=readme_path,
+        provenance=provenance_path, python_version=python_version,
         tt_metal_version=(
             tt_metal_version
             or packaging.pinned_ttnn_version(Path(requirements).expanduser().read_text()
@@ -869,9 +951,18 @@ def package_thin(
     console.note(f"runner: {model_path.name}   deps: {manifest.deps.requirements}"
                  + (f" + {len(manifest.deps.wheels)} bundled wheel(s)" if manifest.deps.wheels else ""),
                  marker="•")
+    if manifest.deps.custom_ops:
+        console.note(f"custom ops: {len(manifest.deps.custom_ops)} generic_op wheel(s), "
+                     "auto-recorded from model.py imports", marker="•")
+    unrecorded_ops = [Path(w).name for w in (ops_wheel or [])
+                      if f"{packaging.WHEELS_DIR}/{Path(w).name}" not in manifest.deps.custom_ops]
+    if unrecorded_ops:
+        console.note(f"--ops-wheel not recorded as a custom op ({model_path.name} imports none of "
+                     f"its op packages; shipped and installed regardless): "
+                     f"{', '.join(unrecorded_ops)}", marker="!", style="warning")
     if manifest.deps.models_wheels:
-        console.note(f"local pins: {len(manifest.deps.models_wheels)} models wheel(s) "
-                     "resolved via --find-links (not on an index yet)", marker="•")
+        console.note(f"local pins: {len(manifest.deps.models_wheels)} models wheel(s) installed by path",
+                     marker="•")
     if with_vllm:
         vspec = manifest.deps.vllm
         if vspec and vspec.wheel:
@@ -1915,6 +2006,190 @@ def unpublish(
     console.milestone(
         f"delisted {repo_id} from the community catalog (it drops off on the next crawl) "
         "— the repo and its content are unchanged"
+    )
+    # No verification advisory here: a Tenstorrent copy is its own repo, so delisting the
+    # original has no bearing on it. That independence is the point of the design.
+
+
+# ------------------------------------------------------------------------ verify
+def _review_target(manifest) -> Optional[str]:
+    """The `Tenstorrent/<name>` a bundle would be copied to, or None if undecidable.
+
+    Named after the WEIGHTS repo, not the bundle: that is the team's convention and it
+    yields the canonical model name (`Tenstorrent/Qwen3-32B`) rather than an author's
+    packaging slug (`someone/qwen3-32b-blackhole-v51`).
+    """
+    weights = getattr(manifest, "weights", None)
+    repo = getattr(weights, "repo_id", None)
+    if not repo or "/" not in repo:
+        return None
+    return f"{TT_ORG}/{repo.split('/')[-1]}"
+
+
+@app.command(rich_help_panel="Publish models")
+def verify(
+    repo_id: str = typer.Argument(..., help="A LISTED bundle as namespace/name."),
+) -> None:
+    """Copy a reviewed bundle into the Tenstorrent org as verified (DX-team reviewers).
+
+    Verified bundles are the curated subset of the community catalog: bundles we have
+    looked at and expect to work on the hardware they claim, so a developer does not have
+    to sift through everything published. Verifying IS the copy — a bundle under
+    ``Tenstorrent/`` is verified by definition, because only the DX team can write there.
+    An author cannot grant it to themselves, which is what a tag on their own repo could
+    never prevent.
+
+    The copy is server-side, so no bundle data moves, and the author's repo is never
+    touched, and stays listed as unverified. The copy records what it came from and is a
+    snapshot of that revision: later commits to the original are not covered.
+
+    The copy stays private until its review is recorded and it is listed, so a run that
+    fails part way leaves nothing public. Re-running finishes it.
+
+    The bundle must already be listed (``tt-model publish``) and public. Listing is the
+    AUTHOR's decision and this command never makes it for them.
+    """
+    import datetime as _dt
+
+    state = _hub(lambda: hub.repo_state(repo_id), repo_id, what="Verify")
+    if TT_MODEL_CATALOG_TAG not in state.tags:
+        raise _err(
+            f"{repo_id} is not in the community catalog, so it cannot be verified.\n"
+            "  Verified bundles are a curated SUBSET of the catalog — listing is the author's\n"
+            "  decision, review is ours. Ask them to run: tt-model publish " + repo_id
+        )
+    if state.private:
+        raise _err(
+            f"{repo_id} is private, so it cannot be verified — a verified bundle must be\n"
+            "  one consumers can discover. The author can make it public with: "
+            f"tt-model publish {repo_id}"
+        )
+    me = auth.whoami()
+    if not me:
+        raise _err("Not logged in to Hugging Face — run `tt-model login` first (the copy "
+                   "records who reviewed it).")
+    reviewer = str(me.get("name") or me.get("fullname") or "?")
+    source = state.repo_id or repo_id  # the Hub's own casing, for the recorded source
+
+    manifest = _hub(lambda: hub.fetch_manifest(repo_id, None), repo_id, what="Verify")
+    target = _review_target(manifest)
+    if not target:
+        raise _err(
+            f"{repo_id} names no weights repo in its manifest, so there is no name to copy\n"
+            f"  it to — the convention is {TT_ORG}/<the weights repo's name>."
+        )
+
+    if not state.sha:
+        # Not fatal: the review is still a valid statement about the bundle. But say so —
+        # the recorded revision is what tells a later reader which commit was reviewed.
+        console.note(
+            f"the Hub did not report a head commit for {repo_id}, so the copy will record "
+            "no source revision",
+            marker="!", style="warning",
+        )
+
+    # Existing target: either this is a half-finished run to resume, or it is a different
+    # bundle's copy and the name has collided. Never overwrite the latter — a reviewed
+    # artifact someone may be relying on is not ours to replace silently.
+    resumed = None  # None: fresh copy; else what the milestone says was done
+    if _hub(lambda: hub.repo_exists(target), target, what="Verify"):
+        review = _hub(lambda: hub.read_review(target), target, what="Verify") or {}
+        recorded = review.get(hub.VERIFIED_SOURCE_KEY)
+        recorded_rev = review.get(hub.VERIFIED_REVISION_KEY)
+        if recorded and str(recorded).lower() == source.lower():
+            if recorded_rev != state.sha:
+                # Re-recording would claim a revision the copy's files are not.
+                held = (f"at {str(recorded_rev)[:9]}" if recorded_rev
+                        else "with no recorded revision")
+                now = f"now at {state.sha[:9]}" if state.sha else "now at an unknown revision"
+                raise _err(
+                    f"{target} holds {source} {held}, but {source} is {now}.\n"
+                    f"  The copy cannot be re-recorded as a revision it does not contain, so it\n"
+                    f"  stays verified as it is. To verify the newer revision, delete it on the\n"
+                    f"  Hub (https://huggingface.co/{target}/settings) and re-run."
+                )
+            resumed = "re-recorded"
+            console.note(
+                f"{target} already records {source} — re-recording the review rather than "
+                "copying again",
+                marker="○", style="muted",
+            )
+        elif not recorded and state.sha and _hub(
+            lambda: hub.is_copy_of(target, repo_id, state.sha), target, what="Verify"
+        ):
+            # A run that copied but failed before recording the review.
+            resumed = "finished copying"
+            console.note(
+                f"{target} is an unfinished copy of {source} — finishing it rather than "
+                "copying again",
+                marker="○", style="muted",
+            )
+        else:
+            if recorded:
+                why = f"{target} already exists, copied from {recorded}"
+            elif state.sha:
+                why = (f"{target} already exists and records no review, and it is not a "
+                       f"copy of {repo_id} at {state.sha[:9]}")
+            else:
+                why = (f"{target} already exists and records no review, and with no head "
+                       f"commit for {repo_id} it cannot be matched to this bundle")
+            raise _err(
+                f"{why}, so {repo_id} cannot take that name.\n"
+                f"  The name comes from the weights repo, so two bundles of the same model\n"
+                f"  collide here. If that copy is abandoned, delete it on the Hub\n"
+                f"  (https://huggingface.co/{target}/settings) and re-run."
+            )
+
+    if resumed is None:
+        _hub(lambda: hub.duplicate_into_org(repo_id, target), repo_id, what="Verify",
+             consequence=(f"nothing was made public; if {target} was created, it is "
+                          "private and unfinished — re-run to finish it"),
+             classify=lambda exc, _: hub.classify_copy_error(exc, repo_id, target))
+    reviewed_at = (
+        _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
+    _hub(lambda: hub.annotate_review(target, source=source, revision=state.sha,
+                                     reviewer=reviewer, reviewed_at=reviewed_at),
+         target, what="Verify",
+         consequence=f"{target} exists, private, with no review record — re-run to finish")
+    # Explicit rather than relying on the copy inheriting the tag: a source that was
+    # public-but-unlisted would otherwise produce a copy nobody can find.
+    _hub(lambda: hub.set_catalog_listing(target, listed=True), target, what="Verify",
+         consequence=f"{target} is reviewed but private and unlisted — re-run to finish")
+    # Last, so the copy is only public once it is complete. The private copy still
+    # carries the source's catalog tag, so someone whose token can see private org repos
+    # may see it before this.
+    _hub(lambda: hub.set_visibility(target, private=False), target, what="Verify",
+         consequence=f"{target} is reviewed and listed but still private — re-run to finish")
+
+    console.milestone(
+        f"{resumed or 'copied'} {source} to {target} as verified by "
+        f"Tenstorrent" + (f" (at {state.sha[:9]})" if state.sha else "")
+        + f" — it now shows in `tt model list`, and {source} stays listed as unverified; "
+        f"undo with `tt-model unverify {target}`"
+    )
+
+
+@app.command(rich_help_panel="Publish models")
+def unverify(
+    repo_id: str = typer.Argument(..., help=f"A {TT_ORG}/... copy to withdraw."),
+) -> None:
+    """Withdraw a verified Tenstorrent copy from the catalog. The copy itself is kept.
+
+    Delists rather than deletes: the reviewed snapshot stays where anyone who pinned it
+    can still reach it. The original is unaffected. Delete the repo by hand on the Hub if
+    it should be gone entirely.
+    """
+    if repo_id.split("/", 1)[0].lower() != TT_ORG.lower():
+        raise _err(
+            f"{repo_id} is not a {TT_ORG} copy.\n"
+            f"  Pass the copy's id — the {TT_ORG}/... repo shown in `tt model list` —\n"
+            "  not the community bundle it was made from."
+        )
+    _hub(lambda: hub.set_catalog_listing(repo_id, listed=False), repo_id, what="Unverify")
+    console.milestone(
+        f"withdrew {repo_id} from the community catalog — the repo and its reviewed "
+        "content are unchanged, and the bundle it was copied from is unaffected"
     )
 
 

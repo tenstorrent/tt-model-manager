@@ -28,7 +28,10 @@ from .boot_progress import BootTracker, diagnose_boot, summarize
 from .build import BuildError, build_log_path, finalize, run_build, stage
 from .container_manifest import (
     ContainerManifestError,
+    PERFORMANCE_COLUMNS,
+    card_performance_gaps,
     card_publish_gaps,
+    card_retired_notes,
     hardware_chip_count,
 )
 from .launchers import launcher_for
@@ -85,6 +88,18 @@ def card_gap_warning(gaps: List[str]) -> Optional[str]:
     )
 
 
+def card_performance_warning(gaps: List[str]) -> Optional[str]:
+    """The one-line warning `package` prints when an LLM performance table is incomplete."""
+    if not gaps:
+        return None
+    names = [g.upper() if g in ("isl", "osl", "n", "ttft", "e2el") else g for g in gaps]
+    if len(gaps) == len(PERFORMANCE_COLUMNS):
+        return ("card.performance has no table with the required columns ("
+                + ", ".join(names) + "), one row per serving profile")
+    return ("card.performance's table has no " + ", ".join(names)
+            + " column" + ("s" if len(gaps) > 1 else ""))
+
+
 def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> Path:
     """``tt-model package --container <manifest.yaml>``.
 
@@ -133,6 +148,13 @@ def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> 
     warning = card_gap_warning(card_publish_gaps(staged.manifest.card))
     if warning:
         console.note(warning, marker="!", style="warning")
+    warning = card_performance_warning(
+        card_performance_gaps(staged.manifest.card, staged.manifest.kind))
+    if warning:
+        console.note(warning, marker="!", style="warning")
+    for note in card_retired_notes(staged.manifest.card):
+        console.note(f"{note} — update tt-model.yaml before these keys are removed",
+                     marker="!", style="warning")
 
     console.phase("Stage")
     console.note(f"{len(staged.code_tree)} code path(s) → code/", marker="•")
@@ -180,22 +202,14 @@ def is_package_dir(path: Path) -> Optional[Manifest]:
     return m if m.is_container else None
 
 
-# The generated Quickstart's command lines, anchored on the COMMAND, not the repo that
-# happens to be on them. `render_model_card` emits four (two `tt` CLI, two `tt-model`):
-#     tt model pull <repo>
-#     tt serve <repo>
-#     tt-model pull  <repo> --with-weights
-#     tt-model serve <repo>
-# Anchoring on the old repo instead (an earlier version of this fix) only worked for the
-# FIRST redirected push: `built.repo` never moves, so once the card no longer literally
-# contains it every later push matched nothing and silently did nothing — #109 again, and
-# worse when a plain push after a redirected one left the canonical repo's card naming
-# someone else's repo (thanks @anirudTT for catching this). The command prefix is fixed, so
-# the swap works no matter what repo is currently on the line and is idempotent by nature.
-# The `\S+/\S+` (a `namespace/name`) means a stray prose line like `tt serve is fast` is not
-# mistaken for a command — a repo id always has exactly one slash, prose words do not.
+# Generated Quickstart command lines, anchored on the command (never the old repo) so every
+# push repoints correctly; the fence patterns also cover cards staged by older versions.
 _QUICKSTART_CMD = re.compile(
     r"(?m)^(tt model pull |tt serve |tt-model pull  |tt-model serve )(\S+/\S+)"
+)
+# The generated one-line tt-model path; anchored on its fixed prefix so author prose is safe.
+_QUICKSTART_INLINE = re.compile(
+    r"(?m)^(Without tt-cli: `tt-model serve )[^\s`]+/[^\s`]+(`\.)$"
 )
 
 
@@ -215,6 +229,7 @@ def _repoint_card_quickstart(readme: Path, new_repo: str) -> bool:
         return False
     text = readme.read_text()
     swapped = _QUICKSTART_CMD.sub(lambda mo: mo.group(1) + new_repo, text)
+    swapped = _QUICKSTART_INLINE.sub(lambda mo: mo.group(1) + new_repo + mo.group(2), swapped)
     if swapped == text:
         return False
     readme.write_text(swapped)

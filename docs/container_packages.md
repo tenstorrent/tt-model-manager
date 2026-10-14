@@ -3,8 +3,9 @@
 > **Status.** The v5.1 container path is **merged and on `main`**
 > ([PR #37](https://github.com/tenstorrent/tt-model-manager/pull/37), with
 > [#50](https://github.com/tenstorrent/tt-model-manager/pull/50) adding the `tt-dit-server`
-> kind and [#51](https://github.com/tenstorrent/tt-model-manager/pull/51) making the image
-> digest its identity). The design is additive: `container` is a new optional block on the
+> kind, [#51](https://github.com/tenstorrent/tt-model-manager/pull/51) making the image
+> digest its identity, and [#167](https://github.com/tenstorrent/tt-model-manager/pull/167)
+> adding the `http-server` kind). The design is additive: `container` is a new optional block on the
 > existing manifest, so v5/v6 are untouched. A few items are called out below as
 > **planned**; everything else is implemented.
 
@@ -22,8 +23,8 @@ no venv, no matching Python or OS. The image is the wall.
 | **v5.1** container | an **OCI image** with OS + tt-metal + vLLM + plugin + code baked in | **Docker** + a TT card | the **author**, once, at `package` (build time) |
 
 v5 rebuilds the world on the consumer's host, which is why the host's glibc, Python,
-tt-metal and vLLM all have to cooperate — most of `packaging.py`, `provision.py` and
-`toolchain.py` exist to negotiate that. v6 trims the payload to a pinned spec but still
+tt-metal and vLLM all have to cooperate — much of `packaging.py` (wheel tags, glibc floors,
+auditwheel repair) exists to negotiate that. v6 trims the payload to a pinned spec but still
 resolves a venv on the consumer's box. **v5.1 moves the assembly to the author**: the image
 is built once, and nothing about the consumer's host can matter because there is no host
 interpreter or host platform in the picture. `compare()` needed no container branch at
@@ -101,7 +102,7 @@ Fields, from `src/tt_kernel/container_manifest.py`:
 | `repo` | the namespaced HF id `push` publishes to, e.g. `you/my-model`. |
 | `name` | the model name; also the default image repository. |
 | `weights` | an HF id **or** a `{repo, revision, allow_patterns, ignore_patterns}` mapping. A pointer — never baked in. Pin a revision so a consumer gets the weights you validated, not whatever the default branch points at today. |
-| `kind` | the serving stack + launch command: `vllm-plugin` (default), `vllm-fork`, or `tt-dit-server`. See below. |
+| `kind` | the serving stack + launch command: `vllm-plugin` (default), `vllm-fork`, `tt-dit-server`, or `http-server`. See below. |
 | `arch` | `blackhole` or `wormhole_b0` — fixed by the build; every profile shares it. |
 | `source.tt_metal` | a local checkout path (default, hermetic — packages exactly the tree you validated, uncommitted work included) or `{repo, ref}` to clone in CI. |
 | `source.code` | an **allowlist** (min one entry) of paths, relative to the tt-metal tree, that are **exactly** what ships. Staged to `code/`, uploaded to HF as browsable files, and `COPY`'d into the image as the *only* `models` package. Under-listing fails the image's own build-time import check, on the author's machine. |
@@ -113,7 +114,7 @@ Fields, from `src/tt_kernel/container_manifest.py`:
 | `default_profile` | required when more than one profile is declared — the author decides the default, not the consumer's luck. |
 | `verify` | build-time Python assertions run **inside the finished image**, on top of the launcher's own import checks. |
 | `image` | where the built image is published: `registry: hf` (default) or a real registry namespace. |
-| `card` | the model-card sections the tool cannot derive, each rendered in a fixed place the renderer owns. Own `##` section: `performance`, `limitations` (both always rendered — an italic "not provided" placeholder when empty, and both required for a catalog listing: see [publishing.md](publishing.md)), `risks`, `licensing`, `related`, and `intended_use` / `out_of_scope_use` (together, as *Intended use*). Rows in the *At a glance* table (keep to a short phrase): `architecture`, `status`. Merged into a derived section: `description` (the lede under the title), `quickstart` (appended under *Quickstart*), `usage` (appended under *Using it*). Frontmatter, under the Hub's own keys: `license` (`{id, name, link}` — `id` must be a lowercase Hub licence identifier or `other`; `name` and `link` are emitted **only** beside `id: other`, which is the case the Hub documents them for, and ignored otherwise), `pipeline_tag` (defaults to `text-generation` for the vLLM kinds), `base_model` (defaults to the weights repo). Bundles already published pick up the template on their next `tt-model package --container`; nothing rewrites a live card. The annotated block is in [`examples/container-example.yaml`](../examples/container-example.yaml). |
+| `card` | the model-card text the tool cannot derive, each field rendered in a fixed place the renderer owns. In card order: `attribution` (a block quote under the title, crediting the model the package serves), `description` (the lede: size, architecture, what it does — the hardware sentence is generated after it), `intended_use` (*Intended use*), `prerequisites` (extra bullets under the generated *Prerequisites*, which already list the tt CLI, Docker and the board), `quickstart` (appended under the generated `tt serve` command), `usage` (appended under *Capabilities*, after the derived endpoint text — where a non-OpenAI server documents its request shapes), `performance` and `limitations` (both always rendered — an italic "not provided" placeholder when empty, and both required for a catalog listing: see [publishing.md](publishing.md)), `licensing`, `related`. `performance` opens with an eval table (each accuracy or eval result beside the reference model's figure); for an LLM it then carries a speed table with one row per serving profile and the columns profile, ISL, OSL, concurrency, N, TTFT, prefill and decode tok/s/u, and E2EL; `package` warns when one is missing. The retired keys `architecture`, `status`, `out_of_scope_use` and `risks` still load for one release, folded into `description` or `limitations` with a warning. Frontmatter, under the Hub's own keys: `license` (`{id, name, link}` — `id` must be a lowercase Hub licence identifier or `other`; `name` and `link` are emitted **only** beside `id: other`, which is the case the Hub documents them for, and ignored otherwise), `pipeline_tag` (defaults to `text-generation` for the vLLM kinds), `base_model` (defaults to the weights repo). Bundles already published pick up the template on their next `tt-model package --container`; nothing rewrites a live card. The annotated block is in [`examples/container-example.yaml`](../examples/container-example.yaml). |
 
 `max_num_seqs` and `block_size` are **required after profile merge** — the TT backend
 rejects vLLM's own defaults. `mesh_device` must be a value from the plugin's closed
@@ -139,11 +140,11 @@ publishing `device_count: 1` with nothing said. Box names (`QB2`, `T3K`, `TG`) b
   `vllm` source (`{version}`, `{wheel}`, or `{path}`), a `plugin` source (`{path}` — the
   default — or `{repo, ref}` or `{version}`), and `extra_models_dir` (the directory the
   plugin scans for per-model `vllm_metadata.json` files, which must be covered by
-  `source.code`). This is the only kind that has run on hardware.
+  `source.code`). Run on hardware.
 - **`vllm-fork`** — the `tenstorrent/vllm` fork with the plugin in-tree, both installed
-  editable, launched through tt-metal's readiness runner. The older arrangement, and what
-  this repo's own `install`/`provision` set up. Its `runtime:` wants `vllm: {repo, ref}` (the
-  fork) and `model_dir` instead of a plugin block. Argv-tested but not yet run on hardware.
+  editable, launched through tt-metal's readiness runner. The older arrangement. Its
+  `runtime:` wants `vllm: {repo, ref}` (the fork) and `model_dir` instead of a plugin
+  block. Argv-tested but not yet run on hardware.
 - **`tt-dit-server`** — a diffusion model behind its own HTTP app, launched with
   `python -m uvicorn`. A diffusion transformer has no tokens, no KV cache and no continuous
   batching, so vLLM has nothing to do: this kind installs a small HTTP stack (fastapi /
@@ -159,6 +160,17 @@ publishing `device_count: 1` with nothing said. Box names (`QB2`, `T3K`, `TG`) b
   the model this kind was built for, so a *second* diffusion model should set its own. The
   value is always derived from `mesh_device`, so the SKU and the shape cannot drift — never
   hand-write the shape into `serve.env`.
+
+- **`http-server`** — the model's own HTTP server, launched by its own argv. For a stack
+  that is neither a vLLM arrangement nor a diffusion ASGI app (a stdlib
+  `ThreadingHTTPServer` behind a validated `serve*.sh`, say). Its `runtime:` wants
+  `command`, the launch argv recorded verbatim with `{host}`/`{port}` placeholders that
+  `serve` substitutes (`{port}` is required); every `.py`/`.sh` it runs must be covered by
+  the allowlist. Optional: `ready_line` (the log substring that marks the boot done; default
+  `"event": "ready"`), `packages` (what the server needs beyond tt-metal's editable
+  install — no engine and no default HTTP stack are installed), and `lock`. Like
+  `tt-dit-server`, it needs only `hardware` and `mesh_device`; the validated serving
+  knobs go in `serve.args`, which merge per profile.
 
 ### Example
 
@@ -280,8 +292,8 @@ byte-for-byte unaffected. Inside it: an `ImageRef` (registry, repository, tag, d
 `kind`, the opaque `runtime` dict, the merged-once `serve` defaults and `serve_profiles`, a
 `code_dir` pointing at the browsable copy, the `verify` list, and the pinned `built:`
 provenance block. `to_wire()` also fills the top-level `device_count` from the default
-profile's hardware label, and sets `build_key = None` / `kernel_count = 0` because kernels
-JIT inside the container into a mounted cache dir rather than shipping precompiled.
+profile's hardware label. No kernels ship: they JIT inside the container into a mounted
+cache dir.
 
 ## The image on the wire: an exploded OCI layout
 
@@ -305,6 +317,18 @@ On any box with Docker and a card:
 ```bash
 tt-model serve you/my-model                   # auto-pulls the image + weights, then serves
 ```
+
+`serve` stamps `tt.model.*` labels on the container (alongside the operational
+`org.tenstorrent.tt-model.*` ones) so a UI can read what the package is instead of guessing from
+its name or routes (`docker inspect --format '{{json .Config.Labels}}' <container>`):
+`tt.model.kind`, `tt.model.openai_compatible`, `tt.model.tool_calling`, `tt.model.reasoning`,
+`tt.model.port`, `tt.model.manifest_schema` — all derived from the manifest.
+`openai_compatible` means the server speaks the OpenAI chat API; it comes from the kind's launcher,
+so it is `true` for `vllm-plugin`/`vllm-fork` and `false` for `tt-dit-server` and `http-server`
+(even a server that answers `/v1/models`). `tool_calling` and `reasoning` read only the profile's
+`capabilities`, so a server that turns tools on through its own argv still shows `false`. A
+semantic task label (`chat` / `image_generation` / …) needs a new authored field and is a
+deliberate follow-up, so it is not guessed; `kind` + `openai_compatible` already distinguish a chat stack from a diffusion one.
 
 `serve` starts the container and then watches it boot, as a short checklist of the boot's
 landmarks parsed out of the container log — never the log itself:
@@ -576,8 +600,8 @@ cache perms, and a tqdm stand-in that would have silently downloaded nothing.
 
 ## Testing
 
-The suite is 581 offline tests — no hardware, no daemon, no network — and a large share of
-them cover this path. `oci.py` runs against a fake `docker` on PATH; argv composition is pure
+The suite is fully offline — no hardware, no daemon, no network — and a large share of it
+covers this path. `oci.py` runs against a fake `docker` on PATH; argv composition is pure
 so `serve --print` exercises every flag; the manifest's front-loaded validation is checkable
 on a machine that does not have the author's tt-metal tree. Run the whole suite with
 `pytest -q`.
@@ -590,4 +614,4 @@ on a machine that does not have the author's tt-metal tree. Run the whole suite 
   `tt-model rm` only undoes a *pull*, so an author's images accumulate. No `--prune-previous`
   yet.
 - The `vllm-plugin` and `tt-dit-server` kinds have run on hardware; `vllm-fork` is
-  argv-tested.
+  argv-tested; `http-server` was brought up for one model in #167.
