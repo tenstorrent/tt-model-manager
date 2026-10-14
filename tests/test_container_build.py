@@ -793,7 +793,7 @@ def test_the_performance_check_skips_non_llm_kinds_and_empty_text():
 
 
 def test_no_model_ci_row_until_that_gate_exists():
-    """DEVSTACK-430 is not built. A "not yet run" row would be a claim frozen at build
+    """The model CI gate is not built. A "not yet run" row would be a claim frozen at build
     time that no consumer could refresh."""
     assert "Model CI" not in _card(card=_FULL_CARD)
 
