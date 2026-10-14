@@ -18,7 +18,7 @@ weights: org/Weights-7B
 #                Upstream vLLM's platform-plugin API means a hardware backend no longer
 #                needs a fork; this is where Tenstorrent is heading.
 #   vllm-fork    the tenstorrent/vllm fork, plugin in-tree, both installed editable.
-#                The older arrangement, and what `tt-model install` provisions on a host.
+#                The older arrangement.
 #   tt-dit-server  a diffusion model behind its own HTTP app, served with uvicorn. There
 #                are no tokens, no KV cache and no continuous batching in a diffusion
 #                pipeline, so no vLLM: point runtime.app at the ASGI target that

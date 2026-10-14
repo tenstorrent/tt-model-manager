@@ -32,6 +32,7 @@ from typing import Dict, List, Optional
 
 from .manifest import (
     BundledPlatform,
+    Capabilities,
     Deps,
     Entrypoint,
     Manifest,
@@ -48,6 +49,9 @@ from .manifest import (
 # Where the shipped wheels and the embedded metal tree live inside the bundle.
 WHEELS_DIR = "wheels"
 METAL_DIR = "metal"
+#: Bundle dir holding a v6 thin bundle's shipped hand-written ops tree (issue #127), put on
+#: PYTHONPATH at serve. Its own top-level packages are what `model.py` imports.
+EXTRA_CODE_DIR = "extra_code"
 INSTALL_SCRIPT = "install.sh"
 RUN_SCRIPT = "run.sh"
 REQUIREMENTS = "requirements.txt"
@@ -101,6 +105,10 @@ _METAL_IGNORE_ROOT_ONLY = frozenset(
 # location-specific patterns above — used to judge a whole resolved path, not just one directory's
 # children.
 _JUNK_ANYWHERE_ON_PATH = shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "venv", ".venv")
+# A shipped extra_code/ tree: the junk above plus byte-code and packaging metadata.
+_EXTRA_CODE_IGNORE = shutil.ignore_patterns(
+    ".git", "__pycache__", ".pytest_cache", "venv", ".venv", "*.pyc", "*.egg-info",
+)
 
 
 def _metal_ignore(anchor: Path):
@@ -612,6 +620,14 @@ def render_install_sh(manifest: Manifest) -> str:
         if d.vllm is not None and d.vllm.overrides:
             steps.append(_render_vllm_metadata_override(d.vllm.overrides))
         steps.append('uv pip check --python "$PYBIN"')
+        # (4) Sanity checks, LAST — the venv is complete, so these run against the real installed
+        # deps (e.g. `import <ops pkg>`, or assert ttnn.__version__ is in the validated range). A
+        # failing check fails install (the script runs under `set -e`), which is the point.
+        # The shipped ops tree is only on PYTHONPATH via run.sh, so put it there for the checks too.
+        verify_pp = (f'PYTHONPATH="$HERE/{d.extra_code_dir.strip("/")}${{PYTHONPATH:+:$PYTHONPATH}}" '
+                     if d.extra_code_dir else "")
+        for stmt in d.verify:
+            steps.append(f'{verify_pp}"$VENV/bin/python" -c {shlex.quote(stmt)}')
         install = "\n".join(steps)
         deps_note = "v6 thin: ttnn/tt-metal-models (index) + empty-target vLLM + plugin/ops wheels (by path)"
     else:
@@ -830,32 +846,31 @@ export MODEL_WEIGHTS_DIR="$resolved_hf_model"
     res = manifest.resources
     max_num_seqs = (res.max_num_seqs if res and res.max_num_seqs else 32)
     block_size = (res.block_size if res and res.block_size else 64)
-    serving = f"--max_num_seqs {max_num_seqs} --block_size {block_size}"
+    serving_args = ["--max_num_seqs", str(max_num_seqs), "--block_size", str(block_size)]
     if weights_rev:
-        rev = shlex.quote(weights_rev)
-        serving += f" --revision {rev} --tokenizer-revision {rev}"
+        serving_args.extend(["--revision", weights_rev, "--tokenizer-revision", weights_rev])
     if res and res.max_model_len:
-        serving += f" --max_model_len {res.max_model_len}"
+        serving_args.extend(["--max_model_len", str(res.max_model_len)])
     # Tool/reasoning parsers, if the manifest declares them. Same vLLM flag spelling the
-    # compose path uses (see bundles._compose_launch_command): vLLM's FlexibleArgumentParser
+    # container path uses (see launchers._capability_argv): vLLM's FlexibleArgumentParser
     # normalizes '_'->'-', so '--tool_parser' would become the nonexistent '--tool-parser';
     # the real flag is '--tool-call-parser', and vLLM hard-errors on it without
     # '--enable-auto-tool-choice'. '--reasoning_parser' normalizes to the valid '--reasoning-parser'.
     cap = manifest.capabilities
     if cap is not None:
         if cap.tool_parser:
-            serving += f" --enable-auto-tool-choice --tool-call-parser {cap.tool_parser}"
+            serving_args.extend(["--enable-auto-tool-choice", "--tool-call-parser", cap.tool_parser])
         if cap.reasoning_parser:
-            serving += f" --reasoning_parser {cap.reasoning_parser}"
+            serving_args.extend(["--reasoning_parser", cap.reasoning_parser])
     if res and res.extra_args:
-        serving += " " + " ".join(str(a) for a in res.extra_args)
+        serving_args.extend(str(a) for a in res.extra_args)
     # Fabric + trace region for the TT backend, rendered into --additional-config as JSON — the
     # same shape the v5.1 CONTAINER path emits (see launchers.VllmPluginLauncher.serve_argv). Without
     # this, run.sh only ever exported MESH_DEVICE and left fabric off, so a v6 thin bundle authored
     # for a multi-chip mesh (mesh.fabric = FABRIC_1D...) ran fabric-OFF and could not form its mesh —
     # even though the manifest declared it (issue #86). Single-chip bundles set neither field and are
     # byte-for-byte unchanged (no empty --additional-config).
-    tt_cfg: Dict[str, object] = {}
+    tt_cfg: Dict[str, object] = dict(res.tt_additional_config) if res else {}
     if manifest.mesh and manifest.mesh.fabric:
         tt_cfg["fabric_config"] = manifest.mesh.fabric
     if res and res.trace_region_bytes:
@@ -863,13 +878,18 @@ export MODEL_WEIGHTS_DIR="$resolved_hf_model"
     if tt_cfg:
         # json has only double-quoted keys/values, so shlex.quote wraps the whole blob in single
         # quotes cleanly — one argv token when this string is spliced into the CMD=() array below.
-        serving += " --additional-config " + shlex.quote(json.dumps({"tt": tt_cfg}))
+        serving_args.extend(["--additional-config", json.dumps({"tt": tt_cfg})])
     # PYTHONPATH: a v5 fat bundle embeds the modified metal tree at metal/; a v6 thin bundle gets
     # tt_transformers/TTTv2 from the installed wheels and only needs its own model.py on the path
     # (bundle root, or deps.model_dir). This is the one serve-time difference between the regimes.
     if manifest.deps is not None:
         md = (manifest.deps.model_dir or ".").strip("/")
-        pythonpath_entry = "$HERE" if md in ("", ".") else f"$HERE/{md}"
+        entries = ["$HERE" if md in ("", ".") else f"$HERE/{md}"]
+        # A shipped ops tree (issue #127) goes on the path ahead of model_dir so its packages
+        # resolve for model.py's imports.
+        if manifest.deps.extra_code_dir:
+            entries.insert(0, f"$HERE/{manifest.deps.extra_code_dir.strip('/')}")
+        pythonpath_entry = ":".join(entries)
     else:
         pythonpath_entry = f"$HERE/{METAL_DIR}"
     # The actual serve command. kind="vllm" (default; the only case for v5 fat, which has no kind
@@ -890,7 +910,11 @@ export MODEL_WEIGHTS_DIR="$resolved_hf_model"
             f'--lifespan on {shlex.quote(manifest.deps.app)} "$@")'
         )
     else:
-        cmd_line = f'CMD=("$PYBIN" -m vllm.entrypoints.openai.api_server --model "{weights}" {serving} "$@")'
+        # Quote every author-controlled token independently before embedding it in the bash array.
+        # In particular, repeated ``extra_args`` are argv, not a shell fragment: whitespace,
+        # semicolons, command substitutions, and glob characters remain literal.
+        argv = ["-m", "vllm.entrypoints.openai.api_server", "--model", weights, *serving_args]
+        cmd_line = f'CMD=("$PYBIN" {" ".join(shlex.quote(a) for a in argv)} "$@")'
     return f"""#!/usr/bin/env bash
 # Serve this model on TT hardware. Assumes ./{INSTALL_SCRIPT} has been run.
 set -euo pipefail
@@ -941,10 +965,9 @@ fi
 {hf_export}{extra_env}{cmd_line}
 # TT_MODEL_PRINT=1 (set by `tt-model serve --print`) echoes the fully-resolved command+env
 if [ "${{TT_MODEL_PRINT:-0}}" = "1" ]; then
-  printf 'LD_PRELOAD=%q TT_METAL_HOME=%q EXTRA_MODELS_DIR=%q MESH_DEVICE=%q HF_MODEL=%q\n ' \\
+  printf 'LD_PRELOAD=%s TT_METAL_HOME=%s EXTRA_MODELS_DIR=%s MESH_DEVICE=%s HF_MODEL=%s\n  ' \\
     "$LD_PRELOAD" "$TT_METAL_HOME" "$EXTRA_MODELS_DIR" "$MESH_DEVICE" "${{HF_MODEL:-}}"
-  printf ' %q' "${{CMD[@]}}"
-  printf '\n'
+  printf '%q ' "${{CMD[@]}}"; echo  # shell-quoted so the printed command pastes back intact
   exit 0
 fi
 {weight_prefetch}exec "${{CMD[@]}}"
@@ -1228,6 +1251,8 @@ def stage_thin_package(
     plugin_wheel: Optional[Path] = None,
     extra_wheels: Optional[List[Path]] = None,
     models_wheels: Optional[List[Path]] = None,
+    extra_code: Optional[Path] = None,
+    verify: Optional[List[str]] = None,
     vllm_wheel: Optional[Path] = None,
     vllm_common_requirements: Optional[Path] = None,
     vllm_version: str = VLLM_VERSION,
@@ -1237,6 +1262,9 @@ def stage_thin_package(
     mesh: Optional[Mesh] = None,
     env: Optional[Dict[str, str]] = None,
     resources: Optional[Resources] = None,
+    capabilities: Optional[Capabilities] = None,
+    readme: Optional[Path] = None,
+    provenance: Optional[Path] = None,
     python_version: str = "3.12",
     tt_metal_version: str = "unknown",
 ) -> Manifest:
@@ -1292,6 +1320,21 @@ def stage_thin_package(
         if with_vllm:
             raise ValueError(f'kind={kind!r} serves no vLLM; pass with_vllm=False.')
 
+    staged.mkdir(parents=True, exist_ok=True)
+
+    # Documentation is part of the tested artifact, not something synthesized during upload.
+    # Copy bytes verbatim so a later ``tt-model push`` can upload the exact reviewed directory.
+    if readme is not None:
+        shutil.copy2(readme, staged / "README.md")
+    if provenance is not None:
+        try:
+            provenance_value = json.loads(provenance.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"provenance must be a readable JSON object: {exc}") from exc
+        if not isinstance(provenance_value, dict):
+            raise ValueError("provenance must contain a JSON object")
+        shutil.copy2(provenance, staged / "PROVENANCE.json")
+
     # The runner, copied to the bundle root under its own name so `--main-class <module>:<Class>`
     # resolves it via PYTHONPATH=$HERE at serve time. It must not shadow a file tt-model writes.
     if Path(model_py).name in THIN_RESERVED_NAMES:
@@ -1302,6 +1345,19 @@ def stage_thin_package(
     staged.mkdir(parents=True, exist_ok=True)
     model_dest = staged / Path(model_py).name
     shutil.copy2(model_py, model_dest)
+
+    # A shipped ops tree (issue #127): copy its CONTENTS into extra_code/ so its own top-level
+    # packages sit directly on PYTHONPATH (run.sh adds $HERE/extra_code ahead of the bundle root).
+    # Raise on a missing source rather than silently ship nothing — mirrors build.stage_code.
+    extra_code_rel: Optional[str] = None
+    if extra_code is not None:
+        src = Path(extra_code)
+        if not src.is_dir():
+            raise ValueError(f"extra_code {str(src)!r} is not a directory")
+        shutil.copytree(src, staged / EXTRA_CODE_DIR, dirs_exist_ok=True, symlinks=True,
+                        ignore=_EXTRA_CODE_IGNORE)
+        _normalize_staged_symlinks(staged / EXTRA_CODE_DIR)
+        extra_code_rel = EXTRA_CODE_DIR
 
     # requirements.txt: the author's index pins, or a #29 template with TODO lines to fill —
     # kind="tt-dit-server" gets its own template (base HTTP stack instead of vLLM notes), and an
@@ -1394,6 +1450,8 @@ def stage_thin_package(
                                     or (vllm_spec and vllm_spec.wheel)) else None),
         vllm=vllm_spec,
         model_dir=".",
+        extra_code_dir=extra_code_rel,
+        verify=list(verify or []),
         kind=kind,
         app=app,
     )
@@ -1413,6 +1471,7 @@ def stage_thin_package(
         mesh=mesh,
         env=env or {},
         resources=resources,
+        capabilities=capabilities,
         deps=deps,
     )
 

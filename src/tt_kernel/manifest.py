@@ -159,7 +159,9 @@ class Deps(BaseModel):
     the separate
     empty-target vLLM install step (see ``Vllm``) — vLLM is NOT in ``requirements`` or ``wheels``
     because it needs its own ordered build. ``model_dir`` is where ``model.py`` lives (added to
-    PYTHONPATH at serve). SFPI and firmware are external, box-managed deps — never in here.
+    PYTHONPATH at serve). ``extra_code_dir`` ships a tree of hand-written pure-Python model ops
+    alongside ``model.py`` and is also put on PYTHONPATH (issue #127); ``verify`` holds install-time
+    ``python -c`` sanity checks. SFPI and firmware are external, box-managed deps — never in here.
 
     ``kind`` picks the serving front end ``render_run_sh`` puts in ``run.sh``, mirroring the v5.1
     container schema's ``ContainerSpec.kind`` (see ``launchers.py``) so an author who has already
@@ -184,6 +186,15 @@ class Deps(BaseModel):
     # vLLM core install (empty-target, for the plugin). None => bundle serves no vLLM (non-vLLM model).
     vllm: Optional["Vllm"] = None
     model_dir: str = "."                     # where model.py lives (bundle root), added to PYTHONPATH
+    # A bundle-relative directory of hand-written, pure-Python model ops that ride WITH the bundle
+    # (issue #127) — custom attention/decode/vision code that composes stock ttnn ops but isn't in
+    # ttnn/tt-metal/tt_transformers. Staged and added to PYTHONPATH ahead of model_dir at serve, so
+    # `import <pkg>` resolves. NOT for new C++ ttnn ops or a forked build — that stays v5/v5.1.
+    extra_code_dir: Optional[str] = None
+    # Python statements run (as `python -c`) at the end of install.sh, after the venv is built — the
+    # v6 analog of the container schema's `verify`. Use to sanity-import the shipped code and assert
+    # the ttnn version it was validated against (the installed ttnn is only known post-install).
+    verify: List[str] = Field(default_factory=list)
     kind: str = "vllm"                       # one of THIN_KINDS (see class docstring)
     # The ASGI entrypoint ("module:attribute") a "tt-dit-server" kind serves with uvicorn — the v6
     # analog of ContainerSpec.runtime["app"]. Unused (must be None) for kind="vllm".
@@ -228,6 +239,10 @@ class Resources(BaseModel):
     max_num_seqs: Optional[int] = None
     block_size: Optional[int] = None
     trace_region_bytes: Optional[int] = None
+    # Additional values for vLLM's ``--additional-config {"tt": ...}`` payload. Fabric and
+    # trace-region size remain first-class fields above; the renderer overlays those canonical
+    # values onto this mapping so an escape hatch cannot silently contradict the manifest.
+    tt_additional_config: Dict[str, object] = Field(default_factory=dict)
     # Escape hatches (see docstring): raw args appended after the composed ones, or a full
     # argv that replaces composition entirely (per machine key, or "default").
     extra_args: List[str] = Field(default_factory=list)
@@ -323,7 +338,7 @@ class ServeSettings(BaseModel):
     server_timeout: Optional[int] = None
 
     # Tool-calling / reasoning parsers. Same block, same field names, same rendering rules
-    # as the v4 path (see ``bundles._compose_launch_*``): ``tool_parser`` emits
+    # as the v5/v6 ``run.sh`` (see ``packaging.render_run_sh``): ``tool_parser`` emits
     # ``--enable-auto-tool-choice --tool-call-parser X`` because vLLM hard-errors on the
     # latter without the former, and ``reasoning_parser`` keeps its underscore on purpose.
     # Mergeable like everything else: declare it once under ``serve:``, override per profile.
