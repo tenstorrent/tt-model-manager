@@ -620,7 +620,7 @@ export TT_METAL_VISIBLE_DEVICES
     if res and res.max_model_len:
         serving += f" --max_model_len {res.max_model_len}"
     # Tool/reasoning parsers, if the manifest declares them. Same vLLM flag spelling the
-    # compose path uses (see bundles._compose_launch_command): vLLM's FlexibleArgumentParser
+    # container path uses (see launchers._capability_argv): vLLM's FlexibleArgumentParser
     # normalizes '_'->'-', so '--tool_parser' would become the nonexistent '--tool-parser';
     # the real flag is '--tool-call-parser', and vLLM hard-errors on it without
     # '--enable-auto-tool-choice'. '--reasoning_parser' normalizes to the valid '--reasoning-parser'.
