@@ -174,6 +174,12 @@ def test_the_hf_cache_is_mounted_read_write_and_pointed_at_by_HF_HOME():
     assert "HF_HOME=/hf" in argv
 
 
+def test_pinned_weights_keep_HF_MODEL_as_the_repo_id():
+    """tt_transformers names the model after HF_MODEL's last path component."""
+    m = _wire(weights={"repo": "org/Weights-7B", "revision": "deadbeef"})
+    assert "HF_MODEL=org/Weights-7B" in _run_argv(m)
+
+
 def test_the_kernel_cache_is_persisted_on_the_host():
     argv = _run_argv(_wire())
     assert "/home/u/.cache/tt-model/my-model/cache:/cache" in argv
@@ -391,6 +397,27 @@ def test_http_server_gets_the_pinned_weights_revision():
     m = _wire(**{**HTTP, "weights": {"repo": "org/Weights-7B", "revision": "c" * 40}})
     env = launcher_for("http-server").serve_env(m, m.container.resolve_profile())
     assert env[WEIGHTS_REVISION_ENV] == "c" * 40
+
+
+AUX = {"auxiliary_weights": [{"repo": "org/drafter", "revision": "d" * 40}, "org/adapter"]}
+
+
+@pytest.mark.parametrize("kind", [{}, FORK, HTTP], ids=["vllm-plugin", "vllm-fork", "http-server"])
+def test_every_kind_gets_the_auxiliary_weight_pins(kind):
+    """Model code loads its own aux checkpoints, so the pins must reach it in the env."""
+    from tt_kernel.manifest import AUXILIARY_WEIGHTS_ENV
+
+    m = _wire(**{**kind, **AUX})
+    env = launcher_for(m.container.kind).serve_env(m, m.container.resolve_profile())
+    assert env[AUXILIARY_WEIGHTS_ENV] == f"org/drafter@{'d' * 40},org/adapter"
+
+
+def test_no_auxiliary_weights_means_no_auxiliary_variable():
+    from tt_kernel.manifest import AUXILIARY_WEIGHTS_ENV
+
+    m = _wire()
+    assert AUXILIARY_WEIGHTS_ENV not in launcher_for(m.container.kind).serve_env(
+        m, m.container.resolve_profile())
 
 
 def test_http_server_does_not_need_engine_settings():
@@ -1147,3 +1174,19 @@ def test_an_unpinned_weights_id_adds_no_revision_flag():
     m = _wire()
     assert "--revision" not in launcher_for("vllm-plugin").serve_argv(m, m.container.resolve_profile())
     assert "--revision" not in " ".join(launcher_for("vllm-fork").serve_argv(_wire(**FORK), _wire(**FORK).container.resolve_profile()))
+
+
+def test_every_kind_is_documented():
+    """A registered kind missing from the launcher docstring, the container doc, the
+    E2E recipe or the annotated example is invisible to authors choosing one."""
+    import tt_kernel.launchers as launchers
+
+    root = Path(__file__).resolve().parents[1]
+    doc = (root / "docs" / "container_packages.md").read_text()
+    recipe = (root / "docs" / "E2E_RECIPE_V5.1.md").read_text()
+    example = (root / "examples" / "container-example.yaml").read_text()
+    for kind in launchers.KINDS:
+        assert f"``{kind}``" in launchers.__doc__, kind
+        assert f"**`{kind}`**" in doc, kind
+        assert f"`{kind}`" in recipe, kind
+        assert f"#   {kind} " in example, kind

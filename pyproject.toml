@@ -7,7 +7,7 @@ name = "tt-model"
 version = "0.1.0"
 description = "Publish and pull self-contained tt-metal model bundles over Hugging Face Hub"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Tenstorrent" }]
 keywords = ["tenstorrent", "tt-metal", "ttnn", "vllm", "huggingface"]
