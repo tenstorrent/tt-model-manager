@@ -74,6 +74,7 @@ Read, skipping what does not exist:
 | stock `vllm==X.Y.Z` from PyPI + a separate `vllm-tt-plugin`; launch is `vllm serve …` | `vllm-plugin` |
 | the `tenstorrent/vllm` **fork** (plugin in-tree); launch is `python -m models.common.readiness_check.run_vllm_server …` | `vllm-fork` |
 | a diffusion model — no tokens, no KV cache; an ASGI app under `models/tt_dit/server/<model>`; launch is uvicorn | `tt-dit-server` |
+| the model's **own HTTP server** (neither vLLM nor an ASGI app — e.g. a stdlib server behind a `serve*.sh`); launch is its own argv | `http-server` |
 
 No local `tenstorrent/vllm` clone and a standalone plugin checkout ⇒ `vllm-plugin`.
 `vllm-fork` additionally needs `runtime.model_dir` (the launcher's `--model-dir`), covered
@@ -83,6 +84,12 @@ by `source.code`.
 by `source.code`. Do **not** invent `max_num_seqs` / `block_size` for it: they configure a
 continuous-batching engine this kind does not have, and it does not ask for them. It needs
 only `hardware` and `mesh_device`.
+
+`http-server` needs `runtime.command` — the validated launch argv as a list, with `{host}` /
+`{port}` placeholders (`{port}` is required). Every `.py`/`.sh` it runs must be covered by
+the allowlist. Set `runtime.ready_line` if the server's ready log line is not the default
+`"event": "ready"`, and put serving knobs in `serve.args`. Like `tt-dit-server`, it needs
+only `hardware` and `mesh_device`. See `examples/container-example.yaml`.
 
 ## Step 4 — Build the `source.code` allowlist (the part agents get wrong)
 

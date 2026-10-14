@@ -332,6 +332,25 @@ def test_to_wire_renders_a_v5_1_manifest_that_round_trips_as_json():
     assert back.weights.repo_id == "org/Weights-7B"
 
 
+def test_to_wire_passes_only_fields_the_wire_manifest_declares(monkeypatch):
+    """Manifest ignores unknown keys (an older reader must accept a newer bundle), so a
+    field to_wire sets that the schema lacks is dropped without a word. Forbid extras here
+    so a dead field fails loudly instead."""
+    from pydantic import ConfigDict
+
+    import tt_kernel.container_manifest as cm
+
+    class StrictManifest(Manifest):
+        model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    monkeypatch.setattr(cm, "Manifest", StrictManifest)
+    wire = _mani().to_wire(
+        image_tag="tt-model/my-model:abc123", tt_metal_version="0.72.1",
+        tt_kernel_version="0.1.0",
+    )
+    assert wire.is_container
+
+
 def test_to_wire_derives_device_count_from_the_default_profile():
     assert _mani().to_wire(
         image_tag="t:1", tt_metal_version="v", tt_kernel_version="0.1.0"

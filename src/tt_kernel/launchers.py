@@ -9,7 +9,7 @@ everything that varies arrives through the hooks below, so adding a kind is a ne
 here plus a registration in :data:`KINDS` — no change to the manifest schema, the image
 build, or any command.
 
-Three kinds, named for what they ARE rather than for their age:
+Four kinds, named for what they ARE rather than for their age:
 
 ``vllm-plugin``
     Stock ``vllm==X.Y.Z`` from PyPI (built from sdist with ``VLLM_TARGET_DEVICE=empty``)
@@ -20,14 +20,18 @@ Three kinds, named for what they ARE rather than for their age:
 ``vllm-fork``
     The ``tenstorrent/vllm`` fork with the plugin in-tree at ``plugins/vllm-tt-plugin``,
     both installed *editable* — so the ~200 MB checkout has to survive into the runtime
-    image. Launched through tt-metal's readiness runner. This is the older arrangement,
-    and it is what this repo's own ``install``/``provision`` still set up.
+    image. Launched through tt-metal's readiness runner. This is the older arrangement.
 
 ``tt-dit-server``
     A diffusion transformer served by the ASGI app tt-metal ships beside it under
     ``models/tt_dit/server/<model>``, launched with uvicorn. There are no tokens, no KV
     cache and no continuous batching, so vLLM has nothing to do: this kind installs a
     small HTTP stack instead of an engine, and the serving code is the model's own.
+
+``http-server``
+    The model's own HTTP server, launched by the argv recorded in ``runtime.command``
+    (``{host}``/``{port}`` substituted at serve). For stacks that are neither a vLLM
+    arrangement nor a diffusion ASGI app. Installs no engine and no default HTTP stack.
 
 Neither vLLM kind is called plain ``vllm``: a v4 manifest's ``runtime.kind = "vllm"``
 already means the fork, so reusing the bare word here would give one field two meanings
@@ -698,13 +702,12 @@ RESOLVE_EXTRA_MODELS = (
 
 
 def _capability_argv(profile: ServeProfile) -> List[str]:
-    """Render the tool/reasoning parsers, matching the v4 path's rules exactly.
+    """Render the tool/reasoning parsers, matching ``packaging.render_run_sh``'s rules exactly.
 
     ``--tool-call-parser`` is emitted WITH ``--enable-auto-tool-choice`` because vLLM
     hard-errors on the former without the latter, and ``--reasoning_parser`` keeps its
-    underscore: typer normalises '_'->'-' so '--tool_parser' would become the nonexistent
+    underscore: vLLM's argparse normalises '_'->'-' so '--tool_parser' would become the nonexistent
     '--tool-parser', while '--reasoning_parser' normalises to the valid spelling.
-    See ``bundles._compose_launch_vllm``.
     """
     cap = profile.capabilities
     if cap is None:

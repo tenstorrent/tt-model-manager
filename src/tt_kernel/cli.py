@@ -726,6 +726,14 @@ def package_thin(
         "ship a custom vLLM fork); shipped in wheels/ and installed by path."),
     ops_wheel: Optional[List[str]] = typer.Option(
         None, "--ops-wheel", help="A generic_op custom-op wheel to ship in wheels/ (repeatable)."),
+    extra_code: Optional[str] = typer.Option(
+        None, "--extra-code", help="A directory of hand-written pure-Python model ops to ship with "
+        "the bundle (issue #127) — its top-level packages go on PYTHONPATH ahead of the runner. For "
+        "code that composes stock ttnn ops; NOT for a new C++ ttnn op or a forked build."),
+    verify: Optional[List[str]] = typer.Option(
+        None, "--verify", help="A python -c statement run at the end of install.sh, after the venv "
+        "is built (repeatable). Use to sanity-import the shipped code or assert the ttnn version it "
+        "was validated against; a failing check fails the install."),
     models_wheel: Optional[List[str]] = typer.Option(
         None, "--models-wheel", help="A locally-built wheel that satisfies a requirements.txt pin "
         "not yet on an index (e.g. a hand-built tt-metal-models wheel from tenstorrent/tt-metal#54478, "
@@ -784,7 +792,7 @@ def package_thin(
 
     This command is beta and unsupported: the v6 thin format is still a draft, its flags and
     on-disk layout may change without notice, and bundles it produces are not guaranteed to
-    install or serve. Use ``tt-model package`` (v5 self-contained) for supported packaging.
+    install or serve. Use ``tt-model package --container`` (v5.1 container) for supported packaging.
 
     DRAFT (reflects the plan): fully installable once TTTv2 + the models wheel publish so the pins are
     real; until then the generated requirements.txt carries TODO pins for those two (ttnn already
@@ -795,7 +803,7 @@ def package_thin(
         ["[muted]The v6 thin format is a draft: flags and layout may change without notice,[/muted]",
          "[muted]and the bundles it produces are not guaranteed to install or serve.[/muted]",
          "",
-         "[muted]supported path:  tt-model package  (v5 self-contained)[/muted]"],
+         "[muted]supported path:  tt-model package --container tt-model.yaml  (v5.1)[/muted]"],
     ))
     if publish and private is True:  # explicit --private contradicts --publish
         raise _err("--publish and --private conflict: a catalog listing is public by definition. "
@@ -891,6 +899,8 @@ def package_thin(
         requirements=Path(requirements).expanduser() if requirements else None,
         plugin_wheel=Path(plugin_wheel).expanduser() if plugin_wheel else None,
         extra_wheels=[Path(w).expanduser() for w in (ops_wheel or [])],
+        extra_code=Path(extra_code).expanduser() if extra_code else None,
+        verify=list(verify or []),
         models_wheels=[Path(w).expanduser() for w in (models_wheel or [])],
         vllm_wheel=Path(vllm_wheel).expanduser() if vllm_wheel else None,
         vllm_version=vllm_version, with_vllm=with_vllm,

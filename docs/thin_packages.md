@@ -31,6 +31,7 @@ full platform. There is **no embedded `ttnn` wheel and no `metal/` tree**.
   vllm-overrides.txt          # numpy<2 / opencv pins for the empty-target vLLM build (see below)
   wheels/                     # bundled wheels installed BY PATH: vllm-tt-plugin (the vLLM
                               # integration) + any generic_op custom-op wheel [+ optional prebuilt vLLM wheel]
+  extra_code/                 # optional: hand-written pure-Python model ops, on PYTHONPATH (issue #127)
   vllm_models/<name>/vllm_metadata.json   # EXTRA_MODELS_DIR contract (arch -> main_class)
   install.sh  run.sh
   # weights: NOT embedded. Hugging Face (HF) pointer in the manifest
@@ -45,6 +46,14 @@ full platform. There is **no embedded `ttnn` wheel and no `metal/` tree**.
   `overrides` (the pins file), `common_requirements` (optional bundled copy, else fetched),
   `wheel` (optional prebuilt empty-target wheel). `None` for a non-vLLM model.
 - `model_dir`: where `model.py` lives (default the bundle root), used as PYTHONPATH at serve
+- `extra_code_dir`: a shipped tree of hand-written **pure-Python** model ops (custom attention /
+  decode / vision code that composes stock `ttnn` ops but isn't in `ttnn`/`tt-metal`/`tt_transformers`),
+  staged under `extra_code/` and put on PYTHONPATH **ahead of** `model_dir` so `import <pkg>`
+  resolves (`--extra-code <dir>`). For a new C++ `ttnn` op or a forked build, stay on v5/v5.1.
+- `verify`: `python -c` statements run at the end of `install.sh`, after the venv is built
+  (`--verify <stmt>`, repeatable) — sanity-import the shipped tree, or assert the `ttnn` version it
+  was validated against (the installed `ttnn` is only concrete post-install). A failing check fails
+  the install.
 
 ## Install / serve
 `install.sh` builds the venv with uv (`uv venv --relocatable --python <pin>`), then installs in
