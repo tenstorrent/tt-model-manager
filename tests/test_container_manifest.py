@@ -560,6 +560,7 @@ def _example_text() -> str:
 
 def test_the_example_mentions_every_manifest_field():
     from tt_kernel.container_manifest import (
+        RETIRED_CARD_FIELDS,
         CardSettings,
         ContainerManifest,
         ImageSettings,
@@ -574,10 +575,20 @@ def test_the_example_mentions_every_manifest_field():
     for model in (ContainerManifest, Source, ImageSettings, ServeSettings, ServeProfile,
                   CardSettings):
         fields |= set(model.model_fields)
-    # aliased / internal names that never appear verbatim in a manifest
-    fields -= {"schema_version"}
+    # aliased / internal names that never appear verbatim in a manifest, and card fields
+    # that are retired (still accepted, folded, and deliberately no longer taught)
+    fields -= {"schema_version"} | set(RETIRED_CARD_FIELDS)
     missing = sorted(f for f in fields if f not in text)
     assert not missing, f"example does not mention: {missing}"
+
+
+def test_the_example_uses_no_retired_card_field():
+    from pathlib import Path
+
+    from tt_kernel.container_manifest import card_retired_notes, load_container_manifest
+
+    path = Path(__file__).parent.parent / "examples" / "container-example.yaml"
+    assert card_retired_notes(load_container_manifest(path).card) == []
 
 
 def test_the_example_mentions_every_runtime_key():
@@ -605,11 +616,12 @@ def test_the_example_card_text_does_not_restate_what_the_card_generates():
     says not to restate them. An example that does teaches every future author to
     hand-write prose the generator owns and then keep it in step: the live `changh95/*`
     cards each carry their own "Run with tt-cli" and "not an OpenAI API" paragraphs,
-    which `## Using it` now emits too."""
+    which `## Capabilities` now emits too."""
     text = _example_text()
     card_block = text[text.index("\ncard:"):]
     for generated in ("127.0.0.1", "tt serve", "tt-model serve", "tt model pull",
-                      "tt-model pull"):
+                      "tt-model pull", "finish_reason: tool_calls", "Application startup",
+                      "uv tool install"):
         assert generated not in card_block, generated
 
 
