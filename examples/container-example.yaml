@@ -192,44 +192,64 @@ default_profile: p150x4
 verify:                         # build-time assertions run INSIDE the finished image
   - "import models.autoports.my_model.tt as m; assert m"
 
-# Everything the generated model card cannot derive. Each field renders as its own
-# section, in a fixed order the renderer owns, so a reader finds the same information in
-# the same place on every published card. What the tool CAN derive -- hardware, context,
-# the quickstart commands, the tool-calling note, provenance -- is never written here.
+# Everything the generated model card cannot derive. Each field renders in a fixed place
+# the renderer owns, so a reader finds the same information in the same place on every
+# published card. What the tool CAN derive -- the hardware, context, the tt CLI and Docker
+# prerequisites, the quickstart commands, the tool-calling note, provenance -- is never
+# written here. Facts and measurements only: no bring-up history, no opinion on the result.
 card:
-  # One or two sentences on what the model IS and what it is for. Leads the generated
-  # model card, right under the title. The tool cannot know this, so state it here --
-  # omit it and the card jumps straight from the title to the hardware sentence.
+  # The model this package serves and who made it; rendered as a block quote under the
+  # title. (Not the note a verified copy in the Tenstorrent org gets; that one is added
+  # by `tt-model verify`.)
+  attribution: Derived from org/Weights-7B by the Org team, unmodified.
+  # One or two sentences on what the model IS: size, architecture, what it does. Leads
+  # the card under the attribution. The hardware sentence is generated after it, so do
+  # not restate the board here.
   description: >
-    A 7B instruct model for general chat and code, served on Blackhole via vLLM.
-
-  # Required for a catalog listing -- see docs/publishing.md. They are the two questions
-  # every reader of a listing asks, and the two only the author can answer.
-  performance: >
-    78.1% GSM8K (exact match, 8-shot) against 79.0% on an A100 reference; 41 ms/token
-    at batch 1 and 24 ms/token at batch 32, measured on p150x4 with 512-token prompts.
-  limitations: >
-    No speculative decoding on this port. Only p150x4 was validated -- the p150x2
-    profile is declared but untested. Prefix caching is disabled.
-
-  # Recommended: failure modes with user-facing consequences, and any TT-specific
-  # numerical deviation that could silently change results.
-  risks: >
-    Long reasoning chains (>25k tokens) can fall into repetition loops; cap max_tokens.
-
-  architecture: 7B dense decoder-only        # for the At-a-glance table
-  status: Experimental community bring-up    # maturity, in your own words
-
+    A 7B dense decoder-only instruct model for general chat and code, served with vLLM.
   intended_use: General chat and code assistance, single-user or small-batch serving.
-  # The half that gets left out, and the one that costs: a text-only port of a
-  # multimodal checkpoint looks exactly like the checkpoint until someone sends an image.
-  out_of_scope_use: Image or audio input -- this port serves the language model only.
+  # Extras beyond the generated tt CLI, Docker and board bullets.
+  prerequisites: |
+    - 64 GB of host RAM for the first weight conversion
 
-  # Client usage BEYOND the endpoint note the card derives. Most needed by a
-  # tt-dit-server package, whose request/response shapes only the author can document.
+  # Extra Markdown appended under the generated Quickstart. The commands, the port, the
+  # first-boot time and the ready line are generated around this, so do NOT restate them
+  # (see .claude/skills/tt-model-yaml/SKILL.md): write only what the tool cannot derive --
+  # here, the prompt convention this particular model expects.
+  quickstart: |
+    ### Prompting
+    This checkpoint expects the ChatML template; most OpenAI clients apply it for you,
+    but a raw completion call has to include the `<|im_start|>` turns itself.
+
+  # Client usage BEYOND the endpoint note the card derives, appended under Capabilities.
+  # Most needed by a tt-dit-server or http-server package, whose request and response
+  # shapes only the author can document.
   usage: |
-    Pass an OpenAI `tools` payload for function calling; responses come back with
-    `finish_reason: tool_calls`.
+    Tool calling works best with `"tool_choice": "auto"`. Default sampling is temperature
+    0.6, top-p 0.95; greedy decoding tends to loop on long reasoning chains.
+
+  # Required for a catalog listing -- see docs/publishing.md. Performance: an eval table
+  # against the reference model, then for an LLM a speed table with one row per serving
+  # profile and the columns below (package warns when any is missing), then one sentence
+  # on how it was measured.
+  performance: |
+    | eval | this package | reference | prompts |
+    | --- | --- | --- | --- |
+    | Top-1 token agreement | 98.7% | — | 32 |
+    | GSM8K (exact match, 8-shot) | 78.1 | 79.0 | 1,319 |
+
+    | profile | ISL | OSL | concurrency | N | TTFT (ms) | prefill tok/s/u | decode tok/s/u | E2EL (s) |
+    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+    | p150x4 | 512 | 128 | 1 | 1 | 95 | 5,389 | 24 | 5.4 |
+    | p150x4 | 512 | 128 | 32 | 1 | 640 | 800 | 17 | 8.2 |
+
+    Medians, measured on p150x4 with the tt-inference-server benchmark workflow.
+  # What is not implemented or not tested, what the model should not be used for, and
+  # failure modes or precision differences a user would notice.
+  limitations: |
+    - Image or audio input: this port serves the language model only.
+    - No speculative decoding. Only p150x4 was validated; p150x2 is declared but untested.
+    - Long reasoning chains (>25k tokens) can fall into repetition loops; cap max_tokens.
 
   # The terms in prose, for when the weights, any vendored upstream code and the port
   # code are not all under one licence. The structured fields below are what the Hub
@@ -256,12 +276,3 @@ card:
     # link: https://huggingface.co/fishaudio/s2-pro/blob/main/LICENSE
   pipeline_tag: text-generation       # defaults to text-generation for the vLLM kinds
   base_model: [org/Weights-7B]        # defaults to the weights repo above
-
-  # Extra Markdown appended under the generated Quickstart. The commands, the port and
-  # the endpoint are generated around this, so do NOT restate them (see
-  # .claude/skills/tt-model-yaml/SKILL.md): write only what the tool cannot derive --
-  # here, the prompt convention this particular model expects.
-  quickstart: |
-    ### Prompting
-    This checkpoint expects the ChatML template; most OpenAI clients apply it for you,
-    but a raw completion call has to include the `<|im_start|>` turns itself.
