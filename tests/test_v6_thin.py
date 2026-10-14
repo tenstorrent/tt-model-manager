@@ -220,3 +220,6 @@ def test_cli_package_thin_is_marked_beta_and_unsupported(tmp_path):
     ])
     assert res.exit_code == 0, res.output
     assert "package-thin is BETA and not supported" in _plain(res.output)
+    # It points at the v5.1 container path, not the legacy v5 fat bundle.
+    assert "tt-model package --container" in _plain(res.output)
+    assert "v5 self-contained" not in _plain(res.output)
