@@ -1822,8 +1822,6 @@ def _fetch_manifest_for_listing(repo_id: str) -> "Optional[Manifest]":
     Offline raises ``LocalEntryNotFoundError``, which *inherits* the not-found class; it
     is caught first so "cannot reach the Hub" never reads as "no manifest".
     """
-    # `.utils`, not `.errors`: the package floor is huggingface_hub>=0.23 and the
-    # `errors` module only appeared in 0.25; `utils` re-exports both on every version.
     from huggingface_hub.utils import EntryNotFoundError, LocalEntryNotFoundError
 
     try:

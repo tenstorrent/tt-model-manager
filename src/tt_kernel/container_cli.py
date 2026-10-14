@@ -1544,6 +1544,7 @@ def _purge_hf(repo_id: str, what: str) -> None:
     if any(p.exists() for p in strategy.repos):
         console.note(f"could not fully remove {repo.repo_path} — check its permissions",
                      marker="!", style="warning")
+        return
     kept = sorted({name for name, target in targets if target.exists()})
     if kept:
         console.note(f"kept {', '.join(kept)} — another cached model still uses them", marker="○")

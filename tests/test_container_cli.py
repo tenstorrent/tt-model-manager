@@ -1670,7 +1670,9 @@ def test_purge_hf_warns_when_the_repo_could_not_be_removed(hf_cache, monkeypatch
     monkeypatch.setattr(DeleteCacheStrategy, "execute", lambda self: None)
     _cached_repo(hf_cache, "org/stuck")
     container_cli._purge_hf("org/stuck", "weights")
-    assert "could not fully remove" in " ".join(capsys.readouterr().out.split())
+    out = " ".join(capsys.readouterr().out.split())
+    assert "could not fully remove" in out
+    assert "kept" not in out  # its own files are not "used by another model"
 
 
 def test_tree_size_skips_symlinks_and_counts_hard_links_once(tmp_path):
