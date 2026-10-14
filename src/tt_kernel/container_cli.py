@@ -1535,19 +1535,12 @@ def _purge_hf(repo_id: str, what: str) -> None:
                 console.note(f"could not remove the cached {what} — the cache entry is "
                              f"damaged: {warning}", marker="!", style="warning")
         return
-    # Resolved before the delete: a shared file's own link goes, the store file it targets stays.
-    # Pairs: two revisions can hold same-named files with different blobs.
-    targets = {(f.file_name, f.blob_path.resolve()) for r in repo.revisions for f in r.files}
     strategy = cache.delete_revisions(*(r.commit_hash for r in repo.revisions))
     with console.step(f"removing the cached {what} ({console.fmt_bytes(strategy.expected_freed_size)})"):
         strategy.execute()
     if any(p.exists() for p in strategy.repos):
         console.note(f"could not fully remove {repo.repo_path} — check its permissions",
                      marker="!", style="warning")
-        return
-    kept = sorted({name for name, target in targets if target.exists()})
-    if kept:
-        console.note(f"kept {', '.join(kept)} — another cached model still uses them", marker="○")
 
 
 def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = False,

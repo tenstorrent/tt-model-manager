@@ -1602,12 +1602,11 @@ def hf_cache(tmp_path, monkeypatch):
     return tmp_path / "hub"
 
 
-def test_purge_hf_deletes_every_blob_and_leaves_other_repos(hf_cache, capsys):
+def test_purge_hf_deletes_every_blob_and_leaves_other_repos(hf_cache):
     gone = _cached_repo(hf_cache, "org/gone")
     other = _cached_repo(hf_cache, "org/other")
     container_cli._purge_hf("org/gone", "weights")
     assert not gone.exists() and other.exists()
-    assert "kept" not in capsys.readouterr().out
 
 
 def test_purge_hf_matches_the_repo_id_case_insensitively(hf_cache):
@@ -1624,26 +1623,13 @@ def test_purge_hf_frees_a_shared_blob_nobody_else_uses(hf_cache):
     assert not sb.shared_blob_path(hf_cache, XET_HASH).exists()
 
 
-def test_purge_hf_keeps_and_lists_a_shared_blob_another_model_uses(hf_cache, capsys):
+def test_purge_hf_keeps_a_shared_blob_another_model_uses(hf_cache):
     from huggingface_hub.utils import _shared_blobs as sb
-    _cached_repo(hf_cache, "org/gone", shared=True)
+    gone = _cached_repo(hf_cache, "org/gone", shared=True)
     other = _cached_repo(hf_cache, "org/other", shared=True)
     container_cli._purge_hf("org/gone", "weights")
-    assert sb.shared_blob_path(hf_cache, XET_HASH).exists() and other.exists()
-    assert "kept shared.bin" in " ".join(capsys.readouterr().out.split())
-
-
-def test_purge_hf_lists_a_shared_file_even_when_another_revision_reuses_its_name(hf_cache, capsys):
-    gone = _cached_repo(hf_cache, "org/gone", shared=True)
-    _cached_repo(hf_cache, "org/other", shared=True)
-    # A second revision whose same-named file has its own, unshared blob.
-    snap = gone / "snapshots" / ("f" * 40)
-    snap.mkdir()
-    (gone / "blobs" / "etag-own").write_bytes(b"y" * 50)
-    (snap / "shared.bin").symlink_to(Path("../../blobs/etag-own"))
-    container_cli._purge_hf("org/gone", "weights")
     assert not gone.exists()
-    assert "kept shared.bin" in " ".join(capsys.readouterr().out.split())
+    assert sb.shared_blob_path(hf_cache, XET_HASH).exists() and other.exists()
 
 
 def test_purge_hf_warns_about_a_damaged_cache_entry_instead_of_skipping_it(hf_cache, capsys):
@@ -1670,9 +1656,7 @@ def test_purge_hf_warns_when_the_repo_could_not_be_removed(hf_cache, monkeypatch
     monkeypatch.setattr(DeleteCacheStrategy, "execute", lambda self: None)
     _cached_repo(hf_cache, "org/stuck")
     container_cli._purge_hf("org/stuck", "weights")
-    out = " ".join(capsys.readouterr().out.split())
-    assert "could not fully remove" in out
-    assert "kept" not in out  # its own files are not "used by another model"
+    assert "could not fully remove" in " ".join(capsys.readouterr().out.split())
 
 
 def test_tree_size_skips_symlinks_and_counts_hard_links_once(tmp_path):
