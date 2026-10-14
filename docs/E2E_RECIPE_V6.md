@@ -98,6 +98,7 @@ What the flags mean:
 | `--arch` | the card's instruction set architecture (ISA): `blackhole` or `wormhole_b0`. The one **fatal** compatibility gate |
 | `--arch-name` / `--main-class` | the HF architecture and adapter class, written to `vllm_metadata.json` |
 | `--weights <hf-id>` | **pointer** to the weights. The weights are not embedded |
+| `--weights-allow` / `--weights-ignore` | globs that narrow the serve-time weights prefetch (repeatable). Set these when the weights repo **is** the bundle repo, so the prefetch does not also pull `wheels/` and `vllm_models/` |
 | `--mesh` | device topology (for example `P150`, `1x4`) |
 | `--out <dir>` | stage locally instead of, or before, pushing |
 

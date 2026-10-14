@@ -367,6 +367,40 @@ def test_cli_package_thin_stage_only(tmp_path):
     assert (out / "model.py").is_file() and (out / "requirements.txt").is_file()
 
 
+def test_cli_package_thin_weights_patterns_reach_manifest_and_prefetch(tmp_path):
+    # The weights prefetch in run.sh already honors the manifest's allow/ignore patterns; these
+    # flags are the only way to set them from package-thin. Without them a bundle whose weights
+    # repo is the bundle repo pulls wheels/ and vllm_models/ too.
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    out = tmp_path / "staged"
+    res = _runner.invoke(cli.app, [
+        "package-thin", "--model-py", str(model_py), "--arch", "blackhole",
+        "--arch-name", "QwenForCausalLM", "--main-class", "model:C",
+        "--weights", "org/bundle-repo", "--mesh", "P150", "--out", str(out),
+        "--weights-allow", "*.safetensors", "--weights-allow", "config.json",
+        "--weights-ignore", "wheels/*",
+    ])
+    assert res.exit_code == 0, res.output
+    m = Manifest.from_json((out / "tt_kernel_manifest.json").read_text())
+    assert m.weights.allow_patterns == ["*.safetensors", "config.json"]
+    assert m.weights.ignore_patterns == ["wheels/*"]
+    run = (out / "run.sh").read_text()
+    assert "*.safetensors" in run and "wheels/*" in run
+
+
+def test_cli_package_thin_weights_patterns_require_weights(tmp_path):
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    res = _runner.invoke(cli.app, [
+        "package-thin", "--model-py", str(model_py), "--arch", "blackhole",
+        "--arch-name", "QwenForCausalLM", "--main-class", "model:C",
+        "--weights-allow", "*.safetensors", "--out", str(tmp_path / "staged"),
+    ])
+    assert res.exit_code != 0
+    assert "need --weights" in _plain(res.output)
+
+
 def _plain(text: str) -> str:
     """Collapse rich's box-drawing + wrapping so a phrase can be matched across lines."""
     return " ".join(text.replace("│", " ").replace("─", " ").split())

@@ -742,6 +742,12 @@ def package_thin(
     metadata: Optional[str] = typer.Option(None, "--metadata", help="Authored vllm_metadata.json instead of --arch-name/--main-class."),
     weights: Optional[str] = typer.Option(None, "--weights", help="HF weights repo id (pointer, never embedded)."),
     weights_revision: Optional[str] = typer.Option(None, "--weights-revision"),
+    weights_allow: Optional[List[str]] = typer.Option(
+        None, "--weights-allow", help="Glob limiting what the weights prefetch downloads "
+        "(repeatable). Needed when the weights repo is the bundle repo itself, so the prefetch "
+        "does not also pull wheels/ and vllm_models/."),
+    weights_ignore: Optional[List[str]] = typer.Option(
+        None, "--weights-ignore", help="Glob excluded from the weights prefetch (repeatable)."),
     mesh_topology: Optional[str] = typer.Option(None, "--mesh", help='Device topology, e.g. "P150" / "1x4".'),
     device_count: int = typer.Option(1, "--device-count"),
     python_version: str = typer.Option("3.12", "--python", help="Pinned interpreter (uv provisions)."),
@@ -826,7 +832,14 @@ def package_thin(
     resolved_arch = arch or metal.detect_device(arch_override=arch).arch
     if not resolved_arch:
         raise _err("Could not detect arch. Pass --arch (blackhole | wormhole_b0 | ...).")
-    weights_block = WeightsRef(repo_id=weights, revision=weights_revision) if weights else None
+    if (weights_allow or weights_ignore) and not weights:
+        raise _err("--weights-allow/--weights-ignore need --weights.")
+    weights_block = WeightsRef(
+        repo_id=weights,
+        revision=weights_revision,
+        allow_patterns=weights_allow or None,
+        ignore_patterns=weights_ignore or None,
+    ) if weights else None
     env_map: dict = {}
     for kv in env or []:
         if "=" not in kv:
