@@ -391,6 +391,8 @@ class CardSpec(BaseModel):
     """
 
     description: Optional[str] = None
+    attribution: Optional[str] = None
+    prerequisites: Optional[str] = None
     quickstart: Optional[str] = None
     architecture: Optional[str] = None
     status: Optional[str] = None
