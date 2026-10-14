@@ -35,6 +35,7 @@ from . import (
 from .manifest import (
     DEFAULT_PORT,
     THIN_KINDS,
+    Capabilities,
     CardSpec,
     CompatibilityReport,
     Manifest,
@@ -720,21 +721,33 @@ def package_thin(
     requirements: Optional[str] = typer.Option(
         None, "--requirements", help="requirements.txt of pip pins (ttnn/TTTv2/models wheel). "
         "Omitted => a #29 template with TODO pins for the not-yet-published wheels."),
+    constraints: Optional[str] = typer.Option(
+        None, "--constraints", help="Optional fully resolved constraints file applied to every "
+        "dependency-resolving install step."),
     plugin_wheel: Optional[str] = typer.Option(
         None, "--plugin-wheel", help="The vllm-tt-plugin wheel — the vLLM integration (we no longer "
         "ship a custom vLLM fork); shipped in wheels/ and installed by path."),
     ops_wheel: Optional[List[str]] = typer.Option(
         None, "--ops-wheel", help="A generic_op custom-op wheel to ship in wheels/ (repeatable). Only these wheels "
              "are scanned for deps.custom_ops; --models-wheel is not."),
+    extra_code: Optional[str] = typer.Option(
+        None, "--extra-code", help="A directory of hand-written pure-Python model ops to ship with "
+        "the bundle (issue #127) — its top-level packages go on PYTHONPATH ahead of the runner. For "
+        "code that composes stock ttnn ops; NOT for a new C++ ttnn op or a forked build."),
+    verify: Optional[List[str]] = typer.Option(
+        None, "--verify", help="A python -c statement run at the end of install.sh, after the venv "
+        "is built (repeatable). Use to sanity-import the shipped code or assert the ttnn version it "
+        "was validated against; a failing check fails the install."),
     models_wheel: Optional[List[str]] = typer.Option(
-        None, "--models-wheel", help="A locally-built wheel that satisfies a requirements.txt pin "
-        "not yet on an index (e.g. a hand-built tt-metal-models wheel from tenstorrent/tt-metal#54478, "
-        "ahead of its publish). Staged in wheels/ and added to --find-links so the pin resolves "
-        "locally instead of failing; NOT installed by path itself. Repeatable."),
+        None, "--models-wheel", help="A qualified model-library wheel staged and installed by "
+        "exact path rather than resolved from an index. Repeatable."),
     vllm_wheel: Optional[str] = typer.Option(
         None, "--vllm-wheel", help="Optional PREBUILT empty-target vLLM wheel (stock vLLM built with "
         "VLLM_TARGET_DEVICE=empty — NOT the CUDA vllm, NOT a fork). Ships in wheels/ for a hermetic "
         "install; omit and install.sh builds vLLM from source per the plugin's install-vllm-tt.sh."),
+    vllm_common_requirements: Optional[str] = typer.Option(
+        None, "--vllm-common-requirements", help="Pinned copy of upstream vLLM common.txt. "
+        "Staged into the bundle so installation does not fetch mutable dependency input."),
     vllm_version: str = typer.Option(
         packaging.VLLM_VERSION, "--vllm-version", help="Upstream vLLM tag the plugin builds against "
         "(empty target)."),
@@ -747,7 +760,14 @@ def package_thin(
     metadata: Optional[str] = typer.Option(None, "--metadata", help="Authored vllm_metadata.json instead of --arch-name/--main-class."),
     weights: Optional[str] = typer.Option(None, "--weights", help="HF weights repo id (pointer, never embedded)."),
     weights_revision: Optional[str] = typer.Option(None, "--weights-revision"),
+    weights_allow: Optional[List[str]] = typer.Option(
+        None, "--weights-allow", help="Glob limiting what the weights prefetch downloads "
+        "(repeatable). Needed when the weights repo is the bundle repo itself, so the prefetch "
+        "does not also pull wheels/ and vllm_models/."),
+    weights_ignore: Optional[List[str]] = typer.Option(
+        None, "--weights-ignore", help="Glob excluded from the weights prefetch (repeatable)."),
     mesh_topology: Optional[str] = typer.Option(None, "--mesh", help='Device topology, e.g. "P150" / "1x4".'),
+    mesh_fabric: Optional[str] = typer.Option(None, "--mesh-fabric", help="TT fabric configuration, e.g. FABRIC_1D."),
     device_count: int = typer.Option(1, "--device-count"),
     python_version: str = typer.Option("3.12", "--python", help="Pinned interpreter (uv provisions)."),
     tt_metal_version: Optional[str] = typer.Option(
@@ -756,7 +776,17 @@ def package_thin(
     max_num_seqs: Optional[int] = typer.Option(None, "--max-num-seqs"),
     block_size: Optional[int] = typer.Option(None, "--block-size"),
     max_model_len: Optional[int] = typer.Option(None, "--max-model-len"),
+    trace_region_bytes: Optional[int] = typer.Option(None, "--trace-region-bytes"),
+    tool_parser: Optional[str] = typer.Option(None, "--tool-parser"),
+    reasoning_parser: Optional[str] = typer.Option(None, "--reasoning-parser"),
+    extra_arg: Optional[List[str]] = typer.Option(
+        None, "--extra-arg", help="One additional vLLM argv token (repeat once per token)."),
+    tt_config_json: Optional[str] = typer.Option(
+        None, "--tt-config-json", help='JSON object merged into --additional-config {"tt": ...}.'),
     env: Optional[List[str]] = typer.Option(None, "--env", help="KEY=VALUE serving env (repeatable)."),
+    readme: Optional[str] = typer.Option(None, "--readme", help="Authored model card staged verbatim as README.md."),
+    provenance: Optional[str] = typer.Option(
+        None, "--provenance", help="JSON object staged verbatim as PROVENANCE.json."),
     name: Optional[str] = typer.Option(None, "--name"),
     out: Optional[str] = typer.Option(None, "--out", help="Stage the bundle here (kept even without a push target)."),
     private: Optional[bool] = typer.Option(
@@ -773,7 +803,7 @@ def package_thin(
 
     This command is beta and unsupported: the v6 thin format is still a draft, its flags and
     on-disk layout may change without notice, and bundles it produces are not guaranteed to
-    install or serve. Use ``tt-model package`` (v5 self-contained) for supported packaging.
+    install or serve. Use ``tt-model package --container`` (v5.1 container) for supported packaging.
 
     DRAFT (reflects the plan): fully installable once TTTv2 + the models wheel publish so the pins are
     real; until then the generated requirements.txt carries TODO pins for those two (ttnn already
@@ -784,7 +814,7 @@ def package_thin(
         ["[muted]The v6 thin format is a draft: flags and layout may change without notice,[/muted]",
          "[muted]and the bundles it produces are not guaranteed to install or serve.[/muted]",
          "",
-         "[muted]supported path:  tt-model package  (v5 self-contained)[/muted]"],
+         "[muted]supported path:  tt-model package --container tt-model.yaml  (v5.1)[/muted]"],
     ))
     if publish and private is True:  # explicit --private contradicts --publish
         raise _err("--publish and --private conflict: a catalog listing is public by definition. "
@@ -831,17 +861,55 @@ def package_thin(
     resolved_arch = arch or metal.detect_device(arch_override=arch).arch
     if not resolved_arch:
         raise _err("Could not detect arch. Pass --arch (blackhole | wormhole_b0 | ...).")
-    weights_block = WeightsRef(repo_id=weights, revision=weights_revision) if weights else None
+    if (weights_allow or weights_ignore) and not weights:
+        raise _err("--weights-allow/--weights-ignore need --weights.")
+    weights_block = WeightsRef(
+        repo_id=weights,
+        revision=weights_revision,
+        allow_patterns=weights_allow or None,
+        ignore_patterns=weights_ignore or None,
+    ) if weights else None
+    tt_config: dict = {}
+    if tt_config_json:
+        try:
+            parsed_tt_config = json.loads(tt_config_json)
+        except json.JSONDecodeError as exc:
+            raise _err(f"--tt-config-json must be valid JSON: {exc}")
+        if not isinstance(parsed_tt_config, dict):
+            raise _err("--tt-config-json must contain a JSON object.")
+        reserved = {"fabric_config", "trace_region_size"}.intersection(parsed_tt_config)
+        if reserved:
+            flags = ", ".join(sorted(reserved))
+            raise _err(f"--tt-config-json cannot set reserved field(s) {flags}; use the dedicated flags.")
+        tt_config = parsed_tt_config
     env_map: dict = {}
     for kv in env or []:
         if "=" not in kv:
             raise _err(f"--env expects KEY=VALUE, got {kv!r}.")
         k, v = kv.split("=", 1)
         env_map[k] = v
-    mesh = Mesh(devices=device_count, topology=mesh_topology) if mesh_topology else None
+    mesh = Mesh(devices=device_count, topology=mesh_topology, fabric=mesh_fabric) \
+        if (mesh_topology or mesh_fabric) else None
     resources = Resources(
-        max_num_seqs=max_num_seqs, block_size=block_size, max_model_len=max_model_len
-    ) if (max_num_seqs or block_size or max_model_len) else None
+        max_num_seqs=max_num_seqs, block_size=block_size, max_model_len=max_model_len,
+        trace_region_bytes=trace_region_bytes, tt_additional_config=tt_config,
+        extra_args=list(extra_arg or []),
+    ) if (max_num_seqs or block_size or max_model_len or trace_region_bytes
+          or tt_config or extra_arg) else None
+    capabilities = Capabilities(tool_parser=tool_parser, reasoning_parser=reasoning_parser) \
+        if (tool_parser or reasoning_parser) else None
+    readme_path = Path(readme).expanduser() if readme else None
+    provenance_path = Path(provenance).expanduser() if provenance else None
+    constraints_path = Path(constraints).expanduser() if constraints else None
+    common_path = Path(vllm_common_requirements).expanduser() if vllm_common_requirements else None
+    for label, path in (
+        ("--constraints", constraints_path),
+        ("--vllm-common-requirements", common_path),
+        ("--readme", readme_path),
+        ("--provenance", provenance_path),
+    ):
+        if path is not None and not path.is_file():
+            raise _err(f"{label} {str(path)!r} is not a file.")
     bundle_name = name or (repo_id.split("/")[-1] if repo_id else model_path.stem)
 
     if out:
@@ -854,13 +922,18 @@ def package_thin(
         staged, name=bundle_name, arch=resolved_arch, model_py=model_path,
         kind=kind, vllm_metadata=vmeta, app=asgi_app, tt_kernel_version=__version__,
         requirements=Path(requirements).expanduser() if requirements else None,
+        constraints=constraints_path,
         plugin_wheel=Path(plugin_wheel).expanduser() if plugin_wheel else None,
         extra_wheels=[Path(w).expanduser() for w in (ops_wheel or [])],
+        extra_code=Path(extra_code).expanduser() if extra_code else None,
+        verify=list(verify or []),
         models_wheels=[Path(w).expanduser() for w in (models_wheel or [])],
         vllm_wheel=Path(vllm_wheel).expanduser() if vllm_wheel else None,
+        vllm_common_requirements=common_path,
         vllm_version=vllm_version, with_vllm=with_vllm,
         weights=weights_block, device_count=device_count, mesh=mesh, env=env_map,
-        resources=resources, python_version=python_version,
+        resources=resources, capabilities=capabilities, readme=readme_path,
+        provenance=provenance_path, python_version=python_version,
         tt_metal_version=(
             tt_metal_version
             or packaging.pinned_ttnn_version(Path(requirements).expanduser().read_text()
@@ -881,8 +954,7 @@ def package_thin(
                      f"its op packages; shipped and installed regardless): "
                      f"{', '.join(unrecorded_ops)}", marker="!", style="warning")
     if manifest.deps.models_wheels:
-        typer.echo(f"  local pins: {len(manifest.deps.models_wheels)} models wheel(s) "
-                   "resolved via --find-links (not on an index yet)")
+        typer.echo(f"  local pins: {len(manifest.deps.models_wheels)} models wheel(s) installed by path")
     if with_vllm:
         vspec = manifest.deps.vllm
         if vspec and vspec.wheel:
