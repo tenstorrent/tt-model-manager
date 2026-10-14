@@ -241,6 +241,22 @@ def test_uid_1000_is_freed_before_it_is_claimed():
     assert "userdel -r ubuntu" not in DOCKERFILE
 
 
+def test_the_code_overlay_is_made_readable_by_a_uid_that_does_not_own_it():
+    """`serve` runs the image as the invoking HOST uid, so a 0770 directory out of the
+    author's umask ships as one the server cannot enter -- which Python reports as
+    `ModuleNotFoundError` for a package whose files are all present. The build-time verify
+    runs as `tt`, who owns them, so it cannot catch this; and BuildKit's COPY cache key
+    ignores a directory's mode, so re-staging with a different umask does not even rebuild.
+    The fix has to be an instruction in this file, AFTER the code COPY."""
+    copy_at = DOCKERFILE.index("COPY --chown=tt:tt code/ /opt/tt-metal/")
+    fix_at = DOCKERFILE.index("-exec chmod a+rX {} +")
+    assert fix_at > copy_at, "the mode fix must run after the code overlay is copied"
+    # conditional, not a blanket `chmod -R`: chmod() on every file of the multi-GB metal
+    # tree would copy all of it up into this layer
+    fix = DOCKERFILE[fix_at - 300:fix_at]
+    assert "! -perm -o+r" in fix and "-type d ! -perm -o+x" in fix
+
+
 def test_the_metal_tree_is_owned_by_the_runtime_user():
     """tools/tracy/common.py mkdirs inside TT_METAL_HOME on IMPORT — root-owned trees
     turn that into EACCES ten minutes into a boot."""
@@ -536,3 +552,11 @@ def test_the_labels_carry_the_source_commits():
     assert 'org.opencontainers.image.revision="${MODEL_TT_METAL_SHA}"' in DOCKERFILE
     assert 'org.tenstorrent.tt-model.tt-metal="${MODEL_TT_METAL_DESCRIBE}"' in DOCKERFILE
     assert 'org.tenstorrent.tt-model.plugin="${MODEL_PLUGIN_SHA}"' in DOCKERFILE
+
+
+def test_entrypoint_and_verify_are_copied_with_explicit_modes():
+    # Context files inherit the author's umask (a 007 umask writes 660/770); a root-owned 660
+    # file is unreadable by `tt`, and the first boot died with "entrypoint.sh: Permission denied".
+    assert "--chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh" in DOCKERFILE
+    # 0755 because --chmod also applies to the /ctx directory the COPY creates; 0644 made it untraversable.
+    assert "--chmod=0755 verify.sh /ctx/verify.sh" in DOCKERFILE

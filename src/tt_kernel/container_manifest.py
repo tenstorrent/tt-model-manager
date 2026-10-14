@@ -28,12 +28,21 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from .manifest import (
     CONTAINER_SCHEMA,
+    CardSpec,
     ContainerSpec,
     ImageRef,
+    LicenseSpec,
     Manifest,
     ServeProfile,
     ServeSettings,
@@ -264,16 +273,186 @@ class ImageSettings(BaseModel):
     repository: Optional[str] = None  # name under a real registry; defaults to `name`
 
 
-class CardSettings(BaseModel):
-    """Optional model-authored Markdown for the generated model card."""
+class CardSettings(CardSpec):
+    """Optional model-authored Markdown for the generated model card.
+
+    Every field renders as its own section, in a fixed order the renderer owns, so a
+    reader finds the same information in the same place on every published card. The
+    field list is the template: what the tool can derive it derives (hardware, context,
+    quickstart, the capability notes, provenance), and what only the author knows is
+    here.
+
+    ``extra="forbid"`` on top of the permissive wire :class:`CardSpec`: a hand-written
+    YAML with ``limitiations:`` must fail at load, where the author can fix it, rather
+    than publish a card silently missing the section.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    # One or two sentences on what the model IS and what it is for ("intended for
-    # agentic coding"). Leads the card, right under the title — the tool cannot know
-    # this, so the author states it.
-    description: Optional[str] = None
-    quickstart: Optional[str] = None
+    # Every field is inherited from CardSpec; this class adds only the authoring-time
+    # checks below. What each field means is documented once, for authors, in
+    # examples/container-example.yaml and docs/container_packages.md.
+
+    _retired_notes: List[str] = PrivateAttr(default_factory=list)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _fold_retired_fields(cls, data, handler):
+        """Accept the retired keys for one release, moved into the field that replaced them."""
+        if not isinstance(data, dict) or not RETIRED_CARD_FIELDS.keys() & data.keys():
+            return handler(data)
+        data, notes = dict(data), []
+        for key, target in RETIRED_CARD_FIELDS.items():
+            if key not in data:
+                continue
+            value = data.pop(key)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"card.{key} must be text")
+            text = (value or "").strip()
+            if target is None or not text:
+                notes.append(f"card.{key} is retired and was dropped")
+                continue
+            current = data.get(target)
+            if current is not None and not isinstance(current, str):
+                raise ValueError(f"card.{target} must be text")
+            if key == "architecture":
+                text = f"Architecture: {text.rstrip('.')}."
+            elif key == "out_of_scope_use":
+                text = f"Out of scope: {text}"
+            sep = " " if key == "architecture" else "\n\n"
+            current = (current or "").strip()
+            data[target] = f"{current}{sep}{text}" if current else text
+            notes.append(f"card.{key} is retired; its text was moved into card.{target}")
+        card = handler(data)
+        card._retired_notes = notes
+        return card
+
+    @field_validator("license", "pipeline_tag", "base_model", mode="before")
+    @classmethod
+    def _collapse_authored_whitespace(cls, v):
+        """Normalise the fields that go into frontmatter VERBATIM.
+
+        Every other authored string reaches the card through ``_cell`` or ``.strip()``,
+        but the frontmatter keys are written as given — and YAML hands us trailing
+        newlines for free. ``id: >`` (a folded scalar, which this very example uses for
+        five neighbouring fields) yields ``"other\\n"``, which then fails ``== "other"``
+        and silently drops the author's licence name and link, while emitting a
+        multi-line ``license:`` value into the one field the Hub validates server-side
+        on commit — the late failure this class exists to prevent.
+        """
+        def _flat(s):
+            return " ".join(s.split()) if isinstance(s, str) else s
+
+        if isinstance(v, dict):
+            return {k: _flat(s) for k, s in v.items()}
+        if isinstance(v, list):
+            return [_flat(s) for s in v]
+        return _flat(v)
+
+    @model_validator(mode="after")
+    def _license_is_a_hub_identifier(self) -> "CardSettings":
+        """Refuse a licence the Hub would refuse — here, not after the build.
+
+        ``license`` is one of the frontmatter keys the Hub validates SERVER-SIDE when the
+        README is committed. A human-readable name ("Apache 2.0 (see LICENSE)") passes
+        every client-side check and is rejected inside ``push``, after the multi-hour
+        build and the multi-GB upload, with an error tt-model did not write. The valid
+        values are lowercase identifiers from the Hub's licence list (``apache-2.0``,
+        ``cc-by-nc-4.0``, ``other`` ...), and no client library ships that list, so the
+        check is the identifier SHAPE plus the one escape hatch.
+        """
+        lic = self.license
+        if lic is None:
+            return self
+        if not _HUB_LICENSE_ID_RE.fullmatch(lic.id):
+            raise ValueError(
+                f"card.license.id {lic.id!r} is not a Hub licence identifier. Use the "
+                "lowercase id from https://huggingface.co/docs/hub/repositories-licenses "
+                '(e.g. apache-2.0, mit, cc-by-nc-4.0), or "other" with a card.license.name'
+            )
+        if lic.id == "other" and not (lic.name or "").strip():
+            raise ValueError(
+                'card.license.id "other" needs a card.license.name saying which licence '
+                "it is — a bare \"other\" tells a reader nothing about what they may do "
+                "with the weights"
+            )
+        return self
+
+
+# Shape, not a whitelist: the Hub's list grows (``apache-2.0``, ``openrail++``,
+# ``lppl-1.3c``). Use it with ``fullmatch`` — ``match`` plus a ``$`` anchor accepts one
+# trailing newline, which is how ``"other\n"`` passed here and then failed every
+# ``== "other"`` downstream.
+_HUB_LICENSE_ID_RE = re.compile(r"[a-z0-9][a-z0-9.+-]*")
+
+
+#: Card sections a bundle must carry before it can be listed in the public catalog.
+#: Both are things only the author knows and a consumer cannot infer: what the model
+#: scores and how fast it is, and where it falls short. A listing without them is the
+#: state the catalog is already full of — see DEVSTACK-447.
+REQUIRED_CARD_SECTIONS = ("performance", "limitations")
+
+#: Card fields retired by the template review, and the field each one folds into
+#: (``None``: dropped). Still read on the wire so published manifests stay valid.
+RETIRED_CARD_FIELDS = {
+    "architecture": "description",
+    "status": None,
+    "out_of_scope_use": "limitations",
+    "risks": "limitations",
+}
+
+
+def card_retired_notes(card: Optional[CardSpec]) -> List[str]:
+    """One line per retired card key the author still wrote."""
+    return list(getattr(card, "_retired_notes", None) or [])
+
+
+#: Columns an LLM card's performance table carries, one row per serving profile.
+PERFORMANCE_COLUMNS = ("profile", "isl", "osl", "concurrency", "n", "ttft", "prefill",
+                       "decode", "e2el")
+_LLM_KINDS = ("vllm-plugin", "vllm-fork")
+
+
+def _header_words(row: str) -> List[List[str]]:
+    """Each cell of a Markdown table row as lowercase words, units and rate suffixes dropped."""
+    cells = []
+    for cell in row.strip().strip("|").split("|"):
+        cell = re.sub(r"\([^)]*\)", " ", cell.lower())
+        cell = re.sub(r"tok/s(/u)?", " ", cell)
+        cells.append(cell.split())
+    return cells
+
+
+def card_performance_gaps(card: Optional[CardSpec], kind: str) -> List[str]:
+    """Required columns an LLM card's best performance table lacks (all, if it has none).
+
+    vLLM kinds only; an empty ``performance`` is :func:`card_publish_gaps`' job."""
+    if kind not in _LLM_KINDS or card is None or not (card.performance or "").strip():
+        return []
+    rows = [l for l in card.performance.splitlines() if l.strip().startswith("|")]
+    headers = [r for r, nxt in zip(rows, rows[1:]) if re.fullmatch(r"[|\s:-]+", nxt.strip())]
+    best = list(PERFORMANCE_COLUMNS)
+    for header in headers:
+        cells = _header_words(header)
+        missing = [c for c in PERFORMANCE_COLUMNS
+                   if not any((words == ["n"]) if c == "n" else c in words for words in cells)]
+        if len(missing) < len(best):
+            best = missing
+    return best
+
+
+def card_publish_gaps(card: Optional[CardSpec]) -> List[str]:
+    """Which required card sections are missing. Pure, so every call site agrees.
+
+    ``None`` means the bundle predates cards on the wire; there is nothing to judge, so
+    no gaps are reported rather than every section being called missing. Whether a
+    caller treats ``None`` as exempt or as a gap is the caller's decision — `publish`
+    exempts (the bundle is already in the wild), `push --publish` does not (the staged
+    directory is local and can be re-packaged).
+    """
+    if card is None:
+        return []
+    return [f for f in REQUIRED_CARD_SECTIONS if not (getattr(card, f, None) or "").strip()]
 
 
 class ContainerManifest(BaseModel):
@@ -563,6 +742,10 @@ class ContainerManifest(BaseModel):
                 code_dir=code_dir,
                 verify=list(self.verify),
                 built=dict(built or {}),
+                # Carried so a consumer — and `publish`, which has only the published
+                # repo — can read the card's sections without the authoring YAML, which
+                # never leaves the author's machine.
+                card=CardSpec.model_validate(self.card.model_dump()) if self.card else None,
             ),
         )
 

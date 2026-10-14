@@ -67,3 +67,15 @@ def _no_real_device_scan(monkeypatch):
     """
     monkeypatch.setattr(container, "pick_free_devices",
                         lambda count, dev_root=None: list(range(count)))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_proc_scan(monkeypatch):
+    """Keep ``_claimed_devices`` from reading this host's real ``/proc`` for open chip fds.
+
+    A box running a real TT workload would otherwise make chips look claimed in every test.
+    Tests of the scan itself call it with their own ``proc_root``.
+    """
+    real = container._host_claimed_devices
+    monkeypatch.setattr(container, "_host_claimed_devices",
+                        lambda proc_root=None: real(proc_root) if proc_root else set())

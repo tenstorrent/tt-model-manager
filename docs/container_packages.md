@@ -113,7 +113,7 @@ Fields, from `src/tt_kernel/container_manifest.py`:
 | `default_profile` | required when more than one profile is declared — the author decides the default, not the consumer's luck. |
 | `verify` | build-time Python assertions run **inside the finished image**, on top of the launcher's own import checks. |
 | `image` | where the built image is published: `registry: hf` (default) or a real registry namespace. |
-| `card.quickstart` | optional Markdown appended to the generated model card. |
+| `card` | the model-card text the tool cannot derive, each field rendered in a fixed place the renderer owns. In card order: `attribution` (a block quote under the title, crediting the model the package serves), `description` (the lede: size, architecture, what it does — the hardware sentence is generated after it), `intended_use` (*Intended use*), `prerequisites` (extra bullets under the generated *Prerequisites*, which already list the tt CLI, Docker and the board), `quickstart` (appended under the generated `tt serve` command), `usage` (appended under *Capabilities*, after the derived endpoint text — where a non-OpenAI server documents its request shapes), `performance` and `limitations` (both always rendered — an italic "not provided" placeholder when empty, and both required for a catalog listing: see [publishing.md](publishing.md)), `licensing`, `related`. `performance` opens with an eval table (each accuracy or eval result beside the reference model's figure); for an LLM it then carries a speed table with one row per serving profile and the columns profile, ISL, OSL, concurrency, N, TTFT, prefill and decode tok/s/u, and E2EL; `package` warns when one is missing. The retired keys `architecture`, `status`, `out_of_scope_use` and `risks` still load for one release, folded into `description` or `limitations` with a warning. Frontmatter, under the Hub's own keys: `license` (`{id, name, link}` — `id` must be a lowercase Hub licence identifier or `other`; `name` and `link` are emitted **only** beside `id: other`, which is the case the Hub documents them for, and ignored otherwise), `pipeline_tag` (defaults to `text-generation` for the vLLM kinds), `base_model` (defaults to the weights repo). Bundles already published pick up the template on their next `tt-model package --container`; nothing rewrites a live card. The annotated block is in [`examples/container-example.yaml`](../examples/container-example.yaml). |
 
 `max_num_seqs` and `block_size` are **required after profile merge** — the TT backend
 rejects vLLM's own defaults. `mesh_device` must be a value from the plugin's closed
@@ -348,11 +348,14 @@ run on a build host; a later `serve` starts the container. Around them:
 - `tt-model logs you/my-model -f` — follow the boot (a cold first boot JIT-compiles kernels,
   ~10 min).
 - `tt-model stop you/my-model` — a clean `SIGTERM` closes the mesh. A `SIGKILL` leaves it
-  dirty: `stop` then attempts a `tt-smi -r` scoped to that container's own chips (read back
-  from the label `serve` set, and skipped if another container has taken one of them since),
-  but that
-  is best-effort recovery, not a guarantee — a force-killed teardown can leave a device that
-  only a host reboot restores (issue #107).
+  dirty: `stop` then runs a `tt-smi -r` scoped to that container's own chips (read back from
+  the label `serve` set) and tells you what actually happened — the reset **ran**, **did not
+  complete** (nonzero/timeout → the mesh is still dirty), or was **skipped** because another
+  container has since taken one of those chips (resetting would wedge *that* one). Even a
+  reset that ran is best-effort, not a guarantee — a force-killed teardown can leave a device
+  that only a host reboot restores, and the boot then wedges at the first large host→device
+  DMA (`could only pin N of M pages` in dmesg). If a stop reports anything but a clean
+  shutdown and the next boot hangs early, reboot the host rather than retrying (issue #107).
 - `tt-model rm you/my-model` — removes a *pulled* container package, including its HF
   snapshot. `--keep-cache` keeps the JIT/weight caches for a fast re-pull;
   `--include-weights` also deletes the weights from the HF cache (off by default — they
@@ -405,6 +408,17 @@ The one thing it *does* refuse to do quietly:
   counted as already-present. Skipped for a spec pinned with `allow_patterns`/`ignore_patterns`,
   where a whole-repo total would over-count.
 
+- **It won't boot a package that pins the weights path over an incomplete cache.** Some
+  manifests put the snapshot path itself into the serve env
+  (`MISTRAL4_WEIGHTS_DIR=/hf/hub/models--org--w/snapshots/…`) and the loader opens it
+  directly, so for them "the model will download the rest inside the container" is false: an
+  incomplete cache dies in the engine on the first missing shard, after device init. When
+  `serve` cannot make that cache whole — `--local-only`, or the fetch itself failed (gated,
+  offline) — it stops with a card that says whether the download is absent or interrupted, how
+  much is already on disk, and the exact `hf download … --revision …` that resumes it.
+  `--no-weights` is the escape hatch if you know the model fetches its own weights. Packages
+  without a pinned path keep the advisory below, and `pull` never refuses.
+
 Not detected, in any version: a file that is present but truncated. `huggingface_hub` verifies
 what it downloads and never re-hashes what is already on disk, so neither does this. Catching
 it would mean re-reading every byte of the weights on every serve.
@@ -419,6 +433,10 @@ of a silent boot:
 → to fetch them first instead:  tt-model pull org/name --with-weights
 → or directly:  hf download org/Weights-7B --revision a1b2c3d4
 ```
+
+An interrupted download reads differently — `weights org/Weights-7B@a1b2c3d4: a download was
+interrupted — 104.0 GB is on disk and resumable` — because its fix is to resume, not to start
+over, and nothing on disk needs deleting.
 
 That in-container download counts against `serve`'s readiness watch (4 h by default; see
 above), so on a slow link either prefetch with `tt-model pull --with-weights` or raise

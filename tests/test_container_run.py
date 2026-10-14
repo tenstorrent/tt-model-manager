@@ -338,6 +338,142 @@ def test_the_fork_forwards_the_mesh_as_a_grid_not_as_MESH_DEVICE():
     assert "(1, 4)" in launcher_for("vllm-fork").serve_argv(m, p)
 
 
+# The fourth kind, as an override: `_wire(**HTTP)`.
+HTTP = {
+    "kind": "http-server",
+    "runtime": {
+        "command": [
+            "python", "models/demos/my_model/tools/server.py",
+            "--host", "{host}", "--port", "{port}",
+        ],
+    },
+    "serve": {"port": 8000},
+    "serve_profiles": [
+        {"name": "p300x2", "hardware": "p300x2", "mesh_device": "(1, 4)",
+         "max_model_len": 131072},
+    ],
+}
+
+
+def test_http_server_serve_argv_golden():
+    """The command is recorded verbatim except for the two placeholders every serve
+    moves; profile args ride after it."""
+    m = _wire(**{**HTTP, "serve": {"port": 8000, "args": ["--allocated-context", "131072"]}})
+    p = m.container.resolve_profile()
+    assert launcher_for("http-server").serve_argv(m, p) == [
+        "python", "models/demos/my_model/tools/server.py",
+        "--host", "0.0.0.0", "--port", "8000",
+        "--allocated-context", "131072",
+    ]
+
+
+def test_http_server_reads_the_ready_line_from_the_manifest():
+    m = _wire(**HTTP)
+    assert launcher_for("http-server").ready_probe(m) == '"event": "ready"'
+    m = _wire(**{**HTTP, "runtime": {**HTTP["runtime"], "ready_line": "listening on"}})
+    assert launcher_for("http-server").serve_argv(m, m.container.resolve_profile())
+    assert launcher_for("http-server").ready_probe(m) == "listening on"
+
+
+def test_http_server_env_is_the_profile_env_verbatim_when_nothing_is_pinned():
+    """This kind adds nothing of its own to the env except the weights pin, and BASE pins
+    no revision."""
+    m = _wire(**{**HTTP, "serve": {"port": 8000, "env": {"QWEN38_LANES": "1"}}})
+    env = launcher_for("http-server").serve_env(m, m.container.resolve_profile())
+    assert env == {"QWEN38_LANES": "1"}
+
+
+def test_http_server_gets_the_pinned_weights_revision():
+    """Like tt-dit-server: this kind's server downloads its own weights, so the manifest's
+    pin has to arrive in the environment or it does not arrive at all."""
+    from tt_kernel.manifest import WEIGHTS_REVISION_ENV
+
+    m = _wire(**{**HTTP, "weights": {"repo": "org/Weights-7B", "revision": "c" * 40}})
+    env = launcher_for("http-server").serve_env(m, m.container.resolve_profile())
+    assert env[WEIGHTS_REVISION_ENV] == "c" * 40
+
+
+def test_http_server_does_not_need_engine_settings():
+    """No engine, no max_num_seqs/block_size requirement — hardware and mesh are the
+    whole contract."""
+    from tt_kernel.launchers import required_serve_fields
+    assert required_serve_fields("http-server") == ("hardware", "mesh_device")
+    m = _wire(**HTTP)  # profiles carry neither max_num_seqs nor block_size
+    assert m.container.resolve_profile().hardware == "p300x2"
+
+
+def test_http_server_without_a_command_is_refused():
+    with pytest.raises(ContainerManifestError, match="requires runtime.command"):
+        _wire(**{**HTTP, "runtime": {}})
+
+
+def test_http_server_serves_embedded_placeholders():
+    """``--port={port}`` is the common authoring shape (validate() accepts it), so it must
+    serve SUBSTITUTED — a literal ``--port={port}`` at boot is the failure this kind exists
+    to prevent."""
+    m = _wire(
+        **{
+            **HTTP,
+            "runtime": {
+                "command": [
+                    "python", "models/demos/my_model/tools/server.py",
+                    "--host={host}", "--port={port}",
+                ]
+            },
+        }
+    )
+    p = m.container.resolve_profile()
+    assert launcher_for("http-server").serve_argv(m, p) == [
+        "python", "models/demos/my_model/tools/server.py",
+        "--host=0.0.0.0", "--port=8000",
+    ]
+
+
+def test_http_server_allowlist_covers_top_level_scripts():
+    """The check is not slash-gated: the common top-level ``server.py`` is under the same
+    must-ship contract as a nested one."""
+    cmd = ["python", "server.py", "--port", "{port}"]
+    with pytest.raises(ContainerManifestError, match="no allowlist entry"):
+        _wire(**{**HTTP, "runtime": {"command": cmd}})
+    m = _wire(
+        **{**HTTP, "source": {**BASE["source"], "code": ["server.py"]}, "runtime": {"command": cmd}}
+    )
+    assert launcher_for("http-server").serve_argv(m, m.container.resolve_profile())[1] == "server.py"
+
+
+def test_http_server_allowlist_covers_shell_launchers():
+    """``bash serve.sh`` is a real launch shape; serve.sh must ship too."""
+    cmd = ["bash", "serve.sh", "--port", "{port}"]
+    with pytest.raises(ContainerManifestError, match="no allowlist entry"):
+        _wire(**{**HTTP, "runtime": {"command": cmd}})
+    m = _wire(
+        **{
+            **HTTP,
+            "source": {**BASE["source"], "code": ["models/common", "serve.sh"]},
+            "runtime": {"command": cmd},
+        }
+    )
+    assert launcher_for("http-server").serve_argv(m, m.container.resolve_profile())[1] == "serve.sh"
+
+
+def test_http_server_with_an_unknown_placeholder_is_refused():
+    bad = ["python", "s.py", "--port", "{port}", "--mesh", "{mesh}"]
+    with pytest.raises(ContainerManifestError, match="unknown placeholder"):
+        _wire(**{**HTTP, "runtime": {"command": bad}})
+
+
+def test_http_server_without_a_port_placeholder_is_refused():
+    bad = ["python", "s.py", "--listen", "8080"]
+    with pytest.raises(ContainerManifestError, match="never names \\{port\\}"):
+        _wire(**{**HTTP, "runtime": {"command": bad}})
+
+
+def test_http_server_script_must_be_shipped_by_the_allowlist():
+    bad = ["python", "myserver/server.py", "--host", "{host}", "--port", "{port}"]
+    with pytest.raises(ContainerManifestError, match="no allowlist entry ships"):
+        _wire(**{**HTTP, "runtime": {"command": bad}})
+
+
 def test_the_fork_ready_probe_matches_what_the_runner_actually_prints():
     """The readiness runner sends vLLM's own output to a file inside the container, so
     "Application startup complete" never reaches `docker logs`. The only ready signal
@@ -513,7 +649,8 @@ def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="",
 
 def test_a_clean_sigterm_stop_does_not_reset_the_mesh(monkeypatch):
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="0")
-    assert container.stop("c", image="img") is True
+    outcome = container.stop("c", image="img")
+    assert outcome.clean is True and outcome.reset == "not_needed"
     assert not any("--entrypoint" in c for c in calls)
     stop_cmd = next(c for c in calls if c[:2] == ["docker", "stop"])
     assert stop_cmd[stop_cmd.index("--timeout") + 1] == str(container.STOP_TIMEOUT_S)
@@ -523,7 +660,8 @@ def test_a_sigkilled_container_triggers_a_mesh_reset(monkeypatch):
     """137 means the grace period expired: the mesh was never closed, eth cores are
     dirty, and the NEXT boot fails unless it is reset now."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137")
-    assert container.stop("c", image="img") is False
+    outcome = container.stop("c", image="img")
+    assert outcome.clean is False and outcome.reset == "ran"
     assert any("--entrypoint" in c for c in calls)
 
 
@@ -532,7 +670,7 @@ def test_a_dirty_stop_resets_only_the_chips_that_container_held(monkeypatch):
     reset a SIBLING container's live mesh. The ids come from the label stop() reads back."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
                          devices_label="0,1")
-    assert container.stop("c", image="img") is False
+    assert container.stop("c", image="img").clean is False
     reset = next(c for c in calls if "--entrypoint" in c)
     assert [reset[i + 1] for i, a in enumerate(reset) if a == "--device"] == [
         "/dev/tenstorrent/0:/dev/tenstorrent/0",
@@ -546,7 +684,8 @@ def test_a_chip_taken_since_the_removal_is_not_reset_under_the_new_owner(monkeyp
     runs. Resetting then would wipe a LIVE mesh -- skipping is the recoverable failure."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
                          devices_label="0,1", now_claimed=[1])
-    assert container.stop("c", image="img") is False
+    outcome = container.stop("c", image="img")
+    assert outcome.clean is False and outcome.reset == "skipped"
     assert not any("--entrypoint" in c for c in calls), "reset a chip someone else now holds"
 
 
@@ -555,7 +694,7 @@ def test_a_chip_still_free_at_teardown_is_reset_as_usual(monkeypatch):
     reason to leave our own dirty mesh unrecovered."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
                          devices_label="0", now_claimed=[3])
-    assert container.stop("c", image="img") is False
+    assert container.stop("c", image="img").clean is False
     reset = next(c for c in calls if "--entrypoint" in c)
     assert reset[reset.index("--device") + 1] == "/dev/tenstorrent/0:/dev/tenstorrent/0"
 
@@ -565,7 +704,7 @@ def test_a_malformed_devices_label_falls_back_instead_of_narrowing_the_reset(mon
     whole-directory fallback is over-broad but never leaves a chip unrecovered."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
                          devices_label="0,garbage")
-    assert container.stop("c", image="img") is False
+    assert container.stop("c", image="img").clean is False
     reset = next(c for c in calls if "--entrypoint" in c)
     assert reset[reset.index("--device") + 1] == "/dev/tenstorrent"
 
@@ -574,16 +713,35 @@ def test_a_dirty_stop_without_a_devices_label_falls_back_to_the_whole_directory(
     """A container from before the label existed (or one started by hand) still has to be
     recoverable -- there is no id to scope to, so the old behaviour is the fallback."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137")
-    assert container.stop("c", image="img") is False
+    assert container.stop("c", image="img").clean is False
     reset = next(c for c in calls if "--entrypoint" in c)
     assert reset[reset.index("--device") + 1] == "/dev/tenstorrent"
+
+
+def test_a_failed_tt_smi_reset_is_reported_as_still_dirty(monkeypatch):
+    """#107: the reset can run and still not recover the device, but it can also just fail
+    (nonzero exit / timeout). stop() must distinguish 'ran' from 'failed' -- the mesh is
+    definitely still dirty in the second case, and the caller says 'reboot', not 'attempted'."""
+    _fake_docker(monkeypatch, running_state="true", exit_code="137", devices_label="0")
+    monkeypatch.setattr(container, "reset_mesh", lambda image, device_ids=None: False)
+    outcome = container.stop("c", image="img")
+    assert outcome.clean is False and outcome.reset == "failed"
+
+
+def test_a_dirty_stop_without_an_image_cannot_reset(monkeypatch):
+    """No image to run tt-smi from -> the dirty mesh could not be reset at all; report it as
+    unrecovered rather than silently returning as if nothing needed doing."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137", devices_label="0")
+    outcome = container.stop("c")  # no image
+    assert outcome.clean is False and outcome.reset == "failed"
+    assert not any("--entrypoint" in c for c in calls)
 
 
 def test_an_uninspectable_container_is_still_stopped_and_removed(monkeypatch):
     """A failed inspect means "we could not read its state", not "there is nothing there":
     the stop and the removal still have to run, just without a scoped reset to aim."""
     calls = _fake_docker(monkeypatch, running_state="true", exit_code="137", inspect_rc=1)
-    assert container.stop("c", image="img") is True
+    assert container.stop("c", image="img").clean is True
     assert any(c[:2] == ["docker", "stop"] for c in calls)
     assert any(c[:2] == ["docker", "rm"] for c in calls)
     assert not any("--entrypoint" in c for c in calls)
@@ -591,7 +749,7 @@ def test_an_uninspectable_container_is_still_stopped_and_removed(monkeypatch):
 
 def test_an_already_stopped_container_is_just_removed(monkeypatch):
     calls = _fake_docker(monkeypatch, running_state="false", exit_code="")
-    assert container.stop("c", image="img") is True
+    assert container.stop("c", image="img").clean is True
     assert any(c[:3] == ["docker", "rm", "c"] for c in calls)
     assert not any("--entrypoint" in c for c in calls)
 
@@ -963,3 +1121,29 @@ def test_running_matches_the_container_name_exactly(monkeypatch):
         "tt-model-my-model-p300x2"
     ]
     assert [r["name"] for r in container.running()] == ["tt-model-my-model-p300x2"]
+
+
+def test_the_plugin_kind_hands_vllm_the_pinned_weights_revision():
+    """pull downloads the pinned sha, which leaves snapshots/<sha>/ and no refs/main in the
+    HF cache. The container is offline and names the weights by repo id, so vLLM 0.26's
+    argument-time snapshot_download looked for refs/main and died with
+    LocalEntryNotFoundError over a complete cache (changh95/qwen3.8-27b-p150x2, 2026 Sep 25).
+    The sha has to reach vLLM, not just the download."""
+    sha = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    m = _wire(weights={"repo": "org/Weights-7B", "revision": sha})
+    argv = launcher_for("vllm-plugin").serve_argv(m, m.container.resolve_profile())
+    assert argv[:5] == ["vllm", "serve", "org/Weights-7B", "--revision", sha]
+
+
+def test_the_fork_kind_forwards_the_pinned_weights_revision_to_the_server():
+    sha = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    m = _wire(**FORK, weights={"repo": "org/Weights-7B", "revision": sha})
+    argv = launcher_for("vllm-fork").serve_argv(m, m.container.resolve_profile())
+    extra = shlex.split(argv[argv.index("--additional-server-args") + 1])
+    assert extra[:2] == ["--revision", sha]
+
+
+def test_an_unpinned_weights_id_adds_no_revision_flag():
+    m = _wire()
+    assert "--revision" not in launcher_for("vllm-plugin").serve_argv(m, m.container.resolve_profile())
+    assert "--revision" not in " ".join(launcher_for("vllm-fork").serve_argv(_wire(**FORK), _wire(**FORK).container.resolve_profile()))

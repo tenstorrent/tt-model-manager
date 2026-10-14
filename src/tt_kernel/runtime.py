@@ -38,22 +38,32 @@ def resolve_models_dir(models_dir: Optional[str], repo_id: str) -> Path:
     return base.joinpath(*repo_id.split("/"))
 
 
-def download_weights(weights: WeightsRef, dest: Path) -> Path:
-    """Download a model's weights from the Hub into ``dest`` (resumable).
+def serve_hub_cache(install_dir: Path) -> Path:
+    """The HF hub cache a bundle's ``run.sh`` loads weights from, given this process's env.
 
-    Thin wrapper over ``huggingface_hub.snapshot_download`` — content-addressed and
-    resumable, so a half-finished download just continues on a re-pull.
+    Mirrors ``render_run_sh``: ``HF_HOME`` defaults to ``<install>/.hf``, and huggingface_hub
+    reads ``$HF_HUB_CACHE``, else ``$HF_HOME/hub``.
+    """
+    if os.environ.get("HF_HUB_CACHE"):
+        return Path(os.environ["HF_HUB_CACHE"])
+    return Path(os.environ.get("HF_HOME") or install_dir / ".hf") / "hub"
+
+
+def download_weights(weights: WeightsRef, cache_dir: Path) -> Path:
+    """Download a model's weights into the HF hub cache ``cache_dir``; returns the snapshot dir.
+
+    A hub cache (not a flat ``local_dir``) so a server that loads by repo id finds them.
     """
     from huggingface_hub import snapshot_download
 
-    dest.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
     path = snapshot_download(
         repo_id=weights.repo_id,
         repo_type=weights.repo_type,
         revision=weights.revision,
         allow_patterns=weights.allow_patterns,
         ignore_patterns=weights.ignore_patterns,
-        local_dir=str(dest),
+        cache_dir=str(cache_dir),
     )
     return Path(path)
 
@@ -87,6 +97,20 @@ DEFAULT_PROMPT = "Say hello in one sentence."
 DEFAULT_MAX_TOKENS = 64
 
 
+def _is_loopback(base_url: str) -> bool:
+    """True when ``base_url`` names this machine, whose server no proxy can reach."""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    host = urlsplit(base_url).hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def list_models(base_url: str, *, timeout: float = 5.0) -> List[str]:
     """The model ids an OpenAI-compatible server currently serves (``GET /v1/models``).
 
@@ -100,8 +124,10 @@ def list_models(base_url: str, *, timeout: float = 5.0) -> List[str]:
     import urllib.request
 
     url = base_url.rstrip("/") + "/v1/models"
+    # urllib honours http_proxy even for localhost unless no_proxy lists it.
+    handlers = [urllib.request.ProxyHandler({})] if _is_loopback(base_url) else []
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 — localhost probe
+        with urllib.request.build_opener(*handlers).open(url, timeout=timeout) as resp:  # noqa: S310
             payload = _json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError):
         return []
@@ -180,6 +206,7 @@ def curl_argv(base_url: str, payload: dict) -> List[str]:
 
     return [
         "curl", "-sS", base_url.rstrip("/") + "/v1/chat/completions",
+        *(["--noproxy", "*"] if _is_loopback(base_url) else []),
         "-H", "Content-Type: application/json",
         "-d", _json.dumps(payload),
     ]
@@ -204,6 +231,7 @@ def render_curl(argv: List[str]) -> str:
 __all__ = [
     "ENV_MODELS_DIR",
     "resolve_models_dir",
+    "serve_hub_cache",
     "download_weights",
     "install_self_contained",
     "DEFAULT_BASE_URL",

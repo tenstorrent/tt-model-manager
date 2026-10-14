@@ -11,6 +11,7 @@ on any real docker daemon.
 """
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -372,3 +373,39 @@ def test_the_reset_container_is_scoped_to_the_same_ids():
         "/dev/tenstorrent/3:/dev/tenstorrent/3",
     ]
 
+
+
+# ------------------------------------------------- chips held by a host process (v5/v6 serve)
+
+
+def test_claimed_devices_includes_chips_a_host_process_holds(monkeypatch):
+    # A v5/v6 bundle serves as a plain host process, which docker cannot see.
+    _fake_docker(monkeypatch, ps_ids=["a"], inspected=[
+        _container(labels={container.DEVICES_LABEL: "0"}),
+    ])
+    monkeypatch.setattr(container, "_host_claimed_devices", lambda: {1}, raising=False)
+    assert container._claimed_devices([0, 1, 2, 3]) == {0, 1}
+    _fake_docker(monkeypatch)  # nothing in docker at all
+    assert container._claimed_devices([0, 1, 2, 3]) == {1}
+
+
+def test_host_claimed_devices_reads_open_device_fds(tmp_path):
+    proc = tmp_path / "proc"
+    (proc / "100" / "fd").mkdir(parents=True)
+    os.symlink("/dev/tenstorrent/2", proc / "100" / "fd" / "7")
+    os.symlink("/dev/null", proc / "100" / "fd" / "0")
+    (proc / "200" / "fd").mkdir(parents=True)
+    os.symlink("/dev/tenstorrent/3", proc / "200" / "fd" / "9")
+    (proc / "300").mkdir()  # exited between listing and reading: no fd dir
+    (proc / "self").mkdir()  # not a pid
+    locked = proc / "400" / "fd"
+    locked.mkdir(parents=True)
+    os.symlink("/dev/tenstorrent/0", locked / "3")
+    locked.chmod(0)  # another user's process: unreadable, skipped rather than failing
+    try:
+        found = container._host_claimed_devices(proc)
+    finally:
+        locked.chmod(0o755)
+    assert {2, 3} <= found and 1 not in found
+    if not os.access(locked, os.R_OK):
+        assert 0 not in found

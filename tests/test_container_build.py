@@ -385,9 +385,9 @@ def _card(**over):
 
 def test_a_single_profile_card_states_the_hardware_up_front_with_no_table():
     card = _card()
-    assert "Runs on **p150x4**" in card
+    assert "Runs on Tenstorrent **p150x4**" in card
     assert "--profile" not in card
-    assert "## Serve profiles" not in card
+    assert "## Serving profiles" not in card
 
 
 def test_a_multi_profile_card_lists_every_profile_and_marks_the_default():
@@ -399,8 +399,29 @@ def test_a_multi_profile_card_lists_every_profile_and_marks_the_default():
     ]
     card = _card(serve_profiles=profiles, default_profile="p150x4")
     assert "`p150x2`" in card and "`p150x4` *(default)*" in card
-    assert "--profile" in card
-    assert "Runs on **p150x2** or **p150x4**" in card
+    assert "## Serving profiles\n\nSelect a different serving profile using `--profile`." in card
+    assert "Runs on Tenstorrent **p150x2** or **p150x4**" in card
+    assert "| description |" not in card          # no profile described one
+
+
+def test_a_described_profile_gets_a_description_column():
+    profiles = [
+        {"name": "fast", "hardware": "p150", "mesh_device": "P150",
+         "description": "Lowest latency | one user"},
+        {"name": "wide", "hardware": "p150x4", "mesh_device": "P150x4"},
+    ]
+    card = _card(serve_profiles=profiles, default_profile="fast")
+    assert "| profile | hardware | mesh | description |" in card
+    assert "| `fast` *(default)* | p150 | P150 | Lowest latency \\| one user |" in card
+    assert "| `wide` | p150x4 | P150x4 |  |" in card
+
+
+def test_the_title_names_the_boards():
+    assert "\n# my-model on Tenstorrent p150x4\n" in _card()
+    profiles = [{"name": "a", "hardware": "p150", "mesh_device": "P150"},
+                {"name": "b", "hardware": "p150x4", "mesh_device": "P150x4"}]
+    card = _card(serve_profiles=profiles, default_profile="a")
+    assert "\n# my-model on Tenstorrent p150 and p150x4\n" in card
 
 
 def test_the_card_names_the_tool_and_schema_and_links_the_repo():
@@ -415,13 +436,527 @@ def test_the_card_leads_with_the_authors_description():
     assert card.index("Intended for agentic coding.") < card.index("## Quickstart")
 
 
-def test_the_quickstart_sets_expectations():
+def test_attribution_is_a_block_quote_under_the_title_before_the_description():
+    card = _card(card={"description": "A small model.",
+                       "attribution": "Serves org/Upstream-7B\nby the Upstream team."})
+    assert "> Serves org/Upstream-7B\n> by the Upstream team." in card
+    assert card.index("# my-model") < card.index("> Serves") < card.index("A small model.")
+
+
+def test_intended_use_comes_before_prerequisites_and_the_quickstart():
+    card = _card(card={"intended_use": "Chat."})
+    assert card.index("## Intended use") < card.index("## Prerequisites")
+    assert card.index("## Prerequisites") < card.index("## Quickstart")
+
+
+def test_prerequisites_are_derived_and_the_authors_extras_follow():
+    bare = _card()
+    section = bare[bare.index("## Prerequisites"):bare.index("## Quickstart")]
+    assert ("[Tenstorrent CLI](https://github.com/tenstorrent/tt-cli/blob/main/docs/"
+            "prerequisites.md)") in section
+    assert "uv tool install tenstorrent" in section
+    assert "or use tt-model alone" in section     # invariant 1: tt-cli is optional
+    assert "- Docker" in section
+    assert "- Tenstorrent hardware: **p150x4**" in section
+
+    card = _card(card={"prerequisites": "- 64 GB of host RAM\n\nA PCIe Gen5 slot"})
+    section = card[card.index("## Prerequisites"):card.index("## Quickstart")]
+    # one list: the author's lines follow the derived bullets with no blank line between
+    assert "**p150x4**\n- 64 GB of host RAM\n- A PCIe Gen5 slot\n" in section
+
+    # numbered items and indented continuation lines are kept as written
+    card = _card(card={"prerequisites": "1. A PCIe Gen5 slot\n   in an x16 lane"})
+    assert "**p150x4**\n1. A PCIe Gen5 slot\n   in an x16 lane\n" in card
+
+
+def test_no_attribution_quote_when_unset():
+    assert "\n> " not in _card(card={"description": "x"})
+
+
+def test_the_quickstart_is_tt_serve_with_a_tt_model_only_line():
+    """`tt serve` installs and serves, so the fence is that one command. The tt-model line
+    stays because AGENTS.md invariant 1 says the card must never need tt-cli."""
     card = _card()
-    assert "tt-model pull  you/my-model --with-weights" in card
-    assert "`pull --with-weights` downloads the Docker image" in card
-    assert "tt-model serve" in card
-    assert "several minutes" in card
-    assert "Application startup complete" in card
+    quick = card[card.index("## Quickstart"):card.index("## Capabilities")]
+    assert "```bash\ntt serve you/my-model\n```" in quick
+    assert quick.count("```bash") == 1
+    assert "Without tt-cli: `tt-model serve you/my-model`." in quick
+    assert "tt model pull" not in quick
+    assert "`tt serve` downloads the Docker image" in quick
+    assert "several minutes" in quick
+    assert "Application startup complete" in quick
+
+
+def test_a_vllm_card_names_the_openai_endpoint_and_the_weights_id():
+    card = _card()
+    assert "## Capabilities" in card
+    assert "http://127.0.0.1:20000/v1" in card
+    # Flow-neutral: the Quickstart offers a tt-model-only path, so a reader may never
+    # have run `tt serve` at all.
+    assert "or whichever port your serve command reported" in card
+    assert "the port `tt serve` reported" not in card
+    # the model id a client sends is the WEIGHTS repo, not this package's name
+    assert '"model": "org/Weights-7B"' in card
+
+
+def test_usage_is_the_authors_notes_under_capabilities():
+    card = _card(card={"usage": "Send `tools` for function calling."})
+    caps = card[card.index("## Capabilities"):card.index("## Expected performance")]
+    assert "Send `tools` for function calling." in caps
+    assert caps.index("http://127.0.0.1") < caps.index("Send `tools`")
+
+
+def test_a_fork_card_names_the_openai_endpoint_and_its_own_ready_line():
+    """`vllm-fork` has a different launcher, ready line and serve path; until now no card
+    test exercised it, which is how a reworded SERVER_DESC could break every fork card
+    with the suite green."""
+    from test_container_manifest import FORK
+
+    card = _card(**FORK)
+    assert "## Capabilities" in card
+    assert "http://127.0.0.1:20000/v1" in card
+    assert '"model": "org/Weights-7B"' in card
+    assert "Server ready after" in card
+    assert "not** an OpenAI-compatible" not in card
+
+
+def test_the_card_documents_tool_calling_and_reasoning_when_declared():
+    card = _card(serve={**BASE["serve"],
+                        "capabilities": {"tool_parser": "hermes",
+                                         "reasoning_parser": "deepseek_r1"}})
+    assert "--tool-call-parser hermes" in card
+    assert "finish_reason: tool_calls" in card
+    assert "--reasoning_parser deepseek_r1" in card
+    assert "reasoning_content" in card
+    # one profile: stated once, unqualified
+    assert "On `--profile" not in card
+
+
+def test_a_card_without_capabilities_claims_no_tool_calling():
+    card = _card()
+    assert "Tool calling is enabled" not in card
+    assert "Reasoning output is separated" not in card
+
+
+def _two_profiles(default_caps, other_caps):
+    profiles = [
+        {"name": "latency", "hardware": "p150x2", "mesh_device": "P150x2",
+         "max_num_seqs": 1, "max_model_len": 65536, "capabilities": default_caps},
+        {"name": "tools", "hardware": "p150x4", "mesh_device": "P150x4",
+         "max_num_seqs": 32, "max_model_len": 131072, "capabilities": other_caps},
+    ]
+    return _card(serve_profiles=profiles, default_profile="latency")
+
+
+def test_identical_capabilities_across_profiles_are_stated_once():
+    caps = {"tool_parser": "hermes"}
+    card = _two_profiles(caps, caps)
+    assert card.count("--tool-call-parser hermes") == 1
+    assert "On `--profile" not in card
+
+
+def test_a_capability_only_a_non_default_profile_has_is_still_documented():
+    """Reading only the default profile said nothing about tool calling here, while
+    `tt serve --profile tools` started the server with the parser — directly under a
+    table inviting the reader to pick that profile."""
+    card = _two_profiles({}, {"tool_parser": "hermes"})
+    assert "On `--profile tools`: tool calling is enabled (`--tool-call-parser hermes`)" in card
+    assert "On `--profile latency`" not in card  # nothing to say about it
+
+
+def test_a_capability_only_the_default_profile_has_is_qualified_not_universal():
+    """The mirror image: a reasoning parser only the default sets must not be claimed
+    for every profile.
+
+    And it has to say which profile the reader already gets. "On `--profile latency`"
+    alone reads as "only if you pass this", when a bare `serve` is in fact already on
+    it — the same class of mistake as claiming it universally, in the other direction."""
+    card = _two_profiles({"reasoning_parser": "qwen3"}, {})
+    assert "On `--profile latency` (the default): reasoning output is separated" in card
+    assert "Reasoning output is separated (" not in card  # no unqualified claim
+
+
+def test_every_card_tells_readers_how_to_reach_the_author_and_the_tooling():
+    """Three channels because they reach three different people. The one that reaches
+    the bundle's AUTHOR is the repo's Discussions tab; `tt report issue` files against
+    tenstorrent/tt-cli, so it is offered for `tt` problems, not for this package."""
+    card = _card()
+    assert "## Feedback" in card
+    assert "https://huggingface.co/you/my-model/discussions" in card
+    assert "tt report issue" in card
+    assert "tenstorrent/tt-cli" in card
+    assert "support@tenstorrent.com" in card
+    # `tt report feedback` is still a stub that exits UNSUPPORTED
+    assert "tt report feedback" not in card
+
+
+# -- the authored sections -----------------------------------------------------------
+# Everything the tool cannot derive: what the model is for, how fast it is, where it
+# falls short. The renderer owns the ORDER so a reader finds the same thing in the same
+# place on every card; the author owns the words.
+
+_FULL_CARD = {
+    "description": "A 7B dense decoder-only instruct model for chat and code.",
+    "attribution": "Serves org/Upstream-7B by the Upstream team, unmodified.",
+    "prerequisites": "- 64 GB of host RAM",
+    "intended_use": "General chat and code assistance.",
+    "quickstart": "Run `scripts/demo.py` for a chat demo.",
+    "usage": "Send `tools` for function calling.",
+    "performance": "78.1% GSM8K; 41 ms/token at batch 1 on p150x4.",
+    "limitations": "No image input; only p150x4 was validated.",
+    "licensing": "Weights under Apache-2.0; port code Apache-2.0.",
+    "related": "See `you/my-model-p300x2` for the two-board build.",
+    "license": {"id": "apache-2.0"},
+    # Deliberately NOT the derivable defaults (text-generation / the weights repo): a
+    # renderer that ignored the author's override would otherwise pass these tests.
+    "pipeline_tag": "text2text-generation",
+    "base_model": ["org/Upstream-A", "org/Upstream-B"],
+}
+
+
+def test_the_authored_sections_render_in_template_order():
+    """A fixed order is the point of a template: a reader should not have to hunt for
+    limitations in a different place on every card."""
+    card = _card(card=_FULL_CARD)
+    order = [
+        "# my-model on Tenstorrent p150x4",
+        "> Serves org/Upstream-7B",
+        "A 7B dense decoder-only instruct model",
+        "Runs on Tenstorrent",
+        "## At a glance",
+        "## Intended use",
+        "## Prerequisites",
+        "## Quickstart",
+        "## Capabilities",
+        "## Expected performance",
+        "## Limitations",
+        "## Licensing",
+        "## Related packages",
+        "## Feedback",
+        "## Provenance",
+    ]
+    found = [card.index(h) for h in order]
+    assert found == sorted(found), [h for h in order if h in card]
+
+
+def test_each_authored_section_carries_the_authors_words():
+    card = _card(card=_FULL_CARD)
+    for key in ("description", "attribution", "prerequisites", "intended_use", "quickstart",
+                "usage", "performance", "limitations", "licensing", "related"):
+        assert _FULL_CARD[key] in card, key
+
+
+def test_an_optional_section_the_author_skipped_is_absent_not_empty():
+    card = _card(card={"description": "x", "performance": "fast", "limitations": "none"})
+    assert "## Licensing" not in card
+    assert "## Related packages" not in card
+    assert "## Intended use" not in card
+
+
+def test_performance_and_limitations_are_always_rendered():
+    """Silence reads as "no limitations". An explicit "not provided" is both true and
+    the same absence `tt-model publish` refuses on."""
+    card = _card()
+    assert "## Expected performance" in card
+    assert "## Limitations" in card
+    assert card.count("_Not provided by the package author._") == 2
+
+
+def test_at_a_glance_derives_what_the_manifest_already_knows():
+    card = _card(card=_FULL_CARD)
+    assert "| Hardware | p150x4 |" in card
+    assert "| Context | 131,072 tokens |" in card
+    assert "| License | apache-2.0 |" in card
+
+
+def test_at_a_glance_omits_a_row_it_cannot_fill():
+    """A row reading "unknown" is worse than a shorter table."""
+    card = _card()  # no card block at all
+    assert "| License |" not in card
+    assert "| Hardware | p150x4 |" in card  # still derived
+
+
+# -- retired card fields ---------------------------------------------------------------
+
+_RETIRED_CARD = {
+    "description": "A chat model.",
+    "architecture": "7B dense decoder-only",
+    "status": "Experimental community bring-up",
+    "out_of_scope_use": "Image input.",
+    "limitations": "Only p150x4 was validated.",
+    "risks": "Repetition loops above 25k tokens.",
+}
+
+
+def test_retired_card_fields_fold_into_their_replacements():
+    from tt_kernel.container_manifest import CardSettings
+
+    card = CardSettings.model_validate(_RETIRED_CARD)
+    assert card.description == "A chat model. Architecture: 7B dense decoder-only."
+    assert card.limitations == ("Only p150x4 was validated.\n\nOut of scope: Image input."
+                                "\n\nRepetition loops above 25k tokens.")
+    assert not any((card.architecture, card.status, card.out_of_scope_use, card.risks))
+
+
+def test_each_retired_field_gets_one_note():
+    from tt_kernel.container_manifest import CardSettings, card_retired_notes
+
+    notes = card_retired_notes(CardSettings.model_validate(_RETIRED_CARD))
+    assert len(notes) == 4
+    assert "card.status is retired and was dropped" in notes
+    assert "card.risks is retired; its text was moved into card.limitations" in notes
+    assert card_retired_notes(CardSettings.model_validate({"description": "x"})) == []
+
+
+def test_a_card_with_retired_fields_renders_none_of_the_retired_sections():
+    card = _card(card=_RETIRED_CARD)
+    for gone in ("| Architecture |", "| Status |", "Out-of-scope use",
+                 "## Risks and safety considerations", "Experimental community bring-up"):
+        assert gone not in card, gone
+    assert "Repetition loops above 25k tokens." in card     # moved, not lost
+
+
+def test_retired_fields_fold_through_the_real_loader(tmp_path):
+    """Through load_container_manifest, not model_validate, so the canary sees whatever
+    validation production applies."""
+    import yaml
+    from tt_kernel.container_manifest import card_retired_notes, load_container_manifest
+
+    raw = json.loads(json.dumps(BASE))
+    raw["card"] = _RETIRED_CARD
+    path = tmp_path / "tt-model.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    m = load_container_manifest(path)
+    assert "Out of scope: Image input." in m.card.limitations
+    assert len(card_retired_notes(m.card)) == 4
+
+
+@pytest.mark.parametrize("card", [
+    {"risks": ["a", "b"]},
+    {"out_of_scope_use": {"a": 1}},
+    {"architecture": "x", "description": 5},
+])
+def test_a_retired_field_that_is_not_text_is_a_field_error(card):
+    from pydantic import ValidationError
+    from tt_kernel.container_manifest import CardSettings
+
+    with pytest.raises(ValidationError, match="must be text"):
+        CardSettings.model_validate(card)
+
+
+def test_an_empty_retired_field_still_gets_a_note():
+    from tt_kernel.container_manifest import CardSettings, card_retired_notes
+
+    card = CardSettings.model_validate({"status": None, "risks": "  "})
+    assert card_retired_notes(card) == ["card.status is retired and was dropped",
+                                        "card.risks is retired and was dropped"]
+
+
+# -- the LLM performance-table check ----------------------------------------------------
+
+_PERF_TABLE = """Top-1 agreement with the reference: 98.7%.
+
+| profile | ISL | OSL | concurrency | N | TTFT (ms) | prefill tok/s/u | decode tok/s/u | E2EL (s) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| default | 128 | 128 | 1 | 1 | 11 | 11,402 | 189 | 0.69 |
+"""
+
+
+def _perf_gaps(performance, kind="vllm-plugin"):
+    from tt_kernel.container_manifest import CardSettings, card_performance_gaps
+
+    return card_performance_gaps(CardSettings.model_validate({"performance": performance}), kind)
+
+
+def test_a_full_performance_table_has_no_gaps():
+    assert _perf_gaps(_PERF_TABLE) == []
+
+
+def test_a_performance_table_missing_a_column_names_it():
+    assert _perf_gaps(_PERF_TABLE.replace(" E2EL (s) |", "").replace(" 0.69 |", "")) == ["e2el"]
+
+
+def test_prose_performance_lacks_every_column():
+    from tt_kernel.container_manifest import PERFORMANCE_COLUMNS
+
+    assert _perf_gaps("41 ms/token at batch 1.") == list(PERFORMANCE_COLUMNS)
+
+
+def test_the_best_of_several_tables_is_judged():
+    accuracy = "| metric | value |\n| --- | --- |\n| top-1 | 98.7% |\n\n"
+    assert _perf_gaps(accuracy + _PERF_TABLE) == []
+
+
+def test_the_performance_check_skips_non_llm_kinds_and_empty_text():
+    assert _perf_gaps("2.1 s per image at 1024x1024.", kind="tt-dit-server") == []
+    assert _perf_gaps("") == []
+
+
+def test_no_model_ci_row_until_that_gate_exists():
+    """DEVSTACK-430 is not built. A "not yet run" row would be a claim frozen at build
+    time that no consumer could refresh."""
+    assert "Model CI" not in _card(card=_FULL_CARD)
+
+
+def test_the_frontmatter_carries_the_hub_license_keys():
+    """`license`/`pipeline_tag`/`base_model` are the Hub's own field names, so ModelInfo
+    surfaces them without anyone scraping markdown. (`license_link` is only emitted
+    beside `id: other` — the two tests below cover both sides of that.)"""
+    import yaml
+
+    card = _card(card=_FULL_CARD)
+    meta = yaml.safe_load(card.split("---")[1])
+    assert meta["license"] == "apache-2.0"
+    # the author's overrides, not the derivable defaults
+    assert meta["pipeline_tag"] == "text2text-generation"
+    assert meta["base_model"] == ["org/Upstream-A", "org/Upstream-B"]
+
+
+def test_a_standard_license_emits_neither_name_nor_link():
+    """`license_name`/`license_link` are what the Hub documents for `other`. Beside a
+    standard id their acceptance is unverified, and the Hub validates frontmatter on
+    the README commit — inside `push`, after the build — so they are not gambled."""
+    import yaml
+
+    card = _card(card={"license": {"id": "apache-2.0", "name": "Apache",
+                                   "link": "https://example.invalid/LICENSE"}})
+    meta = yaml.safe_load(card.split("---")[1])
+    assert meta["license"] == "apache-2.0"
+    assert "license_name" not in meta and "license_link" not in meta
+
+
+def test_a_license_called_other_is_named_and_linked_in_the_frontmatter():
+    """The frontmatter's `license_name` is a slug, not the title. The Hub validates it
+    server-side (`"license_name" must only contain lowercase characters`), so the
+    author's human-readable title is slugified here — see the License row below, which
+    keeps it verbatim."""
+    import yaml
+
+    card = _card(card={"license": {"id": "other", "name": "Fish Audio Research License",
+                                   "link": "https://example.invalid/LICENSE"}})
+    meta = yaml.safe_load(card.split("---")[1])
+    assert meta["license"] == "other"
+    assert meta["license_name"] == "fish-audio-research-license"
+    assert meta["license_link"] == "https://example.invalid/LICENSE"
+    assert "Fish Audio Research License" in card  # the prose keeps the title
+
+
+def test_a_license_name_is_slugified_before_the_hub_sees_it():
+    """Observed: `MiniMax Model License Agreement` was accepted by every client-side check
+    and refused by the Hub on the README commit — i.e. inside `push`, after the build and
+    the multi-GB upload. On a huggingface_hub old enough to still have
+    `upload_large_folder` there is no client-side YAML validation at all, so it was
+    published invalid and unindexed instead of refused."""
+    import yaml
+
+    from tt_kernel.build import _license_name_slug
+
+    card = _card(card={"license": {"id": "other", "name": "MiniMax Model License Agreement"}})
+    meta = yaml.safe_load(card.split("---")[1])
+    assert meta["license_name"] == "minimax-model-license-agreement"
+
+    # The shape the Hub documents for this field: lowercase, digits, '-' and '.'.
+    for title, slug in [
+        ("Apache 2.0 (see LICENSE)", "apache-2.0-see-license"),
+        ("CC BY-NC 4.0", "cc-by-nc-4.0"),
+        ("  Spaced  Out  ", "spaced-out"),
+    ]:
+        assert _license_name_slug(title) == slug
+    # A title with nothing slug-shaped in it must not become an empty frontmatter value,
+    # which the Hub would reject in its own way.
+    assert _license_name_slug("***") is None
+
+
+def test_the_frontmatter_never_emits_a_multiline_scalar_from_a_wire_manifest():
+    """The renderer's inputs come off a WIRE manifest, possibly written by another
+    tt-model, so it normalises rather than trusting the authoring model to have done it.
+
+    `license` is the field the Hub validates server-side on the README commit, so a
+    folded scalar there fails after the build; and un-normalised, "other\\n" also misses
+    the `== "other"` branch and drops the name and link entirely."""
+    import yaml
+
+    card = _card(card={"license": {"id": "other\n", "name": "Custom\nLicence",
+                                   "link": "https://example.invalid/L\n"},
+                       "pipeline_tag": "text-to-image\n",
+                       "base_model": ["org/Upstream-A\n"]})
+    block = card.split("---")[1]
+    meta = yaml.safe_load(block)
+    assert meta["license"] == "other"
+    assert meta["license_name"] == "custom-licence"
+    assert meta["license_link"] == "https://example.invalid/L"
+    assert meta["pipeline_tag"] == "text-to-image"
+    assert meta["base_model"] == ["org/Upstream-A"]
+    # ...and the block carries no blank line, which is what a folded scalar produces
+    assert "\n\n" not in block.strip()
+
+
+def test_the_frontmatter_defaults_the_lineage_to_the_weights_repo():
+    """Stating the base model is what makes this package show up on the upstream
+    model's own Hub page; the weights repo IS that model, so it need not be typed."""
+    import yaml
+
+    meta = yaml.safe_load(_card().split("---")[1])
+    assert meta["base_model"] == ["org/Weights-7B"]
+    assert meta["pipeline_tag"] == "text-generation"  # derived for the vLLM kinds
+
+
+def test_a_diffusion_card_claims_no_text_generation_task():
+    from tt_kernel.container_manifest import ContainerManifest
+    import yaml
+
+    raw = json.loads(json.dumps(BASE))
+    raw["kind"] = "tt-dit-server"
+    raw["runtime"] = {"app": "models.tt_dit.server.flux2.app:app"}
+    raw["serve"] = {"hardware": "p150x4", "mesh_device": "P150x4", "port": 8000}
+    raw.pop("serve_profiles", None)
+    raw.pop("default_profile", None)
+    meta = yaml.safe_load(
+        build.render_model_card(ContainerManifest.model_validate(raw), _built())
+        .split("---")[1])
+    assert "pipeline_tag" not in meta  # only the author can say what a dit server does
+
+    # ...and when the author does say, it is carried through
+    raw["card"] = {"pipeline_tag": "text-to-image"}
+    meta = yaml.safe_load(
+        build.render_model_card(ContainerManifest.model_validate(raw), _built())
+        .split("---")[1])
+    assert meta["pipeline_tag"] == "text-to-image"
+
+
+def test_every_kind_declares_a_default_pipeline_tag():
+    """The frontmatter's `pipeline_tag` default is read off the launcher, never decided by
+    string-comparing SERVER_DESC — the same coupling that once broke every fork card."""
+    from tt_kernel.launchers import KINDS
+
+    for name, launcher in KINDS.items():
+        assert hasattr(launcher, "DEFAULT_PIPELINE_TAG"), f"kind {name} has no DEFAULT_PIPELINE_TAG"
+    assert KINDS["vllm-plugin"].DEFAULT_PIPELINE_TAG == "text-generation"
+    assert KINDS["vllm-fork"].DEFAULT_PIPELINE_TAG == "text-generation"
+    assert KINDS["tt-dit-server"].DEFAULT_PIPELINE_TAG is None
+
+
+def test_at_a_glance_cells_survive_pipes_and_newlines():
+    """A `|` in a value added a column, and a trailing newline ended the table mid-row.
+    The licence name is the author-typed value left in the table, so it must be
+    neutralised."""
+    card = _card(card={"license": {"id": "other", "name": "Org | Research License\n"}})
+    table = card[card.index("## At a glance"):card.index("## Quickstart")]
+    rows = [l for l in table.splitlines() if l.startswith("| ") and "---" not in l
+            and l != "| | |"]
+    assert rows == [
+        "| Hardware | p150x4 |",
+        "| Context | 131,072 tokens |",
+        "| License | Org \\| Research License |",
+    ]
+
+
+def test_a_whitespace_only_description_renders_nothing():
+    """Easy to produce from an empty `>`-folded scalar; it left a blank paragraph between
+    the title and the hardware sentence."""
+    card = _card(card={"description": "  \n"})
+    title_to_hardware = card[card.index("# my-model"):card.index("Runs on")]
+    assert title_to_hardware.strip() == "# my-model on Tenstorrent p150x4"
 
 
 def test_the_card_pins_provenance():
@@ -1206,13 +1741,80 @@ def _dit_manifest():
 
 
 def test_a_diffusion_card_does_not_claim_an_openai_api():
+    """It must never read as OpenAI-compatible.
+
+    This used to assert the string "OpenAI" was absent entirely. The card now says the
+    opposite out loud -- "**not** an OpenAI-compatible chat API" -- because silence left
+    readers of a dit card to assume the usual endpoint and discover otherwise from a 404;
+    the published vision/robotics cards state the negation for the same reason. So the
+    check is that no POSITIVE claim survives, not that the word is missing.
+    """
     card = build.render_model_card(_dit_manifest(), _built())
-    assert "OpenAI" not in card
+    assert "an OpenAI-compatible server" not in card
+    assert "not** an OpenAI-compatible chat API" in card
     assert "the model's own HTTP server" in card
+    # exactly one mention, and it is the negation — an ADDITIVE positive claim (an
+    # "OpenAI Python client" snippet, say) would otherwise slip past the two asserts above
+    assert card.count("OpenAI") == 1
+
+
+def test_a_diffusion_card_points_at_author_notes_only_when_there_are_some():
+    """"See the author's notes above" on a card with no author notes is a dead end; a dit
+    bundle published without a `card:` block then offered no guidance at all on the
+    payload the server expects."""
+    from tt_kernel.container_manifest import ContainerManifest
+
+    bare = build.render_model_card(_dit_manifest(), _built())
+    assert "author's notes" not in bare
+    assert "`GET /docs`" in bare and "`code/`" in bare
+
+    raw = json.loads(json.dumps(BASE))
+    raw["kind"] = "tt-dit-server"
+    raw["runtime"] = {"app": "models.tt_dit.server.flux2.app:app"}
+    raw.pop("serve_profiles", None)
+    raw["serve"] = {"hardware": "p150x4", "mesh_device": "P150x4", "port": 8000}
+    raw["card"] = {"usage": "POST /predict with a base64 image."}
+    with_notes = build.render_model_card(ContainerManifest.model_validate(raw), _built())
+    caps = with_notes[with_notes.index("## Capabilities"):with_notes.index("## Expected")]
+    assert "See the author's notes for the payload it expects." in caps
+    assert caps.index("See the author's notes") < caps.index("POST /predict")
 
 
 def test_a_vllm_card_still_says_openai_compatible():
     assert "an OpenAI-compatible server" in _card()
+
+
+def test_a_diffusion_profile_table_omits_the_capacity_columns():
+    """`max_num_seqs`/`max_model_len` configure a continuous-batching engine a dit server
+    does not have, so a diffusion card rendered them as two columns of empty cells."""
+    from tt_kernel.container_manifest import ContainerManifest
+
+    raw = json.loads(json.dumps(BASE))
+    raw["kind"] = "tt-dit-server"
+    raw["runtime"] = {"app": "models.tt_dit.server.flux2.app:app"}
+    raw["serve"] = {"port": 8000}
+    raw["serve_profiles"] = [
+        {"name": "p150x4", "hardware": "p150x4", "mesh_device": "P150x4"},
+        {"name": "p300x2", "hardware": "p300x2", "mesh_device": "P300x2"},
+    ]
+    raw["default_profile"] = "p150x4"
+    card = build.render_model_card(ContainerManifest.model_validate(raw), _built())
+    assert "## Serving profiles" in card
+    assert "max_num_seqs" not in card
+    assert "max_model_len" not in card
+    assert "| profile | hardware | mesh |" in card
+
+
+def test_an_llm_profile_table_keeps_the_capacity_columns():
+    profiles = [
+        {"name": "p150x2", "hardware": "p150x2", "mesh_device": "P150x2",
+         "max_num_seqs": 8, "max_model_len": 65536},
+        {"name": "p150x4", "hardware": "p150x4", "mesh_device": "P150x4",
+         "max_num_seqs": 32, "max_model_len": 131072},
+    ]
+    card = _card(serve_profiles=profiles, default_profile="p150x4")
+    assert "| profile | hardware | mesh | max_num_seqs | max_model_len |" in card
+    assert "| 32 | 131072 |" in card
 
 
 def test_every_kind_describes_the_server_it_starts():
@@ -1224,6 +1826,25 @@ def test_every_kind_describes_the_server_it_starts():
         desc = getattr(launcher, "SERVER_DESC", None)
         assert desc, f"kind {name} has no SERVER_DESC"
         assert not desc.endswith("."), f"{name}: SERVER_DESC is a clause, not a sentence"
+
+
+def test_every_kind_declares_whether_it_is_openai_compatible():
+    """The card branches on this FACT, never on the SERVER_DESC prose: rewording the
+    prose once made every vllm-fork card contradict itself with the whole suite green."""
+    from tt_kernel.launchers import KINDS
+
+    for name, launcher in KINDS.items():
+        flag = getattr(launcher, "OPENAI_COMPATIBLE", None)
+        assert isinstance(flag, bool), f"kind {name} has no boolean OPENAI_COMPATIBLE"
+        # The two must agree, or one card sentence contradicts the next: a kind
+        # declaring SERVER_DESC "an OpenAI-compatible transcription server" with
+        # OPENAI_COMPATIBLE False renders "exposes an OpenAI-compatible transcription
+        # server, **not** an OpenAI-compatible chat API".
+        assert ("OpenAI" in launcher.SERVER_DESC) == flag, (
+            f"{name}: SERVER_DESC and OPENAI_COMPATIBLE disagree")
+    assert KINDS["tt-dit-server"].OPENAI_COMPATIBLE is False
+    assert KINDS["vllm-plugin"].OPENAI_COMPATIBLE is True
+    assert KINDS["vllm-fork"].OPENAI_COMPATIBLE is True
 
 
 def test_the_card_documents_the_port_serve_opens_not_the_manifests_bind_port():
@@ -1277,8 +1898,15 @@ def test_the_manifest_bind_port_never_reaches_the_card():
 
 
 def _tags_of(card: str) -> list:
-    body = card.split("---")[1]
-    return [l.strip("- ").strip() for l in body.strip().splitlines() if l.startswith("- ")]
+    """The `tags:` list from the frontmatter, parsed as the YAML it is.
+
+    This used to scan for lines starting with "- ", which was fine while `tags` was the
+    only key. The frontmatter now also carries `base_model:`, whose items are list
+    entries too, so that scan would report the weights repo as a tag.
+    """
+    import yaml
+
+    return list(yaml.safe_load(card.split("---")[1])["tags"])
 
 
 def test_the_card_tags_the_board_the_model_was_authored_for():

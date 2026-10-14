@@ -879,11 +879,13 @@ def run_build(staged: Staged, echo: Optional[Callable[[str], None]] = None) -> N
 
 
 def image_digest(image: str) -> str:
-    """The image's own config digest — what ``docker inspect`` reports as ``.Id``.
+    """The image's identity — what ``docker inspect`` reports as ``.Id``.
 
-    This is the image's identity: it changes if and only if the image changes. Everything
-    that made the old tag unreliable (the plugin pin, the code allowlist, serve settings,
-    the base image) is inside it.
+    It changes if and only if the image changes. Everything that made the old tag
+    unreliable (the plugin pin, the code allowlist, serve settings, the base image) is
+    inside it. Which digest it is depends on the builder's image store (config digest on
+    the classic store, manifest digest on containerd), so a consumer may report a different
+    id for the same image; ``container_cli._image_is_current`` allows for that.
     """
     r = subprocess.run(
         ["docker", "image", "inspect", image, "--format", "{{.Id}}"],
@@ -1007,6 +1009,7 @@ def _pinned_sha(sha: str, repo: Optional[str], *, public: bool = True,
 
 
 TT_MODEL_MANAGER_URL = "https://github.com/tenstorrent/tt-model-manager"
+TT_CLI_PREREQUISITES_URL = "https://github.com/tenstorrent/tt-cli/blob/main/docs/prerequisites.md"
 
 
 def _card_tags(m: ContainerManifest) -> set:
@@ -1039,11 +1042,263 @@ def _card_tags(m: ContainerManifest) -> set:
     return tags
 
 
+_LICENSE_NAME_SLUG_DROP = re.compile(r"[^a-z0-9.-]+")
+
+
+def _license_name_slug(name: Optional[str]) -> Optional[str]:
+    """``card.license.name`` as the slug the Hub's ``license_name`` field accepts.
+
+    ``name`` is a human-readable licence title: it is what the card's License row shows a
+    reader, so "MiniMax Model License Agreement" is the right thing for an author to write.
+    The FRONTMATTER key of the same name is not prose — the Hub validates it server-side
+    against a slug shape and rejects the README commit with ``"license_name" must only
+    contain lowercase characters``. That rejection lands inside ``push``, after the
+    multi-hour build and the multi-GB upload, which is the one place this must not be
+    discovered; and on a ``huggingface_hub`` old enough to still have
+    ``upload_large_folder``, there is no client-side YAML validation at all, so it was
+    published invalid and unindexed instead of refused.
+
+    So derive the slug rather than refusing the title: the prose stays prose where a human
+    reads it, and the indexed field gets the shape the index requires.
+    """
+    if not name:
+        return name
+    slug = _LICENSE_NAME_SLUG_DROP.sub("-", name.lower()).strip("-.")
+    # Collapse the runs the substitution can leave ("Apache 2.0 / MIT" -> "apache-2.0-mit").
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug or None
+
+
+def _card_frontmatter(m: ContainerManifest) -> List[str]:
+    """The card's YAML frontmatter: the tags, plus the standard HF metadata keys.
+
+    ``license`` / ``license_name`` / ``license_link`` / ``pipeline_tag`` / ``base_model``
+    are the Hub's OWN field names, not tt-model's invention, which is the point: the Hub
+    indexes them and ``huggingface_hub``'s ``ModelInfo`` hands them to any consumer
+    directly. A licence buried in prose is a licence every tool has to scrape for.
+    """
+    import yaml
+
+    from .launchers import launcher_for
+
+    # Frontmatter values are emitted verbatim into YAML, so a stray newline becomes a
+    # multi-line scalar in a field the Hub validates on commit. The input here is a WIRE
+    # manifest another tt-model may have written, so normalise rather than trust it.
+    def _flat(value: Optional[str]) -> Optional[str]:
+        return " ".join(value.split()) if isinstance(value, str) else value
+
+    card = m.card
+    data: Dict[str, object] = {"tags": sorted(_card_tags(m))}
+    if card and card.license:
+        data["license"] = _flat(card.license.id)
+        # Only beside `other`, which is the case the Hub documents these two keys for.
+        # Beside a standard id their acceptance is unverified, and the Hub would decide
+        # at commit time — after the build.
+        if _flat(card.license.id) == "other":
+            if card.license.name:
+                data["license_name"] = _license_name_slug(_flat(card.license.name))
+            if card.license.link:
+                data["license_link"] = _flat(card.license.link)
+    # Left unset, the Hub shows no task on the repo, so it never appears in the task
+    # filter a consumer browses by. The launcher knows its own default (text generation
+    # for a vLLM server, nothing for a dit server); the author can always override.
+    pipeline = _flat(card.pipeline_tag if card else None) or launcher_for(m.kind).DEFAULT_PIPELINE_TAG
+    if pipeline:
+        data["pipeline_tag"] = pipeline
+    # Defaulted rather than required: the weights repo IS the upstream model, and stating
+    # the lineage is what makes this package show up on that model's own Hub page.
+    data["base_model"] = [_flat(b) for b in
+                          ((card.base_model if card else None) or [m.weights_repo])]
+    dumped = yaml.safe_dump(data, sort_keys=False, default_flow_style=False).rstrip()
+    return ["---", dumped, "---", ""]
+
+
+def _card_section(heading: str, body: Optional[str]) -> List[str]:
+    """One ``## heading`` section, or nothing at all when the author wrote nothing."""
+    if not (body or "").strip():
+        return []
+    return [f"## {heading}", "", body.rstrip(), ""]
+
+
+def _card_required_section(heading: str, body: Optional[str], missing: str) -> List[str]:
+    """A section rendered even when empty.
+
+    Silence reads as "this model has no limitations" or "its performance was not worth
+    stating". Saying the author did not provide it is both true and visible, and it is
+    the same absence a catalog listing turns on (see docs/publishing.md).
+    """
+    text = (body or "").strip() or f"_{missing}_"
+    return [f"## {heading}", "", text, ""]
+
+
+def _cell(value: object) -> str:
+    """One Markdown table cell: whitespace collapsed, pipes escaped.
+
+    Author strings land here verbatim otherwise, and both failure modes were easy to hit:
+    a `|` in "30B MoE | 3B active" adds a column, and a trailing newline — which every
+    `>`-folded YAML scalar has, and the shipped example uses `>` for five neighbouring
+    fields — ends the table mid-row and spills the remaining rows out as loose text.
+    """
+    return " ".join(str(value).split()).replace("|", "\\|")
+
+
+def _card_at_a_glance(m: ContainerManifest) -> List[str]:
+    """A scannable fact table, derived wherever the manifest already knows the answer.
+
+    Only rows that have a value: a row reading "unknown" is worse than a shorter table.
+    Deliberately no Model CI row — until that gate exists (DEVSTACK-430) any value would
+    be a claim frozen at build time that no consumer could refresh.
+    """
+    card = m.card
+    profiles = [m.resolve_profile(n) for n in m.profile_names()]
+    boards = sorted({p.hardware for p in profiles if p.hardware})
+    contexts = [p.max_model_len for p in profiles if p.max_model_len]
+    rows = [
+        ("Hardware", ", ".join(boards) if boards else None),
+        ("Context", f"{max(contexts):,} tokens" if contexts else None),
+        ("License", (card.license.name or card.license.id)
+         if (card and card.license) else None),
+    ]
+    present = [(label, value) for label, value in rows if value]
+    if not present:
+        return []
+    lines = ["## At a glance", "", "| | |", "| --- | --- |"]
+    lines += [f"| {label} | {_cell(value)} |" for label, value in present]
+    lines.append("")
+    return lines
+
+
+def _card_boards(m: ContainerManifest) -> List[str]:
+    """Every board a profile targets, in profile order, once each."""
+    boards: List[str] = []
+    for name in m.profile_names():
+        hw = m.resolve_profile(name).hardware
+        if hw and hw not in boards:
+            boards.append(hw)
+    return boards
+
+
+def _card_prerequisites(m: ContainerManifest) -> List[str]:
+    """What a box needs before the Quickstart works: derived, then the author's extras."""
+    boards = _card_boards(m)
+    lines = [
+        "## Prerequisites",
+        "",
+        f"- The [Tenstorrent CLI]({TT_CLI_PREREQUISITES_URL}), `tt`: `uv tool install tenstorrent` "
+        "(or use tt-model alone, see the Quickstart)",
+        "- Docker",
+    ]
+    if boards:
+        lines.append("- Tenstorrent hardware: " + " or ".join(f"**{b}**" for b in boards))
+    # Same list as the derived bullets: a blank line or a bare line would split it in two.
+    extra = (m.card.prerequisites or "") if m.card else ""
+    lines += [l if l.startswith(" ") or re.match(r"([-*]|\d+[.)]) ", l) else f"- {l}"
+              for l in extra.strip().splitlines() if l.strip()]
+    return lines + [""]
+
+
+def _card_capabilities(m: ContainerManifest) -> List[str]:
+    """The ``## Capabilities`` section: what a client actually sends.
+
+    Derived, not authored. The endpoint shape follows from ``kind``, and the two
+    capability parsers are already in the manifest because the launcher turns them into
+    vLLM flags (``launchers`` -> ``--tool-call-parser`` / ``--reasoning_parser``). A card
+    that omits them tells a reader the model cannot do tool calling when in fact the
+    server was started for it — the most expensive kind of wrong, since the client
+    silently gets prose back instead of ``tool_calls``.
+    """
+    from .launchers import launcher_for
+    from .manifest import DEFAULT_PORT
+
+    launcher = launcher_for(m.kind)
+    lines = ["## Capabilities", ""]
+    if launcher.OPENAI_COMPATIBLE:
+        lines += [
+            f"The server speaks the OpenAI API at `http://127.0.0.1:{DEFAULT_PORT}/v1` "
+            # Not "the port `tt serve` reported": the Quickstart offers a tt-model-only
+            # path too, and a reader who took it never ran `tt serve`.
+            "(or whichever port your serve command reported; chat completions, "
+            f"completions, and `/v1/models`). Pass `\"model\": \"{m.weights_repo}\"` — "
+            "the weights id, not this package's name.",
+            "",
+        ]
+        lines += _capability_notes(m)
+    else:
+        lines += [
+            f"This package exposes {launcher.SERVER_DESC} on port {DEFAULT_PORT}, "
+            "**not** an OpenAI-compatible chat API — its request and response shapes are "
+            "the model's own. "
+            + (
+                "See the author's notes for the payload it expects."
+                if m.card and ((m.card.usage or "").strip()
+                               or (m.card.quickstart or "").strip()
+                               or (m.card.description or "").strip())
+                # No author text to point at: sending the reader "above" would be a dead
+                # end, so name the two places the contract actually lives.
+                else "For the payload it expects, see the server's own routes (`GET /docs` "
+                     "on a FastAPI app) or the model code under `code/` in this repo."
+            ),
+            "",
+        ]
+    # After the derived text: the author adds to a described endpoint (a request schema,
+    # an example payload). Most needed by the kinds whose API only they can document.
+    if m.card and (m.card.usage or "").strip():
+        lines += [m.card.usage.rstrip(), ""]
+    return lines
+
+
+def _capability_notes(m: ContainerManifest) -> List[str]:
+    """Tool-calling and reasoning notes, qualified per profile when profiles disagree.
+
+    Capabilities deep-merge per profile, so two profiles of one image can start the
+    server with different parsers. Reading only the default and stating the result flat
+    was wrong in both directions: a `tools` profile the default lacked went unmentioned,
+    and a reasoning parser only the default set was claimed for every profile — directly
+    under a table inviting the reader to pick a different one.
+    """
+    def _sentences(cap) -> List[str]:
+        out = []
+        if cap and cap.tool_parser:
+            out.append(
+                f"tool calling is enabled (`--tool-call-parser {cap.tool_parser}`): a "
+                "request that passes `tools` comes back with `tool_calls` and "
+                "`finish_reason: tool_calls`"
+            )
+        if cap and cap.reasoning_parser:
+            out.append(
+                f"reasoning output is separated (`--reasoning_parser "
+                f"{cap.reasoning_parser}`): the thinking text arrives in "
+                "`reasoning_content`, apart from `content`"
+            )
+        return out
+
+    per_profile = [(name, _sentences(m.resolve_profile(name).capabilities))
+                   for name in m.profile_names()]
+    if all(s == per_profile[0][1] for _, s in per_profile):
+        # One answer for the whole image: state it once, unqualified.
+        lines = []
+        for sentence in per_profile[0][1]:
+            lines += [sentence[0].upper() + sentence[1:] + ".", ""]
+        return lines
+    # Mark the default. "On `--profile tools`: ..." reads as "only if you pass this",
+    # which is the wrong answer when `tools` is what a bare `serve` already gives you —
+    # the same class of mistake as claiming the default's capabilities for every profile.
+    default = m.resolved_default()
+    lines = []
+    for name, sentences in per_profile:
+        if sentences:
+            where = f"On `--profile {name}`" + (" (the default)" if name == default else "")
+            lines += [f"{where}: " + "; ".join(sentences) + ".", ""]
+    return lines
+
+
 def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     """The generated README.md for the HF repo.
 
     The order is the reader's order: what the model is and what hardware it needs
     first, then how to run it, then (only when there is a choice) the profile table,
+    then what a client actually sends (``Capabilities``), then where to report a problem,
     then provenance. Provenance names each component by its official name and shows a
     commit only as a working public link.
     """
@@ -1052,18 +1307,14 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
     from .manifest import DEFAULT_PORT
 
     tt_metal = built.get("tt_metal") or {}
-    tags = sorted(_card_tags(m))
-    lines = [
-        "---",
-        "tags:",
-        *[f"- {t}" for t in tags],
-        "---",
-        "",
-        f"# {m.name}",
-        "",
-    ]
-    if m.card and m.card.description:
-        lines += [m.card.description.rstrip(), ""]
+    boards = _card_boards(m)
+    title = m.name + (" on Tenstorrent " + " and ".join(boards) if boards else "")
+    lines = _card_frontmatter(m) + [f"# {title}", ""]
+    if m.card and (m.card.attribution or "").strip():
+        lines += ["\n".join(f"> {l}".rstrip() for l in m.card.attribution.strip().splitlines()),
+                  ""]
+    if m.card and (m.card.description or "").strip():
+        lines += [m.card.description.strip(), ""]
 
     # Hardware requirement, up front. One profile: the whole launch config in a
     # sentence. Several: the targets here, the details in the table below.
@@ -1076,61 +1327,110 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         if p.max_num_seqs:
             detail.append(f"up to {p.max_num_seqs} concurrent sequences")
         lines += [
-            f"Runs on **{p.hardware}** (mesh `{p.mesh_device}`)"
+            f"Runs on Tenstorrent **{p.hardware}** (mesh `{p.mesh_device}`)"
             + (" — " + ", ".join(detail) if detail else "") + ".",
             "",
         ]
     else:
-        targets = " or ".join(f"**{p.hardware}**" for p in profiles if p.hardware)
-        lines += [f"Runs on {targets} — see the serve profiles below.", ""]
+        targets = " or ".join(f"**{b}**" for b in boards)
+        lines += [f"Runs on Tenstorrent {targets} — see the serving profiles below.", ""]
 
     lines += [
         f"Packaged and published with [tt-model-manager]({TT_MODEL_MANAGER_URL}) "
         f"{built.get('tt_model_version', '')} (manifest schema {m.schema_version}).",
         "",
+    ]
+    lines += _card_at_a_glance(m)
+    lines += _card_section("Intended use", m.card.intended_use if m.card else None)
+    lines += _card_prerequisites(m)
+    lines += [
         "## Quickstart",
         "",
         "```bash",
-        f"tt-model pull  {m.repo} --with-weights",
-        f"tt-model serve {m.repo}",
+        f"tt serve {m.repo}",
         "```",
         "",
-        f"`pull --with-weights` downloads the Docker image and the "
+        "`tt serve` downloads the Docker image and the "
         f"[`{m.weights_repo}`](https://huggingface.co/{m.weights_repo}) weights"
         + (f" at `{m.weights_ref.revision}`" if m.weights_ref.revision else "")
-        + " (into your HF cache; they are not in the image). `serve` starts "
-        # DEFAULT_PORT, never the manifest's `port`. The two commands above are
-        # `tt-model serve`, and serve deliberately ignores the manifest port as a seed:
-        # authors write 8000 there for the bare-`docker run` CMD, which is exactly the
-        # port that collides on a shared box.
+        + " (into your HF cache; they are not in the image), then starts "
+        # DEFAULT_PORT, never the manifest's `port`. Serve deliberately ignores the
+        # manifest port as a seed: authors write 8000 there for the bare-`docker run`
+        # CMD, which is exactly the port that collides on a shared box.
         f"{launcher_for(m.kind).SERVER_DESC} on port {DEFAULT_PORT} (or the next free "
-        "port, if that one is busy)"
-        + "; the first "
-        "start compiles kernels for your device, which takes several minutes, and the "
-        f"server is ready when it logs `{launcher_for(m.kind).READY_LINE}`.",
+        "port, if that one is busy). The first start compiles kernels for your device, "
+        "which takes several minutes; the server is ready when it logs "
+        f"`{launcher_for(m.kind).READY_LINE}`.",
+        "",
+        # Required by AGENTS.md invariant 1: the card must never need tt-cli.
+        f"Without tt-cli: `tt-model serve {m.repo}`.",
         "",
     ]
     if m.card and m.card.quickstart:
         lines += [m.card.quickstart.rstrip(), ""]
     if len(profiles) > 1:
+        # The capacity columns are a continuous-batching engine's vocabulary. A
+        # `tt-dit-server` profile has neither (its launcher does not ask for them), so
+        # printing the headers anyway yielded two columns of empty cells on every
+        # diffusion card — a table that states nothing. Include them only when some
+        # profile actually fills them.
+        capacity = any(p.max_num_seqs or p.max_model_len for p in profiles)
+        described = any((p.description or "").strip() for p in m.serve_profiles)
+        header = ["profile", "hardware", "mesh"]
+        if capacity:
+            header += ["max_num_seqs", "max_model_len"]
+        if described:
+            header.append("description")
         lines += [
-            "## Serve profiles",
+            "## Serving profiles",
             "",
-            "One image serves every profile below; pick one with `--profile`.",
+            "Select a different serving profile using `--profile`.",
             "",
-            "| profile | hardware | mesh | max_num_seqs | max_model_len |",
-            "| --- | --- | --- | --- | --- |",
+            "| " + " | ".join(header) + " |",
+            "| " + " | ".join("---" for _ in header) + " |",
         ]
         default = m.resolved_default()
+        descriptions = {p.name: p.description for p in m.serve_profiles}
         for name in m.profile_names():
             p = m.resolve_profile(name)
             label = f"`{name}`" + (" *(default)*" if name == default else "")
-            lines.append(
-                f"| {label} | {p.hardware or ''} | {p.mesh_device or ''} | "
-                f"{p.max_num_seqs or ''} | {p.max_model_len or ''} |"
-            )
+            cells = [label, p.hardware or "", p.mesh_device or ""]
+            if capacity:
+                cells += [str(p.max_num_seqs or ""), str(p.max_model_len or "")]
+            if described:
+                cells.append(_cell(descriptions.get(name) or ""))
+            lines.append("| " + " | ".join(cells) + " |")
         lines.append("")
+
+    lines += _card_capabilities(m)
+    card = m.card
+    # Template order. The two required sections render even when empty, so their absence
+    # is visible on the Hub rather than indistinguishable from "nothing to say".
+    lines += _card_required_section(
+        "Expected performance", card.performance if card else None,
+        "Not provided by the package author.")
+    lines += _card_required_section(
+        "Limitations", card.limitations if card else None,
+        "Not provided by the package author.")
+    lines += _card_section("Licensing", card.licensing if card else None)
+    lines += _card_section("Related packages", card.related if card else None)
     lines += [
+        "## Feedback",
+        "",
+        # Unconditional: a reader who hits a problem is on THIS page, and the card is
+        # the only artifact they are guaranteed to have seen. Three channels, because
+        # they reach three different people: the repo's Discussions tab is the only one
+        # that reaches the bundle's AUTHOR; `tt report issue` files against
+        # tenstorrent/tt-cli (the tooling tracker — a broken bundle sent there never
+        # reaches whoever can fix it), so it is offered for `tt` problems only;
+        # support@tenstorrent.com is the address the GA plan routes product feedback to.
+        # `tt report feedback` is deliberately absent: still a stub that exits UNSUPPORTED.
+        f"Questions or problems with this package: open a discussion at "
+        f"https://huggingface.co/{m.repo}/discussions — that is what reaches its author. "
+        "A problem with the `tt` tooling itself: `tt report issue` (collects your "
+        "environment and opens a prefilled issue against tenstorrent/tt-cli). Product "
+        "feedback: support@tenstorrent.com.",
+        "",
         "## Provenance",
         "",
         "The exact sources the image was built from — `code/` in this repo is "

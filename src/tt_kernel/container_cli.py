@@ -16,6 +16,7 @@ looks like the rest of the tool. The modules underneath (``build``, ``container`
 from __future__ import annotations
 
 import errno
+import re
 import shlex
 import shutil
 import tempfile
@@ -25,7 +26,14 @@ from typing import List, Optional
 from . import MANIFEST_NAME, compat, console, container, hub, localdb, oci
 from .boot_progress import BootTracker, diagnose_boot, summarize
 from .build import BuildError, build_log_path, finalize, run_build, stage
-from .container_manifest import ContainerManifestError, hardware_chip_count
+from .container_manifest import (
+    ContainerManifestError,
+    PERFORMANCE_COLUMNS,
+    card_performance_gaps,
+    card_publish_gaps,
+    card_retired_notes,
+    hardware_chip_count,
+)
 from .launchers import launcher_for
 from .manifest import DEFAULT_PORT, Manifest
 
@@ -64,6 +72,32 @@ def require_host(*, need_devices: bool):
 
 
 # --------------------------------------------------------------------------- package
+
+
+def card_gap_warning(gaps: List[str]) -> Optional[str]:
+    """The one-line warning `package` prints for missing required card sections.
+
+    Pure so the wording — singular/plural and all — is testable without a build.
+    """
+    if not gaps:
+        return None
+    return (
+        "the model card has no " + " or ".join(f"card.{g}" for g in gaps)
+        + " — a catalog listing (`tt-model publish`, `push --publish`) is refused "
+        + ("without them" if len(gaps) > 1 else "without it")
+    )
+
+
+def card_performance_warning(gaps: List[str]) -> Optional[str]:
+    """The one-line warning `package` prints when an LLM performance table is incomplete."""
+    if not gaps:
+        return None
+    names = [g.upper() if g in ("isl", "osl", "n", "ttft", "e2el") else g for g in gaps]
+    if len(gaps) == len(PERFORMANCE_COLUMNS):
+        return ("card.performance has no table with the required columns ("
+                + ", ".join(names) + "), one row per serving profile")
+    return ("card.performance's table has no " + ", ".join(names)
+            + " column" + ("s" if len(gaps) > 1 else ""))
 
 
 def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> Path:
@@ -106,6 +140,21 @@ def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> 
         pinned = staged.built.get(key)
         if isinstance(pinned, dict):
             console.note(f"{key} pinned to {str(pinned.get('sha'))[:9]}", marker="•")
+
+    # Said now, not at publish time: this is a 2.5-4 hour build, and discovering
+    # afterwards that the card is missing the two sections a listing requires means
+    # editing the YAML and running all of it again. A warning only — a private or
+    # experimental build has every right to skip them.
+    warning = card_gap_warning(card_publish_gaps(staged.manifest.card))
+    if warning:
+        console.note(warning, marker="!", style="warning")
+    warning = card_performance_warning(
+        card_performance_gaps(staged.manifest.card, staged.manifest.kind))
+    if warning:
+        console.note(warning, marker="!", style="warning")
+    for note in card_retired_notes(staged.manifest.card):
+        console.note(f"{note} — update tt-model.yaml before these keys are removed",
+                     marker="!", style="warning")
 
     console.phase("Stage")
     console.note(f"{len(staged.code_tree)} code path(s) → code/", marker="•")
@@ -153,17 +202,59 @@ def is_package_dir(path: Path) -> Optional[Manifest]:
     return m if m.is_container else None
 
 
+# Generated Quickstart command lines, anchored on the command (never the old repo) so every
+# push repoints correctly; the fence patterns also cover cards staged by older versions.
+_QUICKSTART_CMD = re.compile(
+    r"(?m)^(tt model pull |tt serve |tt-model pull  |tt-model serve )(\S+/\S+)"
+)
+# The generated one-line tt-model path; anchored on its fixed prefix so author prose is safe.
+_QUICKSTART_INLINE = re.compile(
+    r"(?m)^(Without tt-cli: `tt-model serve )[^\s`]+/[^\s`]+(`\.)$"
+)
+
+
+def _repoint_card_quickstart(readme: Path, new_repo: str) -> bool:
+    """Point the card's Quickstart command lines at ``new_repo``; True if the file changed.
+
+    ``render_model_card`` bakes the manifest's repo into those lines at PACKAGE time, before
+    any ``push --repo`` override is known, so a push to a different repo would otherwise
+    publish a card telling the reader to pull a repo that is not there (issue #109). This
+    realigns them with wherever the bytes are actually going.
+
+    It rewrites the generated command lines above; ``card.description`` and an author's
+    appended ``card.quickstart`` are prose that may also name a repo, and those are left
+    alone. A no-op (the lines already name ``new_repo``, or the card is absent) returns False.
+    """
+    if not readme.is_file():
+        return False
+    text = readme.read_text()
+    swapped = _QUICKSTART_CMD.sub(lambda mo: mo.group(1) + new_repo, text)
+    swapped = _QUICKSTART_INLINE.sub(lambda mo: mo.group(1) + new_repo + mo.group(2), swapped)
+    if swapped == text:
+        return False
+    readme.write_text(swapped)
+    return True
+
+
 def push_container(staged_dir: str, manifest: Manifest, repo_id: str) -> None:
     """Upload a staged container package directory to the Hub.
 
-    The caller owns repo creation and visibility (``_ensure_repo`` in the CLI), so this
-    only moves bytes. The model card is already written into the directory by ``package``
-    and carries its own tags, so nothing here rewrites it — ``tag_repo`` would clobber it.
+    The caller owns repo creation and visibility (``_ensure_repo`` in the CLI), so this only
+    moves bytes and does not touch the card's tags — ``tag_repo`` would clobber them. It does
+    repoint the card's Quickstart to ``repo_id`` when a ``push --repo`` sends the package to a
+    repo other than the one it was packaged for, so the published card names where it actually
+    lives rather than the authored source (issue #109).
     """
     out = Path(staged_dir)
     image_dir = out / "image"
     spec = manifest.container
     assert spec is not None
+
+    # Rendered at package time with the manifest's repo; realign it with the real target.
+    # Anchored on the command, not the old repo, so it is correct on every push — including a
+    # plain push after a redirected one, which must restore the canonical repo's own name.
+    if _repoint_card_quickstart(out / "README.md", repo_id):
+        console.note(f"repointed the card's quickstart to {repo_id}", marker="•")
 
     if spec.image.is_hub_hosted:
         if not (image_dir / "oci-layout").is_file():
@@ -200,6 +291,22 @@ def pull_dir(repo_id: str) -> Path:
     return compat.cache_dir() / "pulled" / repo_id.replace("/", "__")
 
 
+def _image_is_current(have: Optional[str], want: Optional[str], entry: Optional[dict]) -> bool:
+    """Is the image under the tag the one this package records?
+
+    docker's image id is the config digest on the classic store but the manifest digest on
+    the containerd store, so ``have == want`` fails on every containerd host for a package
+    built on a classic one (and vice versa). The id this daemon gave the image when pull
+    loaded it is recorded and accepted too, as long as the package digest is unchanged.
+    """
+    if have is None:
+        return False
+    if want is None or have == want:
+        return True
+    return bool(entry) and entry.get("image_digest") == want \
+        and entry.get("image_loaded_id") == have
+
+
 def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
                    no_weights: bool = False) -> None:
     """Snapshot the repo, load the image into docker, and put weights in the HOST cache."""
@@ -216,6 +323,7 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
     # the previous image while reporting success.
     want = spec.image.digest
     have = container.loaded_digest(ref)
+    prior = localdb.get(repo_id)
     if want is None:
         # Published before digest identity. Everything still works — the comparison below
         # degrades to the old tag-presence test — but the protection this exists to give is
@@ -226,12 +334,12 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
             "detection",
             marker="○",
         )
-    if have is not None and (want is None or have == want):
+    if _image_is_current(have, want, prior):
         console.note(f"image {ref} already loaded", marker="•")
     elif spec.image.is_hub_hosted:
-        if have is not None and want is not None and have != want:
+        if have is not None and want is not None:
             console.note(
-                f"{ref} is loaded but is a different image than this package records "
+                f"{ref} is loaded but is not known to be the image this package records "
                 f"({have[7:19]} vs {want[7:19]}) — reloading",
                 marker="○",
             )
@@ -255,6 +363,8 @@ def pull_container(repo_id: str, revision: Optional[str], manifest: Manifest, *,
         # "arch=None install=None", which found it but described nothing.
         "arch": manifest.arch,
         "image_digest": spec.image.digest,
+        # what THIS daemon calls the image, for _image_is_current on the next pull/serve
+        "image_loaded_id": container.loaded_digest(ref),
         "profile": spec.resolved_default(),
         "profiles": spec.profile_names(),
     })
@@ -340,6 +450,31 @@ def _download_weights(ref, *, tqdm_class=None) -> Path:
     ))
 
 
+def _ensure_default_ref(snapshot: Path) -> None:
+    """Give a sha-pinned snapshot a ``refs/main`` pointer when the cache has none.
+
+    ``snapshot_download(revision=<sha>)`` writes ``snapshots/<sha>/`` and nothing under
+    ``refs/``: only a branch or tag revision leaves a ref behind. The container then runs
+    offline (``HF_HUB_OFFLINE=1``) and names the weights by repo id, and every loader that
+    resolves that id through ``snapshot_download`` (vLLM 0.26 does so before it even parses
+    its arguments) needs ``refs/main`` to find the snapshot, so it fails with
+    ``LocalEntryNotFoundError`` although every byte is on disk. Point ``main`` at the pinned
+    sha in that case. An existing ref is left alone: it is somebody else's cache state, and
+    which snapshot ``main`` names is not this function's to change.
+    """
+    snaps = snapshot.parent
+    if snaps.name != "snapshots" or not _safe_revision(snapshot.name):
+        return
+    ref_file = snaps.parent / "refs" / "main"
+    if ref_file.exists():
+        return
+    try:
+        ref_file.parent.mkdir(parents=True, exist_ok=True)
+        ref_file.write_text(snapshot.name)
+    except OSError:
+        return
+
+
 def _cached_locally(ref) -> Optional[Path]:
     """The cached snapshot for this pin, or None when nothing resolves offline.
 
@@ -380,6 +515,26 @@ def has_partial_download(ref) -> bool:
         return any(d.glob("*.incomplete"))
     except OSError:
         return False
+
+
+def _pinned_weights_env(ref, profile) -> Optional[str]:
+    """The serve-env variable that pins a path inside this weights repo's HF cache dir, or None.
+
+    Two kinds of package declare ``weights``. One calls ``from_pretrained`` on the HF id
+    inside the container, so a missing or partial host cache only means a slower first boot:
+    the loader downloads into the same bind-mounted cache. The other pins the snapshot path
+    itself into the serve env (``MISTRAL4_WEIGHTS_DIR=/hf/hub/models--org--w/snapshots/...``)
+    and the loader opens that path directly. For that kind an incomplete cache is fatal --
+    the engine dies on the first missing shard, after device init -- so serve has to know
+    which kind it is holding. The HF cache dir name is the one stable marker of "this path
+    is the weights": it is derived from the repo id, and a pin anywhere in the env that
+    contains it means the model will read from the cache rather than fill it.
+    """
+    needle = f"models--{ref.repo_id.replace('/', '--')}"
+    for key, value in sorted((getattr(profile, "env", None) or {}).items()):
+        if needle in str(value):
+            return key
+    return None
 
 
 def _revision_size(ref) -> Optional[int]:
@@ -534,25 +689,87 @@ def _weights_notice(manifest: Manifest, target: Optional[str]) -> None:
     forbids the network by definition).
 
     The caller has already established that the weights are missing — it consulted the cache
-    to decide whether to fetch at all — so this does not re-check.
+    to decide whether to fetch at all — so this does not re-check that. It does check
+    *how*: an interrupted 100 GB fetch is a different state from one that never started, with
+    a different fix (resume, not restart), and telling the user how much is already on disk
+    is what stops them deleting it.
     """
     ref = manifest.weights
     at = f"@{ref.revision[:8]}" if ref.revision else ""
-    head = (f"weights {ref.repo_id}{at} are not in your local HF cache; the model will "
-            f"download them inside the container at first load (slower, and no progress is "
-            f"shown here)")
+    if has_partial_download(ref):
+        head = (f"weights {ref.repo_id}{at}: a download was interrupted — "
+                f"{_gb(_bytes_on_disk(ref))} is on disk and resumable; the model will fetch "
+                f"the rest inside the container at first load (slower, and no progress is "
+                f"shown here)")
+        verb = "to resume it first instead"
+    else:
+        head = (f"weights {ref.repo_id}{at} are not in your local HF cache; the model will "
+                f"download them inside the container at first load (slower, and no progress "
+                f"is shown here)")
+        verb = "to fetch them first instead"
     rev = f" --revision {ref.revision}" if ref.revision else ""
     hints = []
     if target:
-        hints.append(f"to fetch them first instead:  tt-model pull {target} --with-weights")
+        hints.append(f"{verb}:  tt-model pull {target} --with-weights")
     hints.append(f"or directly:  hf download {ref.repo_id}{rev}")
     console.note(head, marker="⚠", style="warning")
     for h in hints:
         console.note(h, marker="→")
 
 
+def _weights_incomplete_error(ref, target: Optional[str], pinned_env: str, *,
+                              fetch_error: Optional[BaseException] = None) -> ContainerCliError:
+    """The refusal for a package that pins the weights path while the cache is incomplete.
+
+    A card, not a warn row: the advisory wording ("the model will download them inside the
+    container") is false for this kind of package -- the loader opens the pinned path and
+    raises -- so the one line that should stop the run must not describe a fatal state as
+    merely slower. Partial and absent are told apart, and the partial case says how much is
+    already on disk, because the fix differs (``hf download`` resumes; nothing needs deleting).
+
+    ``fetch_error`` is the exception from the prefetch that just failed, when there was one:
+    its classification (gated, offline, no such repo) is the actual reason the cache is still
+    incomplete, and its actions come first because they are what unblocks the download.
+    """
+    at = f"@{ref.revision[:8]}" if ref.revision else ""
+    rev = f" --revision {ref.revision}" if ref.revision else ""
+    cache = container.hub_cache()
+    partial = has_partial_download(ref)
+    if partial:
+        cause = "weights download is incomplete"
+        state = (f"the download of weights {ref.repo_id}{at} was interrupted: "
+                 f"{_gb(_bytes_on_disk(ref))} is on disk in {cache} and the rest is missing")
+    else:
+        cause = "weights are not on the host"
+        state = f"weights {ref.repo_id}{at} are not in the HF cache ({cache})"
+    detail = (f"{state}. This package pins that snapshot's path into the container "
+              f"({pinned_env} in the manifest's serve env), so the model would open it "
+              f"directly and fail on the first missing shard, after device init.")
+    actions: List[str] = []
+    evidence = None
+    if fetch_error is not None:
+        try:
+            d = hub.classify_hub_error(fetch_error, ref.repo_id, weights=True)
+            detail += f" The fetch just attempted failed — {d['cause']}: {d['detail']}"
+            actions += list(d.get("actions", ()))
+        except Exception:  # noqa: BLE001 — the classifier is total, but this must not raise
+            detail += f" The fetch just attempted failed ({type(fetch_error).__name__})."
+        evidence = str(fetch_error).strip().splitlines()[0] if str(fetch_error).strip() else None
+    resume = "   # resumes the partial download" if partial else ""
+    if target:
+        actions.append(f"tt-model pull {target} --with-weights{resume}")
+    actions.append(f"hf download {ref.repo_id}{rev}{resume}")
+    if target:
+        actions.append(f"tt-model serve {target} --no-weights   # boot anyway, if you know "
+                       f"the model fetches its own weights")
+    diagnosis = {"cause": cause, "detail": detail, "evidence": evidence, "actions": actions}
+    text = detail + "".join(f"\n  → {a}" for a in actions)
+    return ContainerCliError(text, diagnosis=diagnosis)
+
+
 def ensure_weights(manifest: Manifest, target: Optional[str], *,
-                   local_only: bool = False, no_weights: bool = False) -> None:
+                   local_only: bool = False, no_weights: bool = False,
+                   profile=None) -> None:
     """Put the pinned weights on the host before the container starts, or explain why not.
 
     Resumes unconditionally rather than deciding for itself whether the cache is complete.
@@ -571,18 +788,30 @@ def ensure_weights(manifest: Manifest, target: Optional[str], *,
 
     Downloading is skipped, with the advisory note, when the user forbade it (``no_weights``)
     or forbade the network (``local_only``).
+
+    ``profile`` is the merged serve profile about to launch; ``serve`` passes it, ``pull``
+    does not. When its env pins a path into the weights' HF cache dir
+    (``_pinned_weights_env``), the model cannot fetch its own weights, so an incomplete cache
+    that this function cannot fix -- the network is forbidden, or the fetch just failed -- is
+    a refusal (``_weights_incomplete_error``) rather than the advisory note. ``no_weights`` is
+    the escape hatch: the user has said they know better, so it stays a note.
     """
     ref = manifest.weights
     if ref is None:
         return
     at = f"@{ref.revision[:8]}" if ref.revision else ""
+    pinned = _pinned_weights_env(ref, profile) if profile is not None else None
     if no_weights or local_only:
         # The one place a local verdict is still needed, because fetching is off the table.
         # `.incomplete` blobs are checked too: a resolvable-but-partial snapshot would
         # otherwise read as present and cost the user the warning.
-        if _cached_locally(ref) is None or has_partial_download(ref):
+        cached = _cached_locally(ref)
+        if cached is None or has_partial_download(ref):
+            if pinned and not no_weights:
+                raise _weights_incomplete_error(ref, target, pinned)
             _weights_notice(manifest, target)
         else:
+            _ensure_default_ref(cached)
             console.note(f"weights {ref.repo_id}{at} already on host", marker="•")
         return
 
@@ -599,13 +828,16 @@ def ensure_weights(manifest: Manifest, target: Optional[str], *,
         # `hub.download_bundle` gets. Without it this download writes bars straight to the
         # terminal, on top of whatever else owns the line.
         with console.step(label) as st, hub.progress_bridge(label) as tqdm_class:
-            st.detail(str(_download_weights(ref, tqdm_class=tqdm_class)))
+            snapshot = _download_weights(ref, tqdm_class=tqdm_class)
+            _ensure_default_ref(snapshot)
+            st.detail(str(snapshot))
     except Exception as e:  # noqa: BLE001
-        _weights_failed(ref, e, target)
+        _weights_failed(ref, e, target, pinned=pinned)
 
 
-def _weights_failed(ref, exc: BaseException, target: Optional[str]) -> None:
-    """What a failed weights fetch means. Raises only for a full disk.
+def _weights_failed(ref, exc: BaseException, target: Optional[str], *,
+                    pinned: Optional[str] = None) -> None:
+    """What a failed weights fetch means. Raises for a full disk, and for a pinned path.
 
     Everything else stays non-fatal, as it always has on the pull path: the image is loaded
     and the model can still fetch its own weights inside the container, so a gate that is one
@@ -615,8 +847,15 @@ def _weights_failed(ref, exc: BaseException, target: Optional[str]) -> None:
     written once per caller. Warning and carrying on is what left a half-populated cache that
     then read as complete to everything downstream — the failure this whole change is about.
     It has to stop the run, on serve exactly as on pull.
+
+    ``pinned`` (the serve-env variable that pins the weights path, see
+    ``_pinned_weights_env``) is the other exception: "the model can still fetch its own
+    weights" is exactly what is untrue for that package, so if the cache is not whole after
+    the failed fetch the boot would die in the engine. A complete cache still serves offline.
     """
     if not _is_out_of_space(exc):
+        if pinned and (_cached_locally(ref) is None or has_partial_download(ref)):
+            raise _weights_incomplete_error(ref, target, pinned, fetch_error=exc) from exc
         _weights_download_failed(ref, exc)
         # Falling back to the cache is only safe if the cache is whole, and here we cannot
         # ask the Hub which files that would mean. Half-fetched blobs are the one local
@@ -697,6 +936,9 @@ def load_pulled(repo_id: str) -> Optional[Manifest]:
     path = pull_dir(repo_id) / MANIFEST_NAME
     if not path.is_file():
         return None
+    entry = localdb.get(repo_id)
+    if entry is not None and not entry.get("container"):
+        return None  # a later v5/v6 pull re-recorded this repo; that install wins
     try:
         m = Manifest.from_json(path.read_text())
     except ValueError:
@@ -913,7 +1155,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         ref = container.image_ref(manifest)
         want = spec.image.digest
         have = container.loaded_digest(ref)
-        if have is None or (want is not None and have != want):
+        entry = localdb.get(target) if target else None
+        if not _image_is_current(have, want, entry):
             layout = (Path(source) / "image") if source else None
             if layout and (layout / "oci-layout").is_file():
                 with console.step(f"docker load {ref} (image was not loaded)"):
@@ -927,7 +1170,6 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                 # Re-fetch rather than dead-ending. This is NOT an update check -- those
                 # stay opt-in behind --refresh -- so it re-pulls the RECORDED revision,
                 # reproducing the image this manifest describes rather than the Hub tip.
-                entry = localdb.get(target) if target else None
                 repairable = (
                     bool(target) and not local_only and spec.image.is_hub_hosted
                     and bool(entry) and not Path(str(target)).exists()
@@ -1005,10 +1247,12 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     # checklist spinner would both be writing it. It also means a failed prefetch is
     # printed above the list, so the list's final erase cannot take the message with it.
     try:
-        ensure_weights(manifest, target, local_only=local_only, no_weights=no_weights)
+        ensure_weights(manifest, target, local_only=local_only, no_weights=no_weights,
+                       profile=profile)
     except ContainerCliError:
-        # A refusal this raises deliberately (no disk for the weights) is the point of
-        # the check — it must not be swallowed as advisory chatter.
+        # A refusal this raises deliberately (no disk for the weights; a pinned weights path
+        # over an incomplete cache) is the point of the check — it must not be swallowed as
+        # advisory chatter.
         raise
     except Exception:  # noqa: BLE001 — never a reason not to serve
         pass
@@ -1147,26 +1391,58 @@ def _live_containers(manifest: Manifest, profile_name: Optional[str] = None) -> 
     return [n for n in names if container.is_running(n)]
 
 
+# The one-line step detail per StopOutcome.reset (see container.StopOutcome).
+_STOP_DETAIL = {
+    "not_needed": "clean shutdown",
+    "ran": "killed — mesh reset ran",
+    "failed": "killed — mesh reset did NOT complete",
+    "skipped": "killed — reset skipped (chips reclaimed)",
+}
+
+# The dirty-teardown warning, per reset outcome. NONE of these say "the next boot is safe":
+# on a force-killed teardown `tt-smi -r` does not reliably recover the device — the next boot
+# then wedges on the first large host→device DMA (`could only pin N of M pages` in dmesg) until
+# the HOST is rebooted (issue #107). What differs is how much we actually know:
+#   - ran     -> the reset command completed, but that is not a guarantee (see above);
+#   - failed  -> the reset itself did not complete, so the mesh is definitely still dirty;
+#   - skipped -> we deliberately did not reset, because another container now holds these chips.
+# Reporting "a reset was attempted" for the skipped/failed cases (the old behaviour) sent people
+# debugging the model instead of the device — the exact failure #107 is about.
+_DIRTY_STOP_WARNING = {
+    "ran": (
+        "the server did not exit on SIGTERM, so the mesh was left dirty; tt-smi -r ran to reset "
+        "it. A force-killed teardown can still leave the device unusable until the HOST is "
+        "rebooted (see issue #107) — if the next boot hangs early (dmesg: 'could only pin N of M "
+        "pages'), reboot rather than retrying"
+    ),
+    "failed": (
+        "the server did not exit on SIGTERM AND the tt-smi -r reset did not complete, so the mesh "
+        "is still dirty (see issue #107). Reboot the HOST before the next boot — retrying will "
+        "wedge at device open"
+    ),
+    "skipped": (
+        "the server did not exit on SIGTERM, so its mesh was left dirty — it was NOT reset "
+        "because another container has since claimed these chips and resetting would wedge THAT "
+        "one (see issue #107). Stop the other container and reset, or reboot the HOST before "
+        "reusing these chips"
+    ),
+}
+
+
+def _warn_dirty_stop(reset: str) -> None:
+    console.note(_DIRTY_STOP_WARNING.get(reset, _DIRTY_STOP_WARNING["failed"]),
+                 marker="⚠", style="warning")
+
+
 def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) -> None:
     stopped = 0
     for name in _live_containers(manifest, profile_name):
         stopped += 1
         with console.step(f"stopping {name}") as st:
-            clean = container.stop(name, image=container.image_ref(manifest))
-            st.detail("clean shutdown" if clean else "killed — mesh reset attempted")
-        if not clean:
-            # Deliberately not "the next boot is safe" (issue #107): on a force-killed
-            # teardown `tt-smi -r` does NOT reliably recover the device — boots then wedge on
-            # the first large host→device DMA (`could only pin N of M pages`) until the host
-            # is rebooted. Promising a repair that may not have happened sends people
-            # debugging the model instead of the device.
-            console.note(
-                "the server did not exit on SIGTERM, so the mesh was left dirty. A reset was "
-                "attempted with tt-smi, but a force-killed teardown can leave the device "
-                "unusable until the HOST is rebooted (see issue #107) — if the next boot "
-                "hangs early, reboot rather than retrying",
-                marker="⚠", style="warning",
-            )
+            outcome = container.stop(name, image=container.image_ref(manifest))
+            st.detail(_STOP_DETAIL.get(outcome.reset, "killed — mesh reset"))
+        if not outcome.clean:
+            _warn_dirty_stop(outcome.reset)
     if not stopped:
         console.note("nothing running", marker="○")
     else:
@@ -1194,7 +1470,7 @@ def describe_pulled(entry: dict) -> dict:
     ref = entry.get("image") or "?"
     want = entry.get("image_digest")
     have = container.loaded_digest(ref) if ref != "?" else None
-    loaded = have is not None and (want is None or have == want)
+    loaded = _image_is_current(have, want, entry)
     size = ""
     if loaded:
         out = container.run_or_empty(

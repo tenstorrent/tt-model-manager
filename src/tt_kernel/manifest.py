@@ -294,6 +294,14 @@ class ImageRef(BaseModel):
 # container.pick_free_port.
 DEFAULT_PORT = 20000
 
+# Env var carrying the manifest's pinned weights revision to a server that is NOT vLLM.
+# vLLM takes the pin as `--revision`/`--tokenizer-revision`; every other serving front end
+# downloads its own weights and has nowhere to learn the pin from but the environment. One
+# name for every bundle shape, so a model's server reads the same variable whether it
+# arrives as a v6 thin bundle (packaging.render_run_sh) or a v5.1 container
+# (launchers, the non-vLLM kinds).
+WEIGHTS_REVISION_ENV = "TT_MODEL_WEIGHTS_REVISION"
+
 
 class ServeSettings(BaseModel):
     """Launch settings for a container package.
@@ -352,6 +360,52 @@ class ServeProfile(ServeSettings):
     description: Optional[str] = None
 
 
+class LicenseSpec(BaseModel):
+    """What the weights may be used for — the standard HF model-card license fields.
+
+    Not tt-model's own licence: the terms come with the weights (and sometimes with
+    vendored upstream code), and a reader has to know them before they pull 100 GB.
+    Rendered into the card's frontmatter under the names the Hub itself indexes, so
+    ``huggingface_hub``'s ``ModelInfo`` surfaces them without anyone parsing markdown.
+    """
+
+    id: str  # an SPDX id, or "other"
+    name: Optional[str] = None  # required when `id` is "other" — what to call it
+    link: Optional[str] = None  # where the terms actually are
+
+
+class CardSpec(BaseModel):
+    """Author-written model-card prose, carried onto the wire.
+
+    Permissive (no ``extra="forbid"``) for the same reason :class:`Capabilities` is: a
+    wire manifest written by a NEWER tt-model must stay readable by an older one, and a
+    card section it does not know how to render is not a reason to refuse a bundle. The
+    authoring side (``container_manifest.CardSettings``) forbids extras, so a typo in a
+    hand-written YAML is still caught where it can be fixed.
+
+    Present on the wire so `publish` can check a pushed bundle's card without the
+    author's ``tt-model.yaml``, which never leaves their machine.
+    """
+
+    description: Optional[str] = None
+    attribution: Optional[str] = None
+    prerequisites: Optional[str] = None
+    quickstart: Optional[str] = None
+    architecture: Optional[str] = None
+    status: Optional[str] = None
+    intended_use: Optional[str] = None
+    out_of_scope_use: Optional[str] = None
+    usage: Optional[str] = None
+    performance: Optional[str] = None
+    limitations: Optional[str] = None
+    risks: Optional[str] = None
+    licensing: Optional[str] = None
+    related: Optional[str] = None
+    license: Optional[LicenseSpec] = None
+    pipeline_tag: Optional[str] = None
+    base_model: Optional[List[str]] = None
+
+
 class ContainerSpec(BaseModel):
     """The v5.1 block: the model's platform as an OCI image plus how to launch it.
 
@@ -370,6 +424,9 @@ class ContainerSpec(BaseModel):
     code_dir: Optional[str] = None  # browsable copy of what is inside the image, e.g. "code"
     verify: List[str] = Field(default_factory=list)  # build-time assertions run in the image
     built: Dict[str, object] = Field(default_factory=dict)  # pinned provenance from `package`
+    # None for a bundle published before cards were carried on the wire — callers must
+    # treat that as "cannot tell", never as "the author wrote nothing".
+    card: Optional[CardSpec] = None
 
     def profile_names(self) -> List[str]:
         return [p.name for p in self.serve_profiles]

@@ -29,4 +29,4 @@ If you have questions about the vulnerability or need to start a conversation ab
 4. **Fix Development**: A fix will be developed in a private branch, with reporter feedback when possible
 5. **Disclosure**: A security advisory will be published once the fix is patched and merged to the main branch
 
-Thank you for helping keep this project and our users safe!
+Thank you for helping keep this project and our users safe.
