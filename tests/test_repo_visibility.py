@@ -56,7 +56,7 @@ def test_existing_repo_flipped_only_when_explicit(monkeypatch):
     monkeypatch.setattr(hub, "is_private_safe", lambda r: False)  # currently public
     monkeypatch.setattr(hub, "set_visibility", lambda r, private: flips.append(private))
     res_lines = []
-    monkeypatch.setattr(cli.typer, "secho", lambda *a, **k: res_lines.append(a[0] if a else ""))
+    monkeypatch.setattr(cli.console, "note", lambda text, **k: res_lines.append(text))
     cli._ensure_repo("me/exists", True)  # --private, and it means it
     assert flips == [True]  # flipped, explicitly
     assert any("Changed visibility" in line for line in res_lines)  # and announced
