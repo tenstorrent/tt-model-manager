@@ -1335,6 +1335,19 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         targets = " or ".join(f"**{b}**" for b in boards)
         lines += [f"Runs on Tenstorrent {targets} — see the serving profiles below.", ""]
 
+    weight_refs = [m.weights_ref] + m.auxiliary_weight_refs
+    weight_links = [
+        f"[`{ref.repo_id}`](https://huggingface.co/{ref.repo_id})"
+        + (f" at `{ref.revision}`" if ref.revision else "")
+        for ref in weight_refs
+    ]
+    if len(weight_links) == 1:
+        weight_description = f"the {weight_links[0]} weights"
+    else:
+        count_words = {2: "both", 3: "all three", 4: "all four"}
+        count = count_words.get(len(weight_links), f"all {len(weight_links)}")
+        weight_description = f"{count} required checkpoints: " + ", ".join(weight_links)
+
     lines += [
         f"Packaged and published with [tt-model-manager]({TT_MODEL_MANAGER_URL}) "
         f"{built.get('tt_model_version', '')} (manifest schema {m.schema_version}).",
@@ -1350,9 +1363,10 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         f"tt serve {m.repo}",
         "```",
         "",
-        "`tt serve` downloads the Docker image and the "
-        f"[`{m.weights_repo}`](https://huggingface.co/{m.weights_repo}) weights"
-        + (f" at `{m.weights_ref.revision}`" if m.weights_ref.revision else "")
+        # weight_description names every required checkpoint (one, or several for a drafter/
+        # adapter model), each link already carrying its own pinned revision.
+        "`tt serve` downloads the Docker image and "
+        f"{weight_description}"
         + " (into your HF cache; they are not in the image), then starts "
         # DEFAULT_PORT, never the manifest's `port`. Serve deliberately ignores the
         # manifest port as a seed: authors write 8000 there for the bare-`docker run`

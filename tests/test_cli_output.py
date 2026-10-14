@@ -384,3 +384,52 @@ class TestChecklist:
         raw = _checklist("ok", columns=40)
         for row in plain(raw).split("\n"):
             assert len(row) <= 40, f"row wider than the terminal: {row!r}"
+
+
+# ── package / package-thin speak through console.py ──────────────────────────
+@pytest.mark.parametrize("fn", ["package", "package_thin", "_ensure_repo",
+                                "_ensure_portable_wheel", "_vendor_dependencies"])
+def test_packaging_commands_print_only_through_console(fn):
+    """docs/cli_output.md: every line goes through console.py, so --no-color, piping and
+    phase folding apply to it. A stray typer.secho bypasses all three."""
+    import inspect
+
+    from tt_kernel import cli
+
+    src = inspect.getsource(getattr(cli, fn))
+    assert not re.search(r"typer\.(secho|echo)\(", src), fn
+
+
+def test_package_thin_report_is_plain_when_piped(tmp_path):
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    res = run(["package-thin", "--model-py", str(model_py), "--arch", "blackhole",
+               "--arch-name", "X", "--main-class", "model:C", "--out", str(tmp_path / "b")])
+    assert res.returncode == 0, res.stderr
+    out = res.stdout + res.stderr
+    assert not ANSI.search(out)
+    assert "✓ staged v6 thin bundle" in out
+    assert "! requirements.txt has TODO pins" in out
+    assert "○ no push target — staged only" in out
+
+
+def test_no_color_drops_attributes_too(tmp_path):
+    """--no-color means plain text: dim and bold are styling as much as colour is."""
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    raw = run_in_pty(["--no-color", "package-thin", "--model-py", str(model_py), "--arch",
+                      "blackhole", "--arch-name", "X", "--main-class", "model:C",
+                      "--out", str(tmp_path / "b")])
+    assert "staged v6 thin bundle" in raw
+    assert not re.search(r"\x1b\[[0-9;]*m", raw), "--no-color still emitted SGR styling"
+
+
+def test_staged_path_is_never_wrapped(tmp_path):
+    """The staged path is copied out of logs; a wrap at COLUMNS splits it mid-word."""
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    out = tmp_path / ("a-long-directory-name-so-the-path-cannot-fit-in-forty-columns" * 2) / "b"
+    res = run(["package-thin", "--model-py", str(model_py), "--arch", "blackhole",
+               "--arch-name", "X", "--main-class", "model:C", "--out", str(out)], columns=40)
+    assert res.returncode == 0, res.stderr
+    assert f"✓ staged v6 thin bundle model at {out}\n" in plain(res.stdout + res.stderr)

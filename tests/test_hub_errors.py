@@ -330,6 +330,73 @@ def test_push_replaces_code_and_image_rather_than_merging(monkeypatch, tmp_path)
     assert not any(p == "*" or ".gitattributes" in p for p in seen["delete_patterns"])
 
 
+def _replace_push(monkeypatch, tmp_path, remote):
+    from tt_kernel import hub
+
+    (tmp_path / "vllm_models" / "new").mkdir(parents=True)
+    (tmp_path / "vllm_models" / "new" / "vllm_metadata.json").write_text("{}")
+    (tmp_path / "wheels").mkdir()
+    (tmp_path / "wheels" / "plugin.whl").write_text("w")
+    (tmp_path / MANIFEST_NAME).write_text("{}")
+    seen = {}
+
+    class _Api:
+        def list_repo_files(self, **kw):
+            return remote
+
+        def upload_folder(self, **kw):
+            seen.update(kw)
+
+    monkeypatch.setattr(hub, "_api", lambda: _Api())
+    hub.push_folder("you/model", tmp_path, "msg", replace=True)
+    return seen["delete_patterns"]
+
+
+def test_exact_push_removes_stale_files_only_under_shipped_dirs(monkeypatch, tmp_path):
+    """README, LICENSE, weights and dirs the stage does not ship are not the bundle's to sweep."""
+    patterns = _replace_push(monkeypatch, tmp_path, [
+        ".gitattributes", MANIFEST_NAME, "README.md", "LICENSE", "model.safetensors",
+        "config.json", "tokenizer.json", "images/card.png", "wheels/old.whl",
+        "wheels/plugin.whl", "vllm_models/old/vllm_metadata.json",
+    ])
+    assert patterns == ["vllm_models/old/vllm_metadata.json", "wheels/old.whl"]
+
+
+def test_exact_push_removes_old_wheels_when_the_stage_ships_none(monkeypatch, tmp_path):
+    """wheels/ and vllm_models/ are tt-model's own, even in a stage that no longer has them."""
+    from tt_kernel import hub
+
+    (tmp_path / MANIFEST_NAME).write_text("{}")
+    seen = {}
+
+    class _Api:
+        def list_repo_files(self, **kw):
+            return [MANIFEST_NAME, "README.md", "wheels/old.whl", "images/a.png"]
+
+        def upload_folder(self, **kw):
+            seen.update(kw)
+
+    monkeypatch.setattr(hub, "_api", lambda: _Api())
+    hub.push_folder("you/model", tmp_path, "msg", replace=True)
+    assert seen["delete_patterns"] == ["wheels/old.whl"]
+
+
+def test_exact_push_escapes_glob_characters(monkeypatch, tmp_path):
+    """An unescaped ``[i]mages/x`` would also delete a foreign ``images/x``."""
+    from fnmatch import fnmatchcase
+
+    (tmp_path / "[i]mages").mkdir()
+    (tmp_path / "[i]mages" / "a.whl").write_text("w")
+    remote = [MANIFEST_NAME, "[i]mages/x", "images/x"]
+    patterns = _replace_push(monkeypatch, tmp_path, remote)
+    assert [f for f in remote if any(fnmatchcase(f, p) for p in patterns)] == ["[i]mages/x"]
+
+
+def test_exact_push_sweeps_nothing_in_a_repo_that_is_not_a_bundle_yet(monkeypatch, tmp_path):
+    patterns = _replace_push(monkeypatch, tmp_path, ["model.safetensors", "wheels/theirs.whl"])
+    assert patterns == []
+
+
 def test_large_push_prunes_what_the_bundle_stopped_shipping(monkeypatch, tmp_path):
     """The CONTAINER path is push_large_folder, and upload_large_folder has no
     delete_patterns, so it only ever adds. Narrowing an allowlist previously left every

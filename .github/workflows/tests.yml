@@ -24,9 +24,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.10 is the floor (`requires-python` in pyproject): huggingface_hub >= 1.32, which
-        # rm needs for the shared blob store, and click >= 8.2's separated-stderr CliRunner
-        # both require it.
+        # 3.10 is the floor (`requires-python` in pyproject, #120): huggingface_hub >= 1.32,
+        # which rm needs for the shared blob store, and click >= 8.2's separated-stderr
+        # CliRunner, which the CLI tests' `result.stderr` needs, both require it.
+        # `tests/test_python_floor.py` fails if this matrix and that declaration ever drift.
         python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4

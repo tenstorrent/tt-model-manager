@@ -181,6 +181,79 @@ def test_render_run_sh_single_chip_omits_additional_config():
     assert "--additional-config" not in run
 
 
+def test_render_run_sh_prefetches_pinned_target_and_auxiliary_weights():
+    revision = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    run = packaging.render_run_sh(_run_sh_manifest(
+        weights=WeightsRef(repo="org/model", revision=revision),
+        env={"TT_AUXILIARY_WEIGHTS": "org/drafter@dedf8df68adfb1afeaf7b7480c0a0243108177b4"},
+    ))
+    assert f'export TT_MODEL_WEIGHTS_REVISION="${{TT_MODEL_WEIGHTS_REVISION:-{revision}}}"' in run
+    assert "snapshot_download(" in run
+    assert '"${TT_AUXILIARY_WEIGHTS:-}"' in run
+    assert 'export MODEL_WEIGHTS_DIR="$resolved_hf_model"' in run
+    assert run.index("resolved_hf_model=") < run.index('exec "${CMD[@]}"')
+
+
+def test_render_run_sh_prefetch_honors_weight_patterns(tmp_path):
+    """The run.sh prefetch downloads the same file set as `pull --with-weights`."""
+    import re
+    import sys
+
+    run = packaging.render_run_sh(_run_sh_manifest(
+        weights=WeightsRef(repo="org/model", allow_patterns=["*.safetensors", "*.json"],
+                           ignore_patterns=["wheels/*"]),
+        env={"TT_AUXILIARY_WEIGHTS": "org/drafter"},
+    ))
+    prefetch = re.search(r'resolved_hf_model="\$\("\$PYBIN" - (.*?) <<\'PY\'\n(.*?)\nPY\n', run, re.S)
+    # A stand-in huggingface_hub records each snapshot_download call.
+    hub = tmp_path / "huggingface_hub"
+    hub.mkdir()
+    (hub / "__init__.py").write_text(
+        "import json, os\n"
+        "def snapshot_download(repo_id, **kw):\n"
+        "    with open(os.environ['CALLS'], 'a') as f:\n"
+        "        f.write(json.dumps([repo_id, kw.get('allow_patterns'), kw.get('ignore_patterns')]) + '\\n')\n"
+        "    return '/snap/' + repo_id\n"
+    )
+    script = tmp_path / "prefetch.sh"
+    script.write_text(
+        f'PYBIN={sys.executable}\nHF_MODEL=org/model\nTT_AUXILIARY_WEIGHTS=org/drafter\n'
+        f'"$PYBIN" - {prefetch.group(1)} <<\'PY\'\n{prefetch.group(2)}\nPY\n'
+    )
+    calls = tmp_path / "calls"
+    out = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                         env={**os.environ, "PYTHONPATH": str(tmp_path), "CALLS": str(calls)})
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "/snap/org/model"
+    got = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert got == [["org/model", ["*.safetensors", "*.json"], ["wheels/*"]],
+                   ["org/drafter", None, None]]
+
+
+def test_install_sh_removes_uv_cache_only_after_success(tmp_path):
+    """The install-only uv cache must not stay in the bundle next to the venv."""
+    bundle = tmp_path / "b"
+    bundle.mkdir()
+    (bundle / "install.sh").write_text(packaging.render_install_sh(_run_sh_manifest()))
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "uv").write_text(
+        '#!/bin/bash\nmkdir -p "$UV_CACHE_DIR" && touch "$UV_CACHE_DIR/blob"\n'
+        '[ "$1" = venv ] && [ -n "${FAIL_VENV:-}" ] && exit 1\nexit 0\n'
+    )
+    (fake_bin / "uv").chmod(0o700)
+    env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+    failed = subprocess.run(["bash", str(bundle / "install.sh")], capture_output=True, text=True,
+                            env={**env, "FAIL_VENV": "1"})
+    assert failed.returncode != 0
+    assert (bundle / ".uv-cache" / "blob").exists()
+
+    ok = subprocess.run(["bash", str(bundle / "install.sh")], capture_output=True, text=True, env=env)
+    assert ok.returncode == 0, ok.stderr
+    assert not (bundle / ".uv-cache").exists()
+
+
 def test_render_run_sh_no_tool_flags_without_capability():
     """No tool_parser declared => neither flag appears (bare --enable-auto-tool-choice is an error)."""
     run = packaging.render_run_sh(_run_sh_manifest())
@@ -274,6 +347,8 @@ def test_stage_package_layout(tmp_path):
     # HERMETIC INSTALL: the interpreter lives inside the folder; venv is relocatable + copy-linked.
     inst = (staged / "install.sh").read_text()
     assert 'UV_PYTHON_INSTALL_DIR="$HERE/.python"' in inst
+    assert 'UV_PYTHON_BIN_DIR="$HERE/.python/bin"' in inst
+    assert 'UV_CACHE_DIR="$HERE/.uv-cache"' in inst
     assert "uv python install" in inst
     assert "uv venv --relocatable" in inst
     assert "--link-mode=copy" in inst
