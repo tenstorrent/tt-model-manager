@@ -55,8 +55,9 @@ kinds. Both are served with the same `tt-model serve` command.
   consumer needs Docker and a Tenstorrent PCIe card. Authored from a single `tt-model.yaml` with
   `tt-model package --container`.
   Reference: [docs/container_packages.md](docs/container_packages.md).
-- **v6 thin** (**beta, unsupported**). Builds the venv from pip pins plus bundled wheels.
-  Author it with `tt-model package-thin`.
+- **v6 thin** (**beta, unsupported**). Builds the venv from pip pins (stock `ttnn`) plus bundled
+  wheels; the model's own code ships in the bundle. Author it with `tt-model package-thin`, following
+  the canonical shape in [docs/E2E_RECIPE_V6.md](docs/E2E_RECIPE_V6.md#the-canonical-shape).
   Reference: [docs/thin_packages.md](docs/thin_packages.md).
 
 `tt-model` refuses bundles published with an older schema. Re-publish them with a current `tt-model`.
@@ -70,7 +71,7 @@ kinds. Both are served with the same `tt-model serve` command.
 | [docs/cli.md](docs/cli.md) | Every `tt-model` command with its common flags |
 | [docs/publishing.md](docs/publishing.md) | push vs. public vs. publish, the community catalog, how compatibility is checked |
 | [docs/container_packages.md](docs/container_packages.md) | v5.1 container packages: `tt-model.yaml`, serving, how the container runs, and design notes |
-| [docs/thin_packages.md](docs/thin_packages.md) | v6 thin bundles (draft) |
+| [docs/thin_packages.md](docs/thin_packages.md) | v6 thin bundles: design and `deps` schema |
 | [docs/multi_host_mesh.md](docs/multi_host_mesh.md) | Multi-host (cross-box) mesh design note (issue #87) |
 | [docs/multi_variant_repos.md](docs/multi_variant_repos.md) | Proposed design: one repo carrying several bundle formats (for example v5.1 and v6) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, testing, PR process |
