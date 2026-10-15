@@ -14,7 +14,9 @@ The docker flags are not folklore; each one is load-bearing:
   ``/dev/tenstorrent`` directory. tt-metal/UMD takes a host-wide lock on every chip it can SEE
   during cluster bring-up, not just the one it computes on, and holds it for the container's
   whole life — so handing over the whole directory means a second container, even one that
-  wants a different chip, hangs forever the moment it opens its own cluster.
+  wants a different chip, hangs forever the moment it opens its own cluster. Inside the
+  container the chips are renumbered ``/dev/tenstorrent/0..N-1``, the layout a bundle was
+  validated on.
 - ``--ipc host`` — shared memory with the host. This is also why the device scoping above
   matters: it is what makes that UMD lock visible across containers in the first place.
 - the hugepages mount, **verbatim**: umd matches ``/proc/mounts`` against
@@ -790,8 +792,9 @@ def compose_run(
         cmd += ["--label", f"{k}={v}"]
     if device_ids is not None:
         cmd += ["--label", f"{DEVICES_LABEL}={','.join(str(d) for d in device_ids)}"]
-        for d in device_ids:
-            cmd += ["--device", f"{TT_DEVICE}/{d}:{TT_DEVICE}/{d}"]
+        # renumbered from 0: bundles are validated on /dev/tenstorrent/0..N-1
+        for i, d in enumerate(device_ids):
+            cmd += ["--device", f"{TT_DEVICE}/{d}:{TT_DEVICE}/{i}"]
     else:
         cmd += ["--device", TT_DEVICE]
     cmd += [

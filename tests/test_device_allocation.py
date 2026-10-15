@@ -325,11 +325,12 @@ def _device_flags(argv):
     return [argv[i + 1] for i, a in enumerate(argv) if a == "--device"]
 
 
-def test_scoped_ids_become_one_device_flag_per_chip():
+def test_scoped_ids_are_renumbered_from_zero_in_the_container():
+    """Bundles are validated on chips 0..N-1 and may check for those device files (issue #181)."""
     argv = _run_argv(_wire(), device_ids=[1, 2])
     assert _device_flags(argv) == [
-        "/dev/tenstorrent/1:/dev/tenstorrent/1",
-        "/dev/tenstorrent/2:/dev/tenstorrent/2",
+        "/dev/tenstorrent/1:/dev/tenstorrent/0",
+        "/dev/tenstorrent/2:/dev/tenstorrent/1",
     ]
     assert "/dev/tenstorrent" not in argv  # never the whole directory alongside them
 
