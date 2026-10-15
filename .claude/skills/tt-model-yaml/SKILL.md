@@ -182,6 +182,12 @@ flat `serve:` block. Add profiles only when ONE image should serve several confi
 actually validated (different device targets, or latency vs capacity); `default_profile` is
 then required.
 
+Give each profile a one-line `description`; the card shows it (in the profile table, or
+after the hardware sentence when there is one profile). State the profile's KV-cache
+capacity there, e.g. `KV cache: 16,512 blocks x 64 = 1,056,768 tokens`. `serve:` has no
+`description`, so a single config that needs one is declared as the only entry of
+`serve_profiles:`.
+
 ## Step 7 — `verify:` assertions
 
 One Python statement per entry, run inside the finished image. Cover what nothing else

@@ -416,6 +416,24 @@ def test_a_described_profile_gets_a_description_column():
     assert "| `wide` | p150x4 | P150x4 |  |" in card
 
 
+def test_a_single_profile_card_shows_its_description():
+    """With no profile table, a lone profile's description (e.g. its KV-cache capacity)
+    reached no part of the card; it follows the hardware sentence instead."""
+    desc = "Throughput profile; KV cache 16,512 blocks (1,056,768 tokens)"
+    hw = ("Runs on Tenstorrent **p150x4** (mesh `P150x4`) — 131,072-token context, "
+          "up to 32 concurrent sequences.")
+    # a `>`-folded YAML scalar ends in a newline; it must not split the paragraph
+    profile = dict(BASE["serve_profiles"][0], description=desc + "\n")
+    card = _card(serve_profiles=[profile])
+    assert f"\n{hw} {desc}\n\nPackaged and published" in card
+    assert "## Serving profiles" not in card
+
+    # no description, declared profile or flat `serve:`: the paragraph is unchanged
+    flat = {k: v for k, v in BASE["serve_profiles"][0].items() if k != "name"}
+    for card in (_card(), _card(serve=dict(BASE["serve"], **flat), serve_profiles=[])):
+        assert f"\n{hw}\n\nPackaged and published" in card
+
+
 def test_the_title_names_the_boards():
     assert "\n# my-model on Tenstorrent p150x4\n" in _card()
     profiles = [{"name": "a", "hardware": "p150", "mesh_device": "P150"},
