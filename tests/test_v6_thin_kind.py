@@ -269,3 +269,58 @@ def test_cli_package_thin_vllm_kind_explicit_still_requires_entrypoint(tmp_path)
     ])
     assert res.exit_code != 0
     assert "Provide the serving entrypoint" in res.output
+
+
+# --- PyTorch CPU index scope --------------------------------------------------------------------
+# The requirements step used `--extra-index-url <pytorch cpu>`, which uv ranks above PyPI, so
+# certifi/requests/urllib3/idna came ONLY from that index at years-old versions. The fix scopes the
+# index to the torch family with `--torch-backend cpu`. These tests assert the rendered command.
+
+def _requirements_step(install_sh):
+    return next(l for l in install_sh.splitlines() if '-r "$HERE/requirements.txt"' in l)
+
+
+def test_requirements_step_scopes_pytorch_index_to_torch_family(tmp_path):
+    staged, _ = _stage_dit(tmp_path)
+    inst = (staged / "install.sh").read_text()
+    step = _requirements_step(inst)
+    assert "--torch-backend cpu" in step
+    # The blanket extra index is what let the CPU index capture certifi and friends.
+    assert "--extra-index-url" not in inst and "download.pytorch.org" not in inst
+    # Constraints stay on the same command, so they still apply to the resolve.
+    assert "TT_MODEL_CONSTRAINTS_ARGS" in step
+
+
+def test_install_sh_refuses_a_uv_older_than_torch_backend_needs(tmp_path):
+    import subprocess
+    staged, _ = _stage_dit(tmp_path)
+    inst = (staged / "install.sh").read_text()
+    start = inst.index("# --torch-backend (CPU torch only")
+    guard = inst[start:inst.index("\n# Keep the interpreter", start)]
+    fake = tmp_path / "bin"
+    fake.mkdir()
+
+    def run(version):
+        (fake / "uv").write_text(f'#!/bin/sh\necho "uv {version}"\n')
+        (fake / "uv").chmod(0o755)
+        return subprocess.run(["bash", "-c", guard], env={"PATH": f"{fake}:/usr/bin:/bin"},
+                              capture_output=True, text=True)
+
+    old = run("0.6.8")
+    assert old.returncode == 1 and "uv >= 0.6.9" in old.stderr
+    assert run("0.6.9").returncode == 0
+    assert run("0.9.26").returncode == 0
+
+
+def test_default_packages_are_still_added_and_the_marker_trick_still_hides_them(tmp_path):
+    # Defaults are appended when absent; they resolve from PyPI now, so no workaround is needed.
+    staged, _ = _stage_dit(tmp_path)
+    req = (staged / "requirements.txt").read_text()
+    for pkg in ("fastapi", "uvicorn", "pillow"):
+        assert pkg in req
+    # Field workaround: a never-true marker still counts as "listed", so no duplicate is appended.
+    authored = tmp_path / "requirements.txt"
+    authored.write_text('fastapi; python_version < "0"\nuvicorn; python_version < "0"\n'
+                        'pydantic; python_version < "0"\npillow; python_version < "0"\n')
+    merged = packaging._merge_default_packages(authored.read_text(), TtDitServerLauncher.DEFAULT_PACKAGES)
+    assert merged == authored.read_text()

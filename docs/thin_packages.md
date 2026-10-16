@@ -89,17 +89,12 @@ this order. The order matters:
    FIRST so vLLM's deps resolve against them. `torch` must be the CPU build, so this step adds the
    PyTorch CPU index.
 
-   > **Known issue — index ranking.** The PyTorch CPU index is added with `--extra-index-url`, which
-   > uv ranks **above** PyPI; under uv's default first-index strategy any package that index carries
-   > is then taken **only** from it. It carries exactly one, years-old version of `certifi`,
-   > `urllib3`, `requests`, `idna`, and `charset-normalizer`. So if this step's resolve reaches one of
-   > them: **with `--constraints` the install fails** (`… was found on https://download.pytorch.org/whl/cpu,
-   > but not at the requested version`); **without, it silently installs a 2022 CA bundle and
-   > `requests`/`urllib3` releases predating published CVE fixes.** Until it is fixed (scoping the
-   > index to the torch family, e.g. uv's `--torch-backend cpu`): always pass `--constraints`; keep
-   > `requirements.txt` to `ttnn` (+ `torchvision`); ship anything with a wider dependency closure —
-   > such as a tooling-only tt-transformers wheel — by path via `--ops-wheel` (step 3), not through
-   > `requirements.txt` or `--models-wheel`.
+   The CPU index is scoped to the torch family with uv's `--torch-backend cpu` (uv 0.6.9 or newer;
+   `install.sh` stops with a clear message on an older uv). Every other package, `certifi`, `requests`,
+   `urllib3` and `idna` included, resolves from PyPI, so `--constraints` and wider dependency closures
+   work in this step. (Earlier versions used `--extra-index-url`, which made uv take those packages
+   only from the CPU index at 2022 versions. Bundles staged by those versions keep the old
+   `install.sh`; restage them.)
 2. **vLLM core (empty target)**: this is **not** a pip pin. It is **stock upstream vLLM built with
    `VLLM_TARGET_DEVICE=empty`** (NOT the CUDA `vllm` on PyPI), exactly mirroring the plugin's
    [`docs/install-vllm-tt.sh`](https://github.com/tenstorrent/vllm-tt-plugin/blob/main/docs/install-vllm-tt.sh):
