@@ -9,7 +9,7 @@ everything that varies arrives through the hooks below, so adding a kind is a ne
 here plus a registration in :data:`KINDS` — no change to the manifest schema, the image
 build, or any command.
 
-Three kinds, named for what they ARE rather than for their age:
+Four kinds, named for what they ARE rather than for their age:
 
 ``vllm-plugin``
     Stock ``vllm==X.Y.Z`` from PyPI (built from sdist with ``VLLM_TARGET_DEVICE=empty``)
@@ -20,14 +20,18 @@ Three kinds, named for what they ARE rather than for their age:
 ``vllm-fork``
     The ``tenstorrent/vllm`` fork with the plugin in-tree at ``plugins/vllm-tt-plugin``,
     both installed *editable* — so the ~200 MB checkout has to survive into the runtime
-    image. Launched through tt-metal's readiness runner. This is the older arrangement,
-    and it is what this repo's own ``install``/``provision`` still set up.
+    image. Launched through tt-metal's readiness runner. This is the older arrangement.
 
 ``tt-dit-server``
     A diffusion transformer served by the ASGI app tt-metal ships beside it under
     ``models/tt_dit/server/<model>``, launched with uvicorn. There are no tokens, no KV
     cache and no continuous batching, so vLLM has nothing to do: this kind installs a
     small HTTP stack instead of an engine, and the serving code is the model's own.
+
+``http-server``
+    The model's own HTTP server, launched by the argv recorded in ``runtime.command``
+    (``{host}``/``{port}`` substituted at serve). For stacks that are neither a vLLM
+    arrangement nor a diffusion ASGI app. Installs no engine and no default HTTP stack.
 
 Neither vLLM kind is called plain ``vllm``: a v4 manifest's ``runtime.kind = "vllm"``
 already means the fork, so reusing the bare word here would give one field two meanings
@@ -57,7 +61,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from .boot_progress import HTTP_SERVER_PHASES, TT_DIT_PHASES, VLLM_PHASES, Phase
-from .manifest import DEFAULT_PORT, Manifest, ServeProfile
+from .manifest import (
+    AUXILIARY_WEIGHTS_ENV, DEFAULT_PORT, WEIGHTS_REVISION_ENV, Manifest, ServeProfile,
+)
 
 if TYPE_CHECKING:
     from .container_manifest import ContainerManifest
@@ -98,6 +104,28 @@ def _revision_argv(m: Manifest) -> List[str]:
     """
     rev = m.weights.revision if m.weights is not None else None
     return ["--revision", rev] if rev else []
+
+
+def _revision_env(m: Manifest) -> Dict[str, str]:
+    """``{TT_MODEL_WEIGHTS_REVISION: <sha>}`` when the manifest pins one, else nothing.
+
+    The vLLM kinds get the pin as a flag; a kind that serves the model's own HTTP app does
+    its own ``snapshot_download`` and has nowhere to read the pin from but the environment.
+    Without this an author has to restate the same sha in ``serve.env`` under a name only
+    their server knows, and the two copies can then drift apart silently — a package that
+    says it is pinned while serving whatever the repo's tip is today. The v6 thin ``run.sh``
+    has exported this variable since the pin landed there; this is the container path
+    catching up, under the same name.
+    """
+    rev = m.weights.revision if m.weights is not None else None
+    return {WEIGHTS_REVISION_ENV: rev} if rev else {}
+
+
+def _auxiliary_env(m: Manifest) -> Dict[str, str]:
+    """``{TT_AUXILIARY_WEIGHTS: "repo@rev,..."}`` when the manifest declares any, else nothing."""
+    refs = [f"{r.repo_id}@{r.revision}" if r.revision else r.repo_id
+            for r in m.auxiliary_weights]
+    return {AUXILIARY_WEIGHTS_ENV: ",".join(refs)} if refs else {}
 
 
 class VllmPluginLauncher:
@@ -372,6 +400,7 @@ class VllmPluginLauncher:
             # tt_transformers-style adapters read the model id from HF_MODEL, not from
             # vLLM's --model. Both are set; they must agree.
             "HF_MODEL": _weights_id(m),
+            **_auxiliary_env(m),
         }
         env.update(profile.env)
         return env
@@ -600,6 +629,7 @@ class VllmForkLauncher:
             # bare print. Block-buffered, that line sits in Python's buffer for as long
             # as the runner lives, and `serve --follow` times out on a server that is up.
             "PYTHONUNBUFFERED": "1",
+            **_auxiliary_env(m),
         }
         env.update(profile.env)
         return env
@@ -683,13 +713,12 @@ RESOLVE_EXTRA_MODELS = (
 
 
 def _capability_argv(profile: ServeProfile) -> List[str]:
-    """Render the tool/reasoning parsers, matching the v4 path's rules exactly.
+    """Render the tool/reasoning parsers, matching ``packaging.render_run_sh``'s rules exactly.
 
     ``--tool-call-parser`` is emitted WITH ``--enable-auto-tool-choice`` because vLLM
     hard-errors on the former without the latter, and ``--reasoning_parser`` keeps its
-    underscore: typer normalises '_'->'-' so '--tool_parser' would become the nonexistent
+    underscore: vLLM's argparse normalises '_'->'-' so '--tool_parser' would become the nonexistent
     '--tool-parser', while '--reasoning_parser' normalises to the valid spelling.
-    See ``bundles._compose_launch_vllm``.
     """
     cap = profile.capabilities
     if cap is None:
@@ -885,6 +914,9 @@ class TtDitServerLauncher:
             rows, cols = parse_mesh_device(profile.mesh_device)
             env["MESH_DEVICE"] = profile.mesh_device
             env[_mesh_shape_env(m)] = f"{rows}x{cols}"
+        env.update(_revision_env(m))
+        env.update(_auxiliary_env(m))
+        # Last, so an author who sets the variable themselves still wins.
         env.update(profile.env)
         return env
 
@@ -1079,7 +1111,10 @@ class HttpServerLauncher:
         return argv
 
     def serve_env(self, m: Manifest, profile: ServeProfile) -> Dict[str, str]:
-        return dict(profile.env)
+        env = {**_revision_env(m), **_auxiliary_env(m)}
+        # Last, so an author who sets the variable themselves still wins.
+        env.update(profile.env)
+        return env
 
     def ready_probe(self, m: Manifest) -> str:
         container = getattr(m, "container", None)

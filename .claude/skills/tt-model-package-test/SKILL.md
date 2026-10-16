@@ -1,6 +1,6 @@
 ---
 name: tt-model-package-test
-description: Package a model as a CONTAINER (v5.1) image from its tt-model.yaml and prove it works — build, serve on hardware, verify the API (tool calling included), stop cleanly, and optionally push. Use for "package this model", "build and test the container", "prove the package serves", "ship this model to HF". Requires an authored tt-model.yaml (use the tt-model-yaml skill to write one) and a box with the target TT devices. Do NOT use for v5 fat / v6 thin bundles — see AGENTS.md "Driving the flow" for those.
+description: Package a model as a CONTAINER (v5.1) image from its tt-model.yaml and prove it works — build, serve on hardware, verify the API (tool calling included), stop cleanly, and optionally push. Use for "package this model", "build and test the container", "prove the package serves", "ship this model to HF". Requires an authored tt-model.yaml (use the tt-model-yaml skill to write one) and a box with the target TT devices. Do NOT use for v6 thin bundles — use the tt-model-thin-package skill.
 ---
 
 # Package a container model and prove it works

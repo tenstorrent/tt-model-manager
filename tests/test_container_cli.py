@@ -955,6 +955,18 @@ def test_repoint_card_quickstart_swaps_the_command_lines_not_prose(tmp_path):
     assert container_cli._repoint_card_quickstart(readme, "override/y") is False
 
 
+def test_repoint_swaps_the_inline_tt_model_line_but_not_author_prose(tmp_path):
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        "Without tt-cli: `tt-model serve authored/x`.\n"
+        "See also `tt-model serve other/model` for the large variant.\n")
+    assert container_cli._repoint_card_quickstart(readme, "pushed/x") is True
+    out = readme.read_text()
+    assert "Without tt-cli: `tt-model serve pushed/x`." in out
+    assert "`tt-model serve other/model` for the large variant" in out
+    assert container_cli._repoint_card_quickstart(readme, "pushed/x") is False
+
+
 def test_repoint_is_anchored_on_the_command_so_repeated_pushes_stay_correct(tmp_path):
     """@anirudTT's catch: the fix must not anchor on the OLD repo, which never moves in the
     manifest. package for canonical, push --repo a/x, then a plain push back to canonical must
@@ -1016,13 +1028,11 @@ def test_a_rendered_card_repoints_cleanly_end_to_end(tmp_path):
     m.validate_semantics()
     readme = tmp_path / "README.md"
     readme.write_text(build.render_model_card(m, {"repo": m.repo, "tt_metal": {}}))
-    assert "tt-model serve authored/model" in readme.read_text()   # sanity: rendered as authored
+    assert "`tt-model serve authored/model`" in readme.read_text()  # sanity: rendered as authored
     assert container_cli._repoint_card_quickstart(readme, "pushed/model") is True
     out = readme.read_text()
-    assert "tt model pull pushed/model" in out
     assert "tt serve pushed/model" in out
-    assert "tt-model pull  pushed/model --with-weights" in out
-    assert "tt-model serve pushed/model" in out
+    assert "Without tt-cli: `tt-model serve pushed/model`." in out
     # No generated Quickstart COMMAND still names the authored repo (prose lede may).
     assert "pull  authored/model" not in out and "serve authored/model" not in out
 
@@ -1603,6 +1613,24 @@ def test_include_weights_purges_them_too(tmp_path, monkeypatch):
     monkeypatch.setattr(container_cli, "_purge_hf", lambda r, w: purged.append(r))
     container_cli.remove_container("org/x", m, include_weights=True)
     assert purged == ["org/x", "org/Weights-7B"]
+
+
+def test_include_weights_purges_auxiliary_weights_too(tmp_path, monkeypatch):
+    m = _manifest(
+        tmp_path,
+        auxiliary_weights=[
+            {"repo": "org/drafter", "revision": "draft-pin"},
+            "org/adapter",
+        ],
+    )
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "loaded_digest", lambda ref: None)
+    purged = []
+    monkeypatch.setattr(container_cli, "_purge_hf", lambda r, w: purged.append(r))
+
+    container_cli.remove_container("org/x", m, include_weights=True)
+
+    assert purged == ["org/x", "org/Weights-7B", "org/drafter", "org/adapter"]
 
 
 def test_hf_cache_dir_uses_hubs_own_layout(tmp_path, monkeypatch):
@@ -2358,6 +2386,32 @@ def test_serve_fetches_missing_weights_before_starting_the_container(tmp_path, m
     assert order == ["download", "docker run"]
 
 
+def test_serve_prefetches_primary_and_auxiliary_weights_in_declared_order(tmp_path, monkeypatch):
+    """One serve must make every pinned checkpoint available in the shared HF cache."""
+    order = []
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container, "run_checked", lambda argv, **kw: order.append("docker run"))
+    monkeypatch.setattr(container_cli, "_space_preflight", lambda ref: None)
+    monkeypatch.setattr(
+        container_cli,
+        "_download_weights",
+        lambda ref, **kw: order.append((ref.repo_id, ref.revision)) or Path("/hf/x"),
+    )
+    container_cli.serve_container(
+        _manifest(
+            tmp_path,
+            weights={"repo": "org/main", "revision": "main-pin"},
+            auxiliary_weights=[{"repo": "org/drafter", "revision": "draft-pin"}],
+        ),
+        target="org/m",
+    )
+    assert order == [
+        ("org/main", "main-pin"),
+        ("org/drafter", "draft-pin"),
+        "docker run",
+    ]
+
+
 
 def test_serve_refuses_when_the_disk_cannot_hold_the_weights(tmp_path, monkeypatch):
     """Two numbers before anything starts, instead of ENOSPC halfway through a 360 GB
@@ -2403,6 +2457,25 @@ def test_no_weights_keeps_the_in_container_download(tmp_path, monkeypatch, capsy
     out = capsys.readouterr().out
     assert "not in your local HF cache" in out
     assert "hf download org/w" in out
+
+
+def test_no_weights_reports_each_missing_auxiliary_checkpoint(tmp_path, monkeypatch, capsys):
+    _serving_ok(monkeypatch)
+    monkeypatch.setattr(container_cli, "_cached_locally", lambda ref: None)
+    monkeypatch.setattr(container_cli, "has_partial_download", lambda ref: False)
+    container_cli.serve_container(
+        _manifest(
+            tmp_path,
+            weights={"repo": "org/main"},
+            auxiliary_weights=[{"repo": "org/drafter", "revision": "draft-pin"}],
+        ),
+        target="org/m",
+        no_weights=True,
+    )
+    out = capsys.readouterr().out
+    assert "org/main" in out
+    assert "org/drafter@draft-p" in out
+    assert "hf download org/drafter --revision draft-pin" in out
 
 
 def test_local_only_never_reaches_the_network_for_weights(tmp_path, monkeypatch, capsys):
@@ -3071,6 +3144,67 @@ def test_package_emits_the_card_warning_at_its_call_site(
     container_cli.package_container(str(tmp_path / "tt-model.yaml"))
     printed = capsys.readouterr().out
     assert ("the model card has no card." in printed) is warned, printed
+
+
+def test_package_warns_once_per_retired_card_field(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    card = {**_COMPLETE, "risks": "Loops above 25k tokens."}
+    out = _staged(tmp_path, card=card)
+    m = ContainerManifest.model_validate({**json.loads(json.dumps(BASE)), "card": card})
+    staged = SimpleNamespace(
+        manifest=m, ctx=tmp_path, out=out, image="x:y", built={},
+        metal=SimpleNamespace(sha="a" * 40, branch="main", dirty=False, mode="local",
+                              pushed=True),
+        code_tree=["models/common"], code_skipped=[],
+    )
+    monkeypatch.setattr(container_cli, "stage", lambda *a, **k: staged)
+    monkeypatch.setattr(container_cli, "run_build", lambda *a, **k: None)
+    monkeypatch.setattr(container_cli, "finalize", lambda *a, **k: out)
+
+    container_cli.package_container(str(tmp_path / "tt-model.yaml"))
+    printed = capsys.readouterr().out
+    assert printed.count("is retired") == 1
+    assert "card.risks is retired; its text was moved into card.limitations" in printed
+
+
+def test_the_performance_warning_wording():
+    from tt_kernel.container_cli import card_performance_warning
+    from tt_kernel.container_manifest import PERFORMANCE_COLUMNS
+
+    assert card_performance_warning([]) is None
+    assert card_performance_warning(["e2el"]) == "card.performance's table has no E2EL column"
+    assert (card_performance_warning(["concurrency", "decode"])
+            == "card.performance's table has no concurrency, decode columns")
+    assert "has no table" in card_performance_warning(list(PERFORMANCE_COLUMNS))
+
+
+@pytest.mark.parametrize(("performance", "warned"), [
+    ("41 ms/token", True),
+    ("| profile | ISL | OSL | concurrency | N | TTFT | prefill | decode | E2EL |\n"
+     "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n", False),
+])
+def test_package_warns_about_an_incomplete_performance_table(
+    tmp_path, monkeypatch, capsys, performance, warned
+):
+    from types import SimpleNamespace
+
+    card = {**_COMPLETE, "performance": performance}
+    out = _staged(tmp_path, card=card)
+    m = ContainerManifest.model_validate({**json.loads(json.dumps(BASE)), "card": card})
+    staged = SimpleNamespace(
+        manifest=m, ctx=tmp_path, out=out, image="x:y", built={},
+        metal=SimpleNamespace(sha="a" * 40, branch="main", dirty=False, mode="local",
+                              pushed=True),
+        code_tree=["models/common"], code_skipped=[],
+    )
+    monkeypatch.setattr(container_cli, "stage", lambda *a, **k: staged)
+    monkeypatch.setattr(container_cli, "run_build", lambda *a, **k: None)
+    monkeypatch.setattr(container_cli, "finalize", lambda *a, **k: out)
+
+    container_cli.package_container(str(tmp_path / "tt-model.yaml"))
+    printed = " ".join(capsys.readouterr().out.split())
+    assert ("card.performance has no table" in printed) is warned, printed
 
 
 def _fake_snapshot(tmp_path, sha="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"):
