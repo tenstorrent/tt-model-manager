@@ -111,7 +111,7 @@ Fields, from `src/tt_kernel/container_manifest.py`:
 | `source.python` | interpreter, e.g. `"3.12"` — independent of ubuntu; `uv` provides it. |
 | `runtime` | kind-specific (see below): the vLLM form, the plugin form, `extra_models_dir`, an optional `lock`, extra `wheels`, resolution `overrides`. |
 | `serve` | the launch defaults every profile inherits (`ServeSettings`): `port`, `mesh_device`, `hardware`, `max_num_seqs`, `block_size`, `max_model_len`, `capabilities` (tool/reasoning parsers), `additional_config`, `env`, `args`. |
-| `serve_profiles` | optional list of named `ServeProfile`s; each deep-merges over `serve:`. Omit entirely for a single-configuration model. |
+| `serve_profiles` | optional list of named `ServeProfile`s; each deep-merges over `serve:`. Omit entirely for a single-configuration model. A profile's `description` is shown on the model card (the profile table, or after the hardware sentence for a single profile): state its KV-cache capacity there, e.g. `KV cache: 16,512 blocks x 64 = 1,056,768 tokens`. `serve:` has no `description`, so declare a single config as a one-entry list to give it one. |
 | `default_profile` | required when more than one profile is declared — the author decides the default, not the consumer's luck. |
 | `verify` | build-time Python assertions run **inside the finished image**, on top of the launcher's own import checks. |
 | `image` | where the built image is published: `registry: hf` (default) or a real registry namespace. |
