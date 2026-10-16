@@ -238,7 +238,8 @@ def test_install_sh_removes_uv_cache_only_after_success(tmp_path):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     (fake_bin / "uv").write_text(
-        '#!/bin/bash\nmkdir -p "$UV_CACHE_DIR" && touch "$UV_CACHE_DIR/blob"\n'
+        '#!/bin/bash\n[ "$1" = --version ] && { echo "uv 0.9.26"; exit 0; }\n'
+        'mkdir -p "$UV_CACHE_DIR" && touch "$UV_CACHE_DIR/blob"\n'
         '[ "$1" = venv ] && [ -n "${FAIL_VENV:-}" ] && exit 1\nexit 0\n'
     )
     (fake_bin / "uv").chmod(0o700)
@@ -1070,3 +1071,21 @@ def test_stage_package_self_referential_escaping_dir_terminates(tmp_path):
     assert (staged / "metal" / "lib_b" / "kernel.so").read_text() == "compiled\n"
     # And the pass still leaves no symlinks that dangle or leak the host.
     assert not any(p.is_symlink() and not p.exists() for p in (staged / "metal").rglob("*"))
+
+
+def test_v5_non_vendored_requirements_install_scopes_pytorch_index_to_torch_family():
+    """Same bug as the v6 thin step: `--extra-index-url` let the PyTorch CPU index capture
+    certifi/requests/urllib3/idna. `--torch-backend cpu` limits it to the torch family."""
+    m = _run_sh_manifest(bundled={
+        "ttnn_wheel": {"path": "wheels/ttnn-0.77.0-cp312-cp312-manylinux_2_34_x86_64.whl", "sha256": "a"},
+        "vllm_wheel": {"path": "wheels/vllm-0.25.1+empty-cp312-cp312-linux_x86_64.whl", "sha256": "b"},
+        "requirements": "requirements.txt",
+        "deps_vendored": False,
+    })
+    inst = packaging.render_install_sh(m)
+    assert "--torch-backend cpu" in inst and "--extra-index-url" not in inst
+    plain = packaging.render_install_sh(_run_sh_manifest(bundled={
+        "wheels": [{"path": "wheels/a.whl", "sha256": "a"}],
+        "requirements": "requirements.txt", "deps_vendored": False,
+    }))
+    assert "--torch-backend cpu" in plain and "--extra-index-url" not in plain

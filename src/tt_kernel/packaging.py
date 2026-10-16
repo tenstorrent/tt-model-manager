@@ -70,8 +70,11 @@ METADATA_DIR = "vllm_models"
 # author's entrypoint (arch + main_class); the vLLM plugin reads it at serve via EXTRA_MODELS_DIR.
 VLLM_METADATA_NAME = "vllm_metadata.json"
 
-# torch is the CPU build for Tenstorrent (never CUDA); requirements install uses this index.
-_PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+# torch is the CPU build for Tenstorrent (never CUDA). uv's --torch-backend takes only the torch
+# family (torch, torchvision, ...) from the PyTorch CPU index; everything else, certifi and requests
+# included, resolves from PyPI. Needs uv >= _MIN_UV_VERSION (install.sh checks).
+_TORCH_CPU = "--torch-backend cpu"
+_MIN_UV_VERSION = "0.6.9"
 
 
 class StagingError(RuntimeError):
@@ -626,7 +629,7 @@ def render_install_sh(manifest: Manifest) -> str:
         req_find_links = f'--find-links "$HERE/{d.wheels_dir}" ' if d.wheels_dir else ""
         model_wheels = " ".join(f'"$HERE/{wheel}"' for wheel in d.models_wheels)
         steps.append(
-            f'{pip} {req_find_links}--extra-index-url {_PYTORCH_CPU_INDEX} '
+            f'{pip} {req_find_links}{_TORCH_CPU} '
             f'-r "$HERE/{d.requirements}" {model_wheels}'.rstrip()
         )
         # Check the external SFPI against the just-installed TTNN wheel before the expensive vLLM build.
@@ -720,7 +723,7 @@ def render_install_sh(manifest: Manifest) -> str:
                 steps.append(f'{pip5} {no_index}-r "$HERE/{REQUIREMENTS}"')
             else:
                 steps.append(
-                    f'{pip5} --extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{REQUIREMENTS}"'
+                    f'{pip5} {_TORCH_CPU} -r "$HERE/{REQUIREMENTS}"'
                 )
             install = "\n".join(steps)
         else:
@@ -730,7 +733,7 @@ def render_install_sh(manifest: Manifest) -> str:
             else:
                 install = (
                     f'{pip5} {plat_wheels} && \\\n'
-                    f'  {pip5} --extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{REQUIREMENTS}"'
+                    f'  {pip5} {_TORCH_CPU} -r "$HERE/{REQUIREMENTS}"'
                 )
         deps_note = (
             "offline, from the vendored wheels (reproducible, no network)" if vendored else
@@ -760,6 +763,11 @@ if ! command -v uv >/dev/null 2>&1 || \
   export UV_INSTALL_DIR="$HERE/.uv"
   curl -LsSf {uv_installer} | sh >/dev/null 2>&1
   export PATH="$HERE/.uv:$PATH"
+fi
+# --torch-backend (CPU torch only from the PyTorch index) needs uv >= {_MIN_UV_VERSION}.
+if [ "$(printf '%s\\n%s\\n' "{_MIN_UV_VERSION}" "$(uv --version | awk '{{print $2}}')" | sort -V | head -n1)" != "{_MIN_UV_VERSION}" ]; then
+  echo "error: uv >= {_MIN_UV_VERSION} is required (found $(uv --version)); upgrade uv." >&2
+  exit 1
 fi
 
 # Keep the interpreter, its executable links, and uv's potentially large build/download cache
