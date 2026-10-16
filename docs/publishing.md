@@ -10,7 +10,7 @@ per-format guides: **[container_packages.md](container_packages.md)** (v5.1 cont
 tt-model package --container tt-model.yaml
 tt-model push build/mymodel --public
 
-# v6 thin: builds the venv from pip pins (ttnn / tt-metal-models) + bundled wheels
+# v6 thin: builds the venv from pip pins (stock ttnn) + bundled wheels; the model's code ships in the bundle
 tt-model package-thin you/mymodel --public ...
 
 tt-model pull you/mymodel                          # lay the bundle in + build its venv
