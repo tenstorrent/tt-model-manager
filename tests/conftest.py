@@ -95,3 +95,7 @@ def _no_real_container_listing(monkeypatch):
 def real_labelled_containers(monkeypatch):
     monkeypatch.setattr(container, "labelled_containers", _REAL_LABELLED_CONTAINERS)
     return _REAL_LABELLED_CONTAINERS
+@pytest.fixture(autouse=True)
+def _no_real_board_scan(monkeypatch, tmp_path_factory):
+    """Keep ``chip_boards`` off this host's real sysfs; board tests pass their own ``sys_root``."""
+    monkeypatch.setattr(container, "TT_SYS_CLASS", str(tmp_path_factory.getbasetemp() / "no-tt-sysfs"))
