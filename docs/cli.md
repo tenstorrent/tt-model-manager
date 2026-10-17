@@ -17,12 +17,15 @@ tt-model serve you/mymodel --print                 # print the exact launch comm
 tt-model serve you/mymodel --local-only            # require an installed bundle; do not hit the Hub
 tt-model serve you/mymodel --port 8001             # serve's own option; see the pass-through rule below
 tt-model serve you/mymodel --extra vllm-arg        # anything serve does not own is passed through to vLLM
+tt-model serve you/mymodel --name b --detach       # container packages: a second, named instance (own chips + port)
 
 tt-model curl "hello"                              # send a chat completion to the running model
 tt-model curl "write a haiku" --temperature 0.7 --max-tokens 200
 tt-model curl "hello" --print                      # emit the equivalent curl instead of sending
 
+tt-model curl "hello" --name b                     # send it to the instance named b
 tt-model stop you/mymodel                          # stop the running server (SIGTERM first; container or v5/v6 bundle)
+tt-model stop you/mymodel --name b                 # stop only instance b (without --name: every instance)
 tt-model logs you/mymodel                          # container packages: show the server logs
 ```
 
@@ -35,9 +38,9 @@ and go straight to launch. For a v5.1 container package, `serve` runs the image 
 [container_packages.md](container_packages.md#consuming-and-serving)).
 
 **Pass-through rule.** `--port`, `--print`, `--local-only`, `--force`, `--arch`, `--profile`,
-`--detach`, `--no-weights`, `--refresh`, `--no-update-check`, and `--device-id` are `serve`'s
+`--detach`, `--no-weights`, `--refresh`, `--no-update-check`, `--device-id`, and `--name` are `serve`'s
 own options and can appear before or after the bundle id. Anything else after the id passes through to vLLM unchanged. This rule is the
-same for every package format. `--profile` and `--device-id` act only on a v5.1 container
+same for every package format. `--profile`, `--device-id` and `--name` act only on a v5.1 container
 package; a v5/v6 bundle has one launch config, so `serve` ignores them there and prints a note
 saying so.
 
@@ -51,7 +54,7 @@ advisory if a newer one exists. Skip it with `--no-update-check`, `--local-only`
 verifying a bring-up does not mean hand-writing JSON and matching the model id exactly. The
 model id comes from the running server (`GET /v1/models`). With nothing serving yet,
 `--print` falls back to the installed bundle's weights id so it still emits something
-pasteable. Any option the command does not reserve (`--print`, `--model`, `--base-url`) goes
+pasteable. Any option the command does not reserve (`--print`, `--model`, `--base-url`, `--name`) goes
 straight into the request body, so the whole vLLM sampling surface is available.
 
 ## Get models

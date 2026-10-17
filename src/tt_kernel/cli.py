@@ -1445,6 +1445,9 @@ def serve(
         "it must be a flag, not a passthrough argument); for a v5/v6 bundle it is "
         "appended to the launch command, where argparse last-wins."
     ),
+    name: Optional[str] = typer.Option(
+        None, "--name", help="For a container package: an instance name, so the same package and profile can run more than once (each needs its own chips and port). `stop`, `logs` and `curl` take the same --name."
+    ),
     device_id: Optional[str] = typer.Option(
         None, "--device-id", help="For a container package: pin specific chip indices "
         "(comma-separated, e.g. '0,1') instead of auto-picking free ones. The count must "
@@ -1527,7 +1530,7 @@ def serve(
                 cmani, profile_name=profile, print_only=print_only, follow=follow,
                 extra_args=extra_args, source=src, port=port, target=repo_id,
                 local_only=local_only, no_weights=no_weights, detach=detach,
-                device_id=device_id,
+                device_id=device_id, instance=name,
             )
         except container_cli.ContainerCliError as e:
             if e.diagnosis is not None:
@@ -1565,7 +1568,7 @@ def serve(
 
     # Past the container branch, the container-only options have nothing to act on. Say so
     # rather than drop them silently.
-    ignored = [f for f, v in (("--profile", profile), ("--device-id", device_id)) if v]
+    ignored = [f for f, v in (("--profile", profile), ("--device-id", device_id), ("--name", name)) if v]
     if ignored:
         one = len(ignored) == 1
         console.note(f"{' and '.join(ignored)} {'applies' if one else 'apply'} only to container "
@@ -1686,6 +1689,8 @@ def curl_cmd(
                                         "request (default: ask the running server)."),
     base_url: Optional[str] = typer.Option(None, "--base-url", envvar=runtime.ENV_BASE_URL,
                                            help=f"Server root (default: {runtime.DEFAULT_BASE_URL})."),
+    name: Optional[str] = typer.Option(None, "--name", help="Send to the running instance with "
+                                       "this name (see `serve --name`) instead of --base-url."),
 ) -> None:
     """Send a chat completion to the model you are serving.
 
@@ -1699,7 +1704,7 @@ def curl_cmd(
 
     --print emits the equivalent curl instead of sending it, for a doc or a bug report.
     """
-    base = base_url or runtime.DEFAULT_BASE_URL
+    base = _instance_base_url(name) if name else (base_url or runtime.DEFAULT_BASE_URL)
     try:
         params = runtime.parse_extra_params(list(ctx.args))
     except ValueError as exc:
@@ -1737,6 +1742,19 @@ def curl_cmd(
         raise _err("curl is not on PATH. Re-run with --print and paste the command, "
                    "or install curl.")
     raise typer.Exit(code=subprocess.run(argv).returncode)
+
+
+def _instance_base_url(instance: str) -> str:
+    """``http://127.0.0.1:<port>`` of the running instance named ``instance``."""
+    rows = container.labelled_containers(instance=instance)
+    if not rows:
+        raise _err(f"No running instance named {instance!r}. Start one with "
+                   f"`tt-model serve <id> --name {instance}`.")
+    port = rows[0]["port"]
+    if not port.isdigit():
+        raise _err(f"Instance {instance!r} ({rows[0]['name']}) has no port label; "
+                   "pass --base-url instead.")
+    return f"http://127.0.0.1:{port}"
 
 
 # ---------------------------------------------------------------------------- info
@@ -2324,6 +2342,8 @@ def _require_container(target: str):
 def stop(
     target: str = typer.Argument(..., help="Package or bundle: org/name, or a manifest path."),
     profile: Optional[str] = typer.Option(None, "--profile", help="Stop only this profile."),
+    name: Optional[str] = typer.Option(None, "--name", help="Stop only this instance "
+                                       "(see `serve --name`); default: every instance."),
 ) -> None:
     """Stop a running container package or v5/v6 bundle server, SIGTERM first.
 
@@ -2339,7 +2359,8 @@ def stop(
         return
 
     try:
-        container_cli.stop_container(_require_container(target), profile_name=profile)
+        container_cli.stop_container(_require_container(target), profile_name=profile,
+                                     instance=name)
     except (container_cli.ContainerCliError, container.ContainerError) as e:
         raise _err(str(e))
 
@@ -2349,6 +2370,8 @@ def logs(
     target: str = typer.Argument(..., help="Container package: org/name, or a manifest path."),
     follow: bool = typer.Option(False, "--follow", "-f", help="Stream new output."),
     profile: Optional[str] = typer.Option(None, "--profile", help="Logs for this profile."),
+    name: Optional[str] = typer.Option(None, "--name", help="Logs for this instance "
+                                       "(see `serve --name`)."),
 ) -> None:
     """Show the server logs of a running container package."""
     from . import container_cli
@@ -2356,7 +2379,7 @@ def logs(
     try:
         code = container_cli.logs_container(_require_container(target),
                                             profile_name=profile, follow=follow,
-                                            target=target)
+                                            target=target, instance=name)
     except (container_cli.ContainerCliError, container.ContainerError) as e:
         raise _err(str(e))
     if code != 0:
