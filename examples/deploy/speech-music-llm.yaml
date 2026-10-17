@@ -1,0 +1,7 @@
+# Three different models on one QuietBox 2, each on its own chips and port:
+# text-to-speech on chip 0, music on chip 1, and a 2-chip LLM on the second board.
+deployment: speech-music-llm
+instances:
+  - {name: tts, model: jashansinghTT/s2-pro-blackhole, profile: p150, chips: [0], port: 20010}
+  - {name: music, model: jashansinghTT/minimax-music3-blackhole, profile: p150, chips: [1], port: 20011}
+  - {name: llm, model: jashansinghTT/gpt-oss-20b-blackhole-fast, profile: p150x2, chips: [2, 3], port: 20012}

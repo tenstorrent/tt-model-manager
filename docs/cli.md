@@ -28,6 +28,7 @@ tt-model stop you/mymodel                          # stop the running server (SI
 tt-model stop you/mymodel --name b                 # stop only instance b (without --name: every instance)
 tt-model logs you/mymodel                          # container packages: show the server logs
 tt-model ps                                        # every model server on this host: chips, endpoint, status (--json too)
+tt-model deploy up my-deployment.yaml               # several models side by side, each on its own chips + port
 ```
 
 `tt-model serve <id>` is the one-command path. For an already-installed bundle it runs the
@@ -44,6 +45,8 @@ own options and can appear before or after the bundle id. Anything else after th
 same for every package format. `--profile`, `--device-id` and `--name` act only on a v5.1 container
 package; a v5/v6 bundle has one launch config, so `serve` ignores them there and prints a note
 saying so.
+
+To serve several packages at once, see [multi_model.md](multi_model.md).
 
 `serve` also compares the installed revision to the Hub's tip and prints a non-blocking
 advisory if a newer one exists. Skip it with `--no-update-check`, `--local-only`, or a pinned

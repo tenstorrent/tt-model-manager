@@ -2624,6 +2624,131 @@ def version() -> None:
     typer.echo(__version__)
 
 
+# -------------------------------------------------------------------------- deploy
+deploy_app = typer.Typer(help="Serve several container packages side by side, from one file.",
+                         no_args_is_help=True)
+app.add_typer(deploy_app, name="deploy", rich_help_panel="Run a model")
+
+
+def _deploy_plan(file: str):
+    from . import deploy
+
+    try:
+        dep = deploy.load(file)
+        manifests = {i.model: _require_container(i.model) for i in dep.instances}
+        inventory = container.all_device_ids()
+        claimed = container._claimed_devices(inventory)
+        if claimed is None:
+            raise _err("could not tell which chips are in use (docker ps/inspect failed); refusing to plan")
+        placements = deploy.plan(dep, manifests, inventory=inventory, claimed=claimed,
+                                 boards=container.chip_boards(), port_free=container.port_is_free,
+                                 free_hugepages=container.free_hugepages_1g())
+    except (deploy.DeployError, container.ContainerError) as e:
+        raise _err(str(e))
+    return dep, placements
+
+
+def _plan_table(placements) -> None:
+    cells = [["NAME", "MODEL", "PROFILE", "CHIPS", "ENDPOINT"]] + [
+        [p.instance.name, p.instance.model, p.profile, ",".join(map(str, p.chips)),
+         f"http://127.0.0.1:{p.port}"] for p in placements]
+    widths = [max(len(c[i]) for c in cells) for i in range(5)]
+    for c in cells:
+        console.raw("  " + "  ".join(v.ljust(w) for v, w in zip(c, widths)).rstrip())
+
+
+@deploy_app.command("up")
+def deploy_up(
+    file: str = typer.Argument(..., help="Deployment file (YAML)."),
+    print_only: bool = typer.Option(False, "--print", help="Show the placement and stop."),
+    keep_going: bool = typer.Option(False, "--keep-going", help="Keep the instances that came up "
+                                    "when another fails (default: stop them all)."),
+) -> None:
+    """Start every instance of a deployment, each on its own chips and port, and wait for all."""
+    from . import container_cli
+    from .launchers import launcher_for
+
+    dep, placements = _deploy_plan(file)
+    _plan_table(placements)
+    if print_only:
+        return
+    started = []
+    try:
+        for p in placements:
+            container_cli.serve_container(
+                p.manifest, profile_name=p.profile, port=p.port, device_id=",".join(map(str, p.chips)),
+                instance=p.instance.name, detach=True, target=p.instance.model,
+                extra_args=p.instance.args, source=Path(p.instance.model).parent
+                if Path(p.instance.model).is_file() else container_cli.pull_dir(p.instance.model))
+            started.append(p)
+    except (container_cli.ContainerCliError, container.ContainerError) as e:
+        _deploy_rollback(started)
+        raise _err(f"{dep.name}: could not start {placements[len(started)].instance.name}: {e}")
+    from .boot_progress import diagnose_boot, summarize
+
+    failed = []
+    with console.step(f"waiting for {len(started)} instance(s) to be ready") as st:
+        for p in started:
+            probe = launcher_for(p.manifest.container.kind).ready_probe(p.manifest)
+            res = container.wait_ready(p.container, probe, timeout_s=container.ready_timeout_s())
+            if not res.ready:
+                diag = diagnose_boot(res.tail, exited=res.exited, target=p.instance.model)
+                failed.append((p, summarize(diag, res.tail)))
+        if failed:
+            st.fail()
+            st.detail(f"{', '.join(p.instance.name for p, _ in failed)} did not come up")
+    for p, why in failed:
+        console.note(f"{p.instance.name}: {why}", marker="✗", style="error")
+    if failed and not keep_going:
+        _deploy_rollback(started)
+        raise _err(f"{dep.name}: {', '.join(p.instance.name for p, _ in failed)} did not come up; "
+                   "stopped the deployment (pass --keep-going to keep the instances that did)")
+    console.milestone(f"{dep.name}: {len(started) - len(failed)} of {len(started)} instance(s) ready")
+    down = {p.instance.name for p, _ in failed}
+    _plan_table([p for p in started if p.instance.name not in down])
+
+
+def _deploy_rollback(started) -> None:
+    """Stop what this deploy started, and remove the containers that already exited."""
+    from . import container_cli
+
+    for p in reversed(started):
+        container_cli.stop_container(p.manifest, profile_name=p.profile, instance=p.instance.name)
+        if container.container_exists(p.container) and not container.is_running(p.container):
+            container.remove(p.container, force=True)
+
+
+@deploy_app.command("down")
+def deploy_down(file: str = typer.Argument(..., help="Deployment file (YAML).")) -> None:
+    """Stop every instance of a deployment."""
+    from . import container_cli, deploy
+
+    try:
+        dep = deploy.load(file)
+        for inst in dep.instances:
+            container_cli.stop_container(_require_container(inst.model), profile_name=inst.profile,
+                                         instance=inst.name)
+    except (deploy.DeployError, container_cli.ContainerCliError, container.ContainerError) as e:
+        raise _err(str(e))
+
+
+@deploy_app.command("status")
+def deploy_status(file: str = typer.Argument(..., help="Deployment file (YAML).")) -> None:
+    """Show which instances of a deployment are running, with their chips and endpoints."""
+    from . import deploy
+
+    try:
+        names = {i.name for i in deploy.load(file).instances}
+    except deploy.DeployError as e:
+        raise _err(str(e))
+    rows = [r for r in _running_servers() if r["instance"] in names]
+    running = {r["instance"] for r in rows}
+    for r in rows:
+        console.raw(f"  ✓ {r['instance']:<16} {r['repo']}  chips {r['chips'] or '-'}  {r['url'] or '-'}")
+    for n in sorted(names - running):
+        console.raw(f"  ○ {n:<16} not running")
+
+
 def main() -> None:
     """Console-script entry point. Both ``tt-model`` and the legacy ``tt-kernel`` name map here;
     invoking via the old name still works but prints a one-line deprecation note to stderr."""

@@ -593,6 +593,14 @@ def _choose_chips(free: Sequence[int], count: int, boards: Dict[int, str]) -> Op
     return sorted(sorted(free), key=lambda c: (free_on_board[boards[c]], c))[:count]
 
 
+def free_hugepages_1g(sys_root: Path = Path("/sys/kernel/mm/hugepages/hugepages-1048576kB")) -> Optional[int]:
+    """Free 1G hugepages (UMD maps one per opened chip), or None when the pool cannot be read."""
+    try:
+        return int((sys_root / "free_hugepages").read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
 def pick_free_devices(count: int, *, dev_root: Optional[Path] = None,
                       sys_root: Optional[Path] = None) -> List[int]:
     """``count`` chip indices not already claimed by any running container, chosen by
