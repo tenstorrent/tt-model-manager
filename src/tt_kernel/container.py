@@ -55,6 +55,9 @@ LABEL = "org.tenstorrent.tt-model"
 #: directory). Read back by ``stop`` to scope a dirty-mesh reset, and by ``pick_free_devices``
 #: to know exactly what one of our own containers holds without re-parsing its device mounts.
 DEVICES_LABEL = f"{LABEL}.devices"
+#: Instance name of a serve started with ``--name``, so one model+profile can run more than once.
+INSTANCE_LABEL = f"{LABEL}.instance"
+_INSTANCE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 #: Namespace for DESCRIPTIVE labels a UI (e.g. TT Studio) reads so it does not have to
 #: reverse-engineer a served package from its repo name, image name, or routes (issue #140).
@@ -630,10 +633,41 @@ def image_ref(m: Manifest) -> str:
     return image.pull_ref or image.tag
 
 
-def container_name(m: Manifest, profile: ServeProfile) -> str:
-    """One running container per (model, profile) — so two profiles of the same model
-    are distinguishable in ``docker ps`` and stoppable independently."""
-    return f"tt-model-{m.name}-{profile.name}"
+def check_instance_name(instance: str) -> None:
+    """Refuse an instance name docker or a hostname-style label would choke on."""
+    if not _INSTANCE_RE.match(instance):
+        raise ContainerError(
+            f"instance name {instance!r}: use 1-32 lowercase letters, digits and dashes, "
+            "starting with a letter or digit"
+        )
+
+
+def container_name(m: Manifest, profile: ServeProfile, instance: Optional[str] = None) -> str:
+    """One container per (model, profile, instance); the ``.`` keeps an instance from
+    colliding with a dash-named profile."""
+    base = f"tt-model-{m.name}-{profile.name}"
+    return f"{base}.{instance}" if instance else base
+
+
+def labelled_containers(*, model: Optional[str] = None, instance: Optional[str] = None,
+                        all_states: bool = False) -> List[Dict[str, str]]:
+    """tt-model containers (running only, unless ``all_states``) with the labels that say
+    which model, profile, instance, port and chips each one is."""
+    labels = {"model": LABEL, "profile": f"{LABEL}.profile", "instance": INSTANCE_LABEL,
+              "port": f"{DESCRIPTOR_LABEL_NS}.port", "devices": DEVICES_LABEL}
+    fmt = "\t".join(["{{.Names}}", "{{.Status}}"]
+                    + [f'{{{{.Label "{v}"}}}}' for v in labels.values()])
+    argv = ["docker", "ps", "--filter", f"label={LABEL}={model}" if model else f"label={LABEL}"]
+    if instance:
+        argv += ["--filter", f"label={INSTANCE_LABEL}={instance}"]
+    if all_states:
+        argv.append("--all")
+    rows = []
+    for line in run_or_empty(argv + ["--format", fmt]).splitlines():
+        parts = line.split("\t")
+        if len(parts) == 2 + len(labels):
+            rows.append(dict(zip(["name", "status", *labels], parts)))
+    return rows
 
 
 def hf_home() -> Path:
@@ -741,6 +775,7 @@ def compose_run(
     hub_cache_dir: Optional[Path] = None,
     include_hf_token: Optional[bool] = None,
     rootless: bool = False,
+    instance: Optional[str] = None,
 ) -> List[str]:
     """The full ``docker run`` argv for one serve profile.
 
@@ -779,12 +814,14 @@ def compose_run(
     # Bind-mount sources must exist before `docker run`, or the daemon creates them as
     # ROOT and the container (running as the host user) cannot write them.
     cmd += [
-        "--name", container_name(m, profile),
+        "--name", container_name(m, profile, instance),
         # write as the host user: see `container_user`
         "--user", container_user(rootless=rootless),
         "--label", f"{LABEL}={m.name}",
         "--label", f"{LABEL}.profile={profile.name}",
     ]
+    if instance:
+        cmd += ["--label", f"{INSTANCE_LABEL}={instance}"]
     # Descriptive labels so a UI can read what this package is instead of guessing (issue #140).
     for k, v in descriptor_labels(m, profile, port).items():
         cmd += ["--label", f"{k}={v}"]
