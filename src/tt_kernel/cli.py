@@ -1392,6 +1392,66 @@ def _stop_self_contained(entry: dict) -> None:
     console.milestone(f"stopped {entry.get('repo_id')}")
 
 
+def _bundle_server(entry: dict) -> Optional[dict]:
+    """The running v5/v6 server ``serve`` recorded for this install, or None."""
+    install = _install_root(entry)
+    try:
+        pid = int((install / SERVE_PID_FILE).read_text().strip())
+        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")
+    except (OSError, ValueError):
+        return None
+    if str(install) not in " ".join(cmd) or not _pid_alive(pid):
+        return None
+    ports = [cmd[i + 1] for i, a in enumerate(cmd[:-1]) if a == "--port"]
+    try:
+        env = dict(kv.split("=", 1) for kv in
+                   Path(f"/proc/{pid}/environ").read_bytes().decode(errors="replace").split("\0") if "=" in kv)
+    except OSError:
+        env = {}
+    return {"name": f"pid {pid}", "repo": entry.get("repo_id", "?"), "profile": "-", "instance": "",
+            "chips": env.get("TT_VISIBLE_DEVICES", env.get("TT_METAL_VISIBLE_DEVICES", "")),
+            "port": ports[-1] if ports else "", "status": "running", "kind": "bundle"}
+
+
+def _running_servers() -> List[dict]:
+    """Every model server on this host: tt-model containers plus v5/v6 bundle servers."""
+    repo_of = {}
+    for e in localdb.all_entries():
+        if e.get("container") and e.get("manifest"):
+            try:
+                repo_of[Manifest.from_json(Path(e["manifest"]).read_text()).name] = e["repo_id"]
+            except (OSError, ValueError):
+                pass
+    rows = [{"name": r["name"], "repo": repo_of.get(r["model"], r["model"]), "profile": r["profile"],
+             "instance": r["instance"], "chips": r["devices"], "port": r["port"],
+             "status": r["status"], "kind": "container"} for r in container.labelled_containers()]
+    rows += [r for r in (_bundle_server(e) for e in localdb.all_entries()
+                         if e.get("self_contained")) if r]
+    for r in rows:
+        r["url"] = f"http://127.0.0.1:{r['port']}" if r["port"].isdigit() else ""
+    return sorted(rows, key=lambda r: (r["repo"], r["profile"], r["instance"]))
+
+
+@app.command(rich_help_panel="Run a model")
+def ps(
+    as_json: bool = typer.Option(False, "--json", help="Print the list as JSON."),
+) -> None:
+    """List the model servers running on this host, with their chips and endpoints."""
+    rows = _running_servers()
+    if as_json:
+        console.raw(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        console.note("nothing running", marker="○")
+        return
+    cols = [("repo", "MODEL"), ("profile", "PROFILE"), ("instance", "NAME"), ("chips", "CHIPS"),
+            ("url", "ENDPOINT"), ("status", "STATUS")]
+    cells = [[h for _, h in cols]] + [[r[k] or "-" for k, _ in cols] for r in rows]
+    widths = [max(len(c[i]) for c in cells) for i in range(len(cols))]
+    for c in cells:
+        console.raw("  " + "  ".join(v.ljust(w) for v, w in zip(c, widths)).rstrip())
+
+
 @app.command(rich_help_panel="Environment")
 def login(
     token: Optional[str] = typer.Option(None, help="HF token; omit for interactive login."),
