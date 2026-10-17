@@ -1123,7 +1123,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         # port that collides on a shared box. Under tt-model the host port is tt-model's
         # call. --print must stay pure and deterministic, so it skips the walk but still
         # prints the 20000 a real run starts from — not the manifest's 8000.
-        chosen = DEFAULT_PORT if print_only else container.pick_free_port(DEFAULT_PORT)
+        span = len(container.published_ports(manifest, profile))
+        chosen = DEFAULT_PORT if print_only else container.pick_free_port(DEFAULT_PORT, span=span)
         if chosen != DEFAULT_PORT:
             console.note(f"port {DEFAULT_PORT} is in use; serving on {chosen} instead",
                          marker="•")
