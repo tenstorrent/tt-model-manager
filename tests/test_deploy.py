@@ -121,11 +121,12 @@ def test_a_wrong_chip_count_names_what_the_profile_needs(tmp_path, pkg):
 
 
 def test_an_instance_that_serves_several_ports_gets_a_whole_free_range(tmp_path, pkg):
-    dep = _dep(tmp_path, "instances:\n  - {name: group, model: org/m}\n  - {name: solo, model: org/m}\n")
+    dep = _dep(tmp_path, "instances:\n  - {name: group, model: org/m, profile: p300}\n"
+                         "  - {name: solo, model: org/m, profile: p150}\n")
     plan = deploy.plan(dep, {"org/m": pkg}, inventory=[0, 1, 2, 3], claimed=set(), boards=QB2,
-                       port_free=lambda p: p != 20002, free_hugepages=16,
-                       ports_needed=lambda m, prof: 3 if prof.name else 1)
-    assert [p.port for p in plan] == [20003, 20006]
+                       port_free=lambda p: p not in (20002, 20007), free_hugepages=16,
+                       ports_needed=lambda m, prof: 3 if prof.name == "p300" else 1)
+    assert [p.port for p in plan] == [20003, 20006]   # solo needs 20006 only, so busy 20007 does not move it
 
 
 def test_deploy_up_rolls_back_and_explains_when_an_instance_does_not_come_up(tmp_path, pkg, monkeypatch):
