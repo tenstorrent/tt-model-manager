@@ -26,7 +26,6 @@ import socket
 import threading
 import time
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from . import rpc
@@ -305,34 +304,31 @@ class VllmMember:
 
     # ------------------------------------------------------------- serving
     def serve(self) -> None:
-        path = self.host.cfg.socket_path(self.name)
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        if os.path.exists(path):
-            os.unlink(path)
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(path)
-        srv.listen(1)
+        srv = rpc.listen(self.host.cfg.socket_path(self.name))
         threading.Thread(target=self._accept, args=(srv,), daemon=True,
                          name=f"tt-cohost-{self.name}").start()
 
     def _accept(self, srv: socket.socket) -> None:
-        conn, _ = srv.accept()
+        conn = rpc.accept(srv)
         log.info("cohost: %s frontend connected", self.name)
-        while True:
-            try:
+        try:
+            while True:
                 req = rpc.recv(conn)
-            except ConnectionError:
-                log.warning("cohost: %s frontend disconnected", self.name)
-                return
-            try:
-                reply = rpc.ok(self.handle(req))
-            except BaseException as e:  # noqa: BLE001 - every failure goes back to the frontend
-                log.exception("cohost: %s %s failed", self.name, req.get("method", req["op"]))
-                if req.get("method") in self.LOAD_TIME:
-                    self.host.loaded.fail(f"{self.name}: {e}")
-                    self.host.compiled.fail(f"{self.name}: {e}")
-                reply = rpc.error(e)
-            rpc.send(conn, reply)
+                try:
+                    reply = rpc.ok(self.handle(req))
+                except BaseException as e:  # noqa: BLE001 - every failure goes back to the frontend
+                    log.exception("cohost: %s %s failed", self.name, req.get("method", req["op"]))
+                    if req.get("method") in self.LOAD_TIME:
+                        self.host.loaded.fail(f"{self.name}: {e}")
+                        self.host.compiled.fail(f"{self.name}: {e}")
+                    reply = rpc.error(e)
+                rpc.send(conn, reply)
+        except ConnectionError:
+            log.warning("cohost: %s frontend disconnected", self.name)
+        finally:
+            if self._sample_pending:           # it went away between execute_model and sample_tokens
+                self._sample_pending = False
+                self.host.device.release(self.name)
 
     # ------------------------------------------------------------ dispatch
     def handle(self, req: dict) -> Any:
@@ -389,11 +385,14 @@ class VllmMember:
         self.vllm_config = kwargs["vllm_config"]
         self.wrapper = WorkerWrapperBase(rpc_rank=0)
         kwargs = {**kwargs, "shared_worker_lock": Lock()}
-        with _member_env(self.member):
-            if self.member.preload:
-                from .apps import load_factory
-                load_factory(self.member.preload)()
-            self.wrapper.init_worker(all_kwargs=[kwargs])
+
+        def go():   # on the device thread, like every other env change: another member may be loading
+            with _member_env(self.member):
+                if self.member.preload:
+                    from .apps import load_factory
+                    load_factory(self.member.preload)()
+                self.wrapper.init_worker(all_kwargs=[kwargs])
+        self._on_device(go)
 
     # ----------------------------------------------- step-long ownership
     def _execute(self, args, kwargs):
@@ -433,9 +432,7 @@ class VllmMember:
         runner = worker.model_runner
         start = time.perf_counter()
         self.host.loaded.wait(self.name)
-        if not getattr(worker, "enable_model_warmup", True):
-            self.host.compiled.wait(self.name)
-            return CompilationTimes(language_model=0.0, encoder=0.0)
+        warm = getattr(worker, "enable_model_warmup", True)
 
         def kwargs_for():
             TTPlatform.check_and_update_config(self.vllm_config)  # this member's sampling mode
@@ -462,16 +459,18 @@ class VllmMember:
                 if runner.trace_mode in ("all", "decode_only"):
                     runner.model.warmup_model_decode(enable_trace=True, **decode)
 
-        before = self._on_device(self.host.dram_gb_per_chip)
-        self._on_device(compile_pass)
-        self._on_device(lambda: self.host.account(self.name, "compile", before))
-        log.info("cohost: %s compiled", self.name)
-        self.host.compiled.wait(self.name)
-        with self.host.capture_turn(self.name):
+        if warm:
             before = self._on_device(self.host.dram_gb_per_chip)
-            self._on_device(capture_pass)
-            self._on_device(lambda: self.host.account(self.name, "capture", before))
-            log.info("cohost: %s traces captured", self.name)
+            self._on_device(compile_pass)
+            self._on_device(lambda: self.host.account(self.name, "compile", before))
+            log.info("cohost: %s compiled", self.name)
+        self.host.compiled.wait(self.name)
+        with self.host.capture_turn(self.name):   # taken even with nothing to capture: later members wait on it
+            if warm:
+                before = self._on_device(self.host.dram_gb_per_chip)
+                self._on_device(capture_pass)
+                self._on_device(lambda: self.host.account(self.name, "capture", before))
+                log.info("cohost: %s traces captured", self.name)
         if self.name == self.host.capture_order[-1]:
             self._on_device(self.host.after_all_captured)
         return CompilationTimes(language_model=time.perf_counter() - start, encoder=0.0)

@@ -4,7 +4,7 @@
 """The co-host runtime's device-free core: config, device ownership, barriers, RPC, lock window."""
 
 import json
-import socket
+import os
 import sys
 import threading
 import time
@@ -118,6 +118,23 @@ def test_device_hands_ownership_out_first_come_first_served():
     assert order == ["a", "b", "c"]
 
 
+def test_a_members_second_concurrent_request_waits_its_turn_behind_other_members():
+    """An app member's requests run on several server threads; re-entry by name would starve the others."""
+    dev = Device()
+    dev.acquire("a")
+    order = []
+    tb = threading.Thread(target=lambda: (dev.acquire("b"), order.append("b"), dev.release("b")))
+    tb.start()
+    time.sleep(0.05)
+    ta = threading.Thread(target=lambda: (dev.acquire("a"), order.append("a again"), dev.release("a")))
+    ta.start()
+    time.sleep(0.05)
+    dev.release("a")
+    tb.join(2)
+    ta.join(2)
+    assert order == ["b", "a again"]
+
+
 def test_device_work_nested_inside_a_job_runs_inline_instead_of_deadlocking():
     """A member's init_device job opens the shared mesh, which is itself device work."""
     dev = Device()
@@ -152,12 +169,10 @@ def test_a_failed_member_fails_the_barrier_for_everyone():
 
 def test_rpc_round_trip_and_remote_errors_carry_the_host_traceback(tmp_path):
     path = str(tmp_path / "s.sock")
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(path)
-    srv.listen(1)
+    srv = rpc.listen(path)
 
     def serve():
-        conn, _ = srv.accept()
+        conn = rpc.accept(srv)
         for _ in range(2):
             req = rpc.recv(conn)
             try:
@@ -172,6 +187,21 @@ def test_rpc_round_trip_and_remote_errors_carry_the_host_traceback(tmp_path):
     with pytest.raises(rpc.RemoteError, match="no such ref") as err:
         c.call("boom")
     assert "device host traceback" in str(err.value)
+
+
+def test_the_host_socket_is_private_and_drops_peers_of_another_user(tmp_path, monkeypatch):
+    path = str(tmp_path / "socks" / "a.sock")
+    srv = rpc.listen(path)
+    assert (tmp_path / "socks").stat().st_mode & 0o777 == 0o700
+    uid = os.getuid()
+    monkeypatch.setattr(rpc.os, "getuid", lambda: uid + 1)   # so this test's own client is a stranger
+    accepted = []
+    threading.Thread(target=lambda: accepted.append(rpc.accept(srv)), daemon=True).start()
+    c = rpc.Client(path)
+    c._sock.settimeout(10)                                   # an accepted stranger would hang here
+    with pytest.raises(ConnectionError):
+        c.call("ping")
+    assert accepted == [], "a peer of another user reached the pickle frames"
 
 
 # ------------------------------------------------------------- step-long device ownership
@@ -199,8 +229,8 @@ def fake_vllm(monkeypatch):
     return types.SimpleNamespace(calls=calls, Async=AsyncModelRunnerOutput)
 
 
-def _member(tmp_path, results):
-    cfg = cfgmod.load(_write(tmp_path))
+def _member(tmp_path, results, **over):
+    cfg = cfgmod.load(_write(tmp_path, **over))
     host = hostmod.Host(cfg)
     vm = hostmod.VllmMember(host, cfg.members[0])
     vm.wrapper = types.SimpleNamespace(results=results)
@@ -215,6 +245,20 @@ def test_a_pending_sample_keeps_the_device_until_sample_tokens(tmp_path, fake_vl
     assert host.device.owner is None
 
 
+def test_a_frontend_that_drops_mid_step_gives_the_device_back(tmp_path, fake_vllm):
+    """Otherwise every other member, and the mesh close at exit, waits on it forever."""
+    host, vm = _member(tmp_path, {"execute_model": None}, socket_dir=str(tmp_path / "socks"))
+    vm.serve()
+    c = rpc.Client(host.cfg.socket_path("a"))
+    assert c.call("run", method="execute_model", args=("so",)) is None
+    assert host.device.owner == "a"
+    c.close()
+    deadline = time.time() + 5
+    while host.device.owner is not None and time.time() < deadline:
+        time.sleep(0.05)
+    assert host.device.owner is None
+
+
 def test_a_step_with_nothing_to_sample_releases_at_once(tmp_path, fake_vllm):
     host, vm = _member(tmp_path, {"execute_model": "EMPTY"})
     assert vm.handle({"op": "run", "method": "execute_model"}) == "EMPTY"
@@ -226,6 +270,40 @@ def test_deferred_outputs_come_back_as_a_ref_and_resolve_on_request(tmp_path, fa
     ref = vm.handle({"op": "run", "method": "sample_tokens"})
     assert set(ref) == {"__cohost_async_ref__"}
     assert vm.handle({"op": "get_output", "ref": ref["__cohost_async_ref__"]}) == "resolved"
+
+
+def test_init_worker_sets_the_member_env_only_on_the_device_thread(tmp_path, fake_vllm, monkeypatch):
+    """os.environ is process-wide: set from a socket thread, it would leak into another member's load."""
+    seen = []
+
+    class WorkerWrapperBase:
+        def __init__(self, rpc_rank):
+            pass
+
+        def init_worker(self, all_kwargs):
+            seen.append((threading.current_thread(), os.environ.get("COHOST_TEST_ENV")))
+    monkeypatch.setitem(sys.modules, "vllm.v1.worker", types.ModuleType("vllm.v1.worker"))
+    monkeypatch.setitem(sys.modules, "vllm.v1.worker.worker_base",
+                        types.SimpleNamespace(WorkerWrapperBase=WorkerWrapperBase))
+    members = [{"name": "a", "kind": "vllm", "port": 21000, "model": "m/a", "env": {"COHOST_TEST_ENV": "a"}}]
+    host, vm = _member(tmp_path, {}, members=members)
+    vm._init_worker({"vllm_config": None})
+    assert seen == [(host.device._thread, "a")]
+    assert "COHOST_TEST_ENV" not in os.environ
+
+
+def test_a_member_without_warmup_still_takes_its_capture_turn(tmp_path, fake_vllm, monkeypatch):
+    """The members after it capture only once it has had its turn."""
+    for name, mod in {"vllm.v1.worker": types.ModuleType("vllm.v1.worker"),
+                      "vllm.v1.worker.worker_base": types.SimpleNamespace(CompilationTimes=lambda **k: k),
+                      "vllm_tt_plugin": types.ModuleType("vllm_tt_plugin"),
+                      "vllm_tt_plugin.platform": types.SimpleNamespace(TTPlatform=None)}.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+    host, vm = _member(tmp_path, {})
+    vm.wrapper = types.SimpleNamespace(worker=types.SimpleNamespace(enable_model_warmup=False, model_runner=None))
+    threading.Thread(target=lambda: (host.loaded.wait("b"), host.compiled.wait("b")), daemon=True).start()
+    vm._phased_warmup()
+    assert host._capture_turn == 1, "member b would wait for a's capture turn forever"
 
 
 # ------------------------------------------------------------------------------ launch

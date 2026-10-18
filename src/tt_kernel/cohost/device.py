@@ -28,6 +28,7 @@ class Device:
     def __init__(self, *, own_thread: bool = True) -> None:
         self._cv = threading.Condition()
         self._owner: Optional[str] = None
+        self._owner_thread: Optional[int] = None
         self._depth = 0
         self._waiting: collections.deque = collections.deque()
         self._jobs: "queue.Queue[tuple[Optional[Callable[[], Any]], Optional[Future]]]" = queue.Queue()
@@ -58,16 +59,18 @@ class Device:
         return self._owner
 
     def acquire(self, who: str) -> None:
-        """Take ownership for ``who`` (re-entrant for the same owner, FIFO across owners)."""
+        """Take ownership for ``who``: re-entrant on the thread that holds it, FIFO for everyone else
+        (a member's second concurrent request too, or it could keep the device from the others)."""
+        me = (who, threading.get_ident())
         with self._cv:
-            if self._owner == who:
+            if (self._owner, self._owner_thread) == me:
                 self._depth += 1
                 return
-            self._waiting.append(who)
-            while self._owner is not None or self._waiting[0] != who:
+            self._waiting.append(me)
+            while self._owner is not None or self._waiting[0] != me:
                 self._cv.wait()
             self._waiting.popleft()
-            self._owner, self._depth = who, 1
+            (self._owner, self._owner_thread), self._depth = me, 1
 
     def release(self, who: str) -> None:
         with self._cv:
@@ -75,7 +78,7 @@ class Device:
                 raise RuntimeError(f"{who} released the device but {self._owner} owns it")
             self._depth -= 1
             if self._depth == 0:
-                self._owner = None
+                self._owner = self._owner_thread = None
                 self._cv.notify_all()
 
     def run(self, who: str, fn: Callable[[], Any]) -> Any:
