@@ -671,6 +671,7 @@ def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="",
         return R()
 
     monkeypatch.setattr(container, "_run", fake)
+    monkeypatch.setattr(container, "all_device_ids", lambda dev_root=None: [0, 1, 2, 3])
     return calls
 
 
@@ -704,6 +705,19 @@ def test_a_dirty_stop_resets_only_the_chips_that_container_held(monkeypatch):
         "/dev/tenstorrent/1:/dev/tenstorrent/1",
     ]
     assert "/dev/tenstorrent" not in reset  # never the whole directory
+
+
+def test_a_scoped_reset_names_the_chips_it_left_out(monkeypatch):
+    """A mesh spanning a reset chip and one that was not reset can fail to bring up its fabric
+    (seen on a QuietBox 2), so the caller must be told which chips the reset did not cover."""
+    _fake_docker(monkeypatch, running_state="true", exit_code="137", devices_label="2,3")
+    outcome = container.stop("c", image="img")
+    assert outcome.reset == "ran" and outcome.left_out == (0, 1)
+
+
+def test_a_whole_directory_reset_leaves_no_chip_out(monkeypatch):
+    _fake_docker(monkeypatch, running_state="true", exit_code="137")
+    assert container.stop("c", image="img").left_out == ()
 
 
 def test_a_chip_taken_since_the_removal_is_not_reset_under_the_new_owner(monkeypatch):

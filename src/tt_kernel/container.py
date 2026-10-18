@@ -1056,10 +1056,14 @@ class StopOutcome:
     - ``"skipped"``    — dirty, but another container has since claimed these chips, so the
       reset was deliberately NOT run (it would have wiped that live sibling's mesh). This
       container's mesh is still dirty; the remedy is to stop the sibling first, or reboot.
+
+    ``left_out`` lists this host's chips a scoped reset did not cover. A later mesh spanning
+    one of them and a reset chip can fail to bring up its fabric until every chip is reset.
     """
 
     clean: bool
     reset: str = "not_needed"
+    left_out: Tuple[int, ...] = ()
 
     def __bool__(self) -> bool:  # ergonomic: `if stop(...)` still means "was it clean?"
         return self.clean
@@ -1131,7 +1135,18 @@ def stop(name: str, image: Optional[str] = None) -> StopOutcome:
         return StopOutcome(False, "skipped")
     # reset_mesh's bool is the whole fix for #107: a nonzero/timed-out tt-smi means the mesh
     # is still dirty, and the caller must say "reboot", not "a reset was attempted".
-    return StopOutcome(False, "ran" if reset_mesh(image, device_ids=device_ids) else "failed")
+    reset = "ran" if reset_mesh(image, device_ids=device_ids) else "failed"
+    return StopOutcome(False, reset, _left_out(device_ids))
+
+
+def _left_out(device_ids: Optional[Sequence[int]]) -> Tuple[int, ...]:
+    """The host's chips outside a scoped reset (none for a whole-directory reset)."""
+    if device_ids is None:
+        return ()
+    try:
+        return tuple(i for i in all_device_ids() if i not in device_ids)
+    except DeviceScanUnavailable:
+        return ()
 
 
 def compose_reset_mesh(image: str, *, device_ids: Optional[Sequence[int]] = None) -> List[str]:

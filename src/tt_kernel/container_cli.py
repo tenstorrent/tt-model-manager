@@ -22,7 +22,7 @@ import shutil
 import stat
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from . import MANIFEST_NAME, compat, console, container, hub, localdb, oci
 from .boot_progress import BootTracker, diagnose_boot, summarize
@@ -1430,9 +1430,16 @@ _DIRTY_STOP_WARNING = {
 }
 
 
-def _warn_dirty_stop(reset: str) -> None:
+def _warn_dirty_stop(reset: str, left_out: Sequence[int] = ()) -> None:
     console.note(_DIRTY_STOP_WARNING.get(reset, _DIRTY_STOP_WARNING["failed"]),
                  marker="⚠", style="warning")
+    if left_out:
+        console.note(
+            f"chip(s) {', '.join(map(str, left_out))} were not reset with these chips. A later "
+            "mesh that uses both can fail to bring up its fabric (a hang at device open, or "
+            "'Fabric Router Sync: Timeout'); before such a mesh, reset every chip (tt-smi -r) "
+            "once nothing else uses them",
+            marker="⚠", style="warning")
 
 
 def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) -> None:
@@ -1443,7 +1450,7 @@ def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) ->
             outcome = container.stop(name, image=container.image_ref(manifest))
             st.detail(_STOP_DETAIL.get(outcome.reset, "killed — mesh reset"))
         if not outcome.clean:
-            _warn_dirty_stop(outcome.reset)
+            _warn_dirty_stop(outcome.reset, outcome.left_out)
     if not stopped:
         console.note("nothing running", marker="○")
     else:

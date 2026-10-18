@@ -381,6 +381,10 @@ run on a build host; a later `serve` starts the container. Around them:
   that only a host reboot restores, and the boot then wedges at the first large host→device
   DMA (`could only pin N of M pages` in dmesg). If a stop reports anything but a clean
   shutdown and the next boot hangs early, reboot the host rather than retrying (issue #107).
+  A scoped reset also names the chips it left out: a later mesh that spans one of them and a
+  reset chip can fail to bring up its fabric (on a QuietBox 2, a 4-chip mesh after a reset of
+  chips 2,3 hung once and failed with `Fabric Router Sync: Timeout` once), so reset every chip
+  before such a mesh, once nothing else uses them.
 - `tt-model rm you/my-model` — removes a *pulled* container package, including its HF
   snapshot. `--keep-cache` keeps the JIT/weight caches for a fast re-pull;
   `--include-weights` also deletes the weights from the HF cache (off by default — they

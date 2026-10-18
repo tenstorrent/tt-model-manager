@@ -728,6 +728,19 @@ def _stub_stop(monkeypatch, reset):
                         lambda name, image=None: container.StopOutcome(False, reset))
 
 
+def test_a_scoped_reset_warns_that_a_mesh_spanning_the_chips_it_left_out_can_fail(
+        tmp_path, monkeypatch, capsys):
+    """On a QuietBox 2, after a dirty stop reset only chips 2,3, the next 4-chip mesh failed to
+    bring up its fabric (once a hang, once a router-sync timeout) until every chip was reset."""
+    monkeypatch.setattr(container, "is_running", lambda name: True)
+    monkeypatch.setattr(container, "stop",
+                        lambda name, image=None: container.StopOutcome(False, "ran", (0, 1)))
+    container_cli.stop_container(_manifest(tmp_path))
+    out = " ".join(capsys.readouterr().out.split())
+    assert "chip(s) 0, 1 were not reset" in out
+    assert "reset every chip" in out
+
+
 def test_a_reset_that_ran_is_reported_without_promising_the_next_boot_is_safe(
         tmp_path, monkeypatch, capsys):
     """#107: even a tt-smi -r that returned success is NOT a guarantee — a force-kill can
