@@ -111,13 +111,14 @@ def _supervise(cfg, host, stopping: threading.Event) -> int:
         log.info("cohost: started %s (pid %d) on port %d", m.name, p.pid, m.port)
 
     apps = [m for m in cfg.members if m.kind == "app"]
+    servers: Dict[str, threading.Thread] = {}   # app member -> its HTTP server thread, once booted
     failed = threading.Event()
     if apps:
         from .apps import boot_apps
 
         def _boot():
             try:
-                boot_apps(host, apps)
+                servers.update(boot_apps(host, apps))
             except BaseException:  # noqa: BLE001 - the group goes down with the failure logged
                 log.exception("cohost: app boot failed")
                 failed.set()
@@ -128,6 +129,7 @@ def _supervise(cfg, host, stopping: threading.Event) -> int:
     announced = False
     while not stopping.is_set():
         dead = [n for n, p in procs.items() if p.poll() is not None]
+        dead += [n for n, t in list(servers.items()) if not t.is_alive()]
         if dead:
             log.error("cohost: member(s) %s exited; stopping the group", dead)
             rc = 1

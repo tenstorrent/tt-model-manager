@@ -387,6 +387,32 @@ def test_app_members_boot_load_all_warm_all_release_all_warm_all_then_serve(tmp_
     assert served == [("stt", 1), ("tts", 2)]
 
 
+def test_an_app_member_whose_server_thread_ends_takes_the_group_down(tmp_path, monkeypatch):
+    """Like an exited vLLM frontend: a uvicorn thread that ends (port taken, a crash after boot)
+    would otherwise leave the group never ready, or reporting a dead port as ready."""
+    from tt_kernel.cohost import apps
+
+    class FakeHost:
+        def __init__(self, cfg):
+            self.cfg, self.ready = cfg, set()
+
+        def close(self):
+            pass
+
+    ended = threading.Thread(target=lambda: None)
+    ended.start()
+    ended.join()
+    monkeypatch.setattr(apps, "boot_apps", lambda host, members: {"tts": ended})
+    cfg = cfgmod.load(_write(tmp_path, members=[{"name": "tts", "kind": "app", "port": 1, "app": "x:y"}]))
+    stopping, rc = threading.Event(), []
+    t = threading.Thread(target=lambda: rc.append(launch._supervise(cfg, FakeHost(cfg), stopping)), daemon=True)
+    t.start()
+    t.join(10)
+    stopping.set()   # a supervisor that missed it returns now, so the test fails instead of hanging
+    t.join(10)
+    assert rc == [1]
+
+
 def test_a_group_mixing_vllm_and_app_members_is_refused(tmp_path):
     members = [{"name": "a", "kind": "vllm", "port": 1, "model": "m"}, {"name": "b", "kind": "app", "port": 2, "app": "x:y"}]
     with pytest.raises(ValueError, match="mixed"):
