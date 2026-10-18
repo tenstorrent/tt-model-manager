@@ -84,6 +84,7 @@ def test_compose_run_publishes_every_member_port(manifest, tmp_path):
     ({"members": [{"name": "a", "kind": "vllm"}]}, "needs model"),
     ({"members": [{"name": "a", "kind": "vllm", "model": "m"},
                   {"name": "b", "kind": "vllm", "model": "m"}]}, "distinct"),
+    ({"members": [{"name": "a", "kind": "vllm", "model": "m", "port_offset": -1}]}, ">= 0"),
     ({"members": [{"name": "a", "kind": "vllm", "model": "m"}], "gpus": 1}, "not valid"),
     ({"members": [{"name": "a", "kind": "vllm", "model": "m"}], "profiles": {"p": ["zz"]}}, "unknown member"),
 ])
@@ -97,3 +98,12 @@ def test_the_free_port_walk_finds_a_whole_range(monkeypatch):
     monkeypatch.setattr(container, "port_is_free", lambda p: p not in busy)
     assert container.pick_free_port(20000, span=3) == 20002
     assert container.pick_free_port(20000) == 20000
+
+
+def test_the_port_walk_covers_a_profile_whose_member_ports_leave_a_gap(manifest, monkeypatch):
+    """gptoss-qwen publishes members 0 and 2 and the status port 3: four ports from the base, not three."""
+    profile = manifest.container.resolve_profile("gptoss-qwen")
+    assert container.port_span(manifest, profile) == 4
+    busy = {20003}
+    monkeypatch.setattr(container, "port_is_free", lambda p: p not in busy)
+    assert container.pick_free_port(20000, span=container.port_span(manifest, profile)) == 20004

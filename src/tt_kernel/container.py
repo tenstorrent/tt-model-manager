@@ -101,6 +101,14 @@ def published_ports(m: Manifest, profile: ServeProfile) -> List[int]:
     return hook(m, profile) if hook else [profile.port or DEFAULT_PORT]
 
 
+def port_span(m: Manifest, profile: ServeProfile) -> int:
+    """How many consecutive host ports from the serve's port it publishes. A co-host profile's
+    member ports can leave gaps (members 0 and 2, then the status port), so a free-port walk
+    must check the whole range, not just as many ports as are published."""
+    ports = published_ports(m, profile.model_copy(update={"port": DEFAULT_PORT}))
+    return max(ports) - DEFAULT_PORT + 1
+
+
 def _b(value: bool) -> str:
     return "true" if value else "false"
 

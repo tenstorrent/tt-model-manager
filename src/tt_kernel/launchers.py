@@ -1216,8 +1216,8 @@ class CohostLauncher:
                 raise LauncherError(f"member {mem['name']}: a vllm member needs model")
         names = [mem["name"] for mem in members]
         offsets = [int(mem.get("port_offset", 0)) for mem in members]
-        if len(set(names)) != len(names) or len(set(offsets)) != len(offsets):
-            raise LauncherError("runtime.members need distinct names and distinct port_offset values")
+        if len(set(names)) != len(names) or len(set(offsets)) != len(offsets) or min(offsets) < 0:
+            raise LauncherError("runtime.members need distinct names and distinct port_offset values >= 0")
         chosen = (runtime.get("profiles") or {}).get(profile) if profile else None
         if chosen is None:
             return members
