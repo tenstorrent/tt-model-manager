@@ -50,7 +50,7 @@ the group runs out of DRAM in the last member's warmup.
 | Llama / Qwen (tt_transformers) | the same hook drops the plugin kwargs (`new_request_rows`) the model's chunked or prefix-cached prefill does not take | fixes a `TypeError` on the second chunk or a prefix-cache hit |
 | any vLLM member | `kv_tokens` | caps the member's KV pool so the members' DRAM adds up |
 | MiniMax Music 3 | `max_seq_len` 16384 → 8192, max frames 9000 → 6000 | fits next to Whisper and S2 Pro on one chip; songs up to 4 min; a seeded clip is byte-identical at 8K and 16K |
-| tt_transformers KV caches (Music 3) | do not file-cache the all-zero KV tensors | avoids a cold-boot hang (see failures.md) |
+| tt_transformers KV caches, tensor-cache files | do not file-cache the all-zero KV tensors; copy the cache files a start wrote onto new files once at the next start | avoids the tensor-cache hang on the first and second start (see failures.md) |
 
 ## Throughput when members share the device
 
