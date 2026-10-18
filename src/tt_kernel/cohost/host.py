@@ -429,9 +429,7 @@ class VllmMember:
         runner = worker.model_runner
         start = time.perf_counter()
         self.host.loaded.wait(self.name)
-        if not getattr(worker, "enable_model_warmup", True):
-            self.host.compiled.wait(self.name)
-            return CompilationTimes(language_model=0.0, encoder=0.0)
+        warm = getattr(worker, "enable_model_warmup", True)
 
         def kwargs_for():
             TTPlatform.check_and_update_config(self.vllm_config)  # this member's sampling mode
@@ -458,16 +456,18 @@ class VllmMember:
                 if runner.trace_mode in ("all", "decode_only"):
                     runner.model.warmup_model_decode(enable_trace=True, **decode)
 
-        before = self._on_device(self.host.dram_gb_per_chip)
-        self._on_device(compile_pass)
-        self._on_device(lambda: self.host.account(self.name, "compile", before))
-        log.info("cohost: %s compiled", self.name)
-        self.host.compiled.wait(self.name)
-        with self.host.capture_turn(self.name):
+        if warm:
             before = self._on_device(self.host.dram_gb_per_chip)
-            self._on_device(capture_pass)
-            self._on_device(lambda: self.host.account(self.name, "capture", before))
-            log.info("cohost: %s traces captured", self.name)
+            self._on_device(compile_pass)
+            self._on_device(lambda: self.host.account(self.name, "compile", before))
+            log.info("cohost: %s compiled", self.name)
+        self.host.compiled.wait(self.name)
+        with self.host.capture_turn(self.name):   # taken even with nothing to capture: later members wait on it
+            if warm:
+                before = self._on_device(self.host.dram_gb_per_chip)
+                self._on_device(capture_pass)
+                self._on_device(lambda: self.host.account(self.name, "capture", before))
+                log.info("cohost: %s traces captured", self.name)
         if self.name == self.host.capture_order[-1]:
             self._on_device(self.host.after_all_captured)
         return CompilationTimes(language_model=time.perf_counter() - start, encoder=0.0)

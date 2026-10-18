@@ -255,6 +255,20 @@ def test_deferred_outputs_come_back_as_a_ref_and_resolve_on_request(tmp_path, fa
     assert vm.handle({"op": "get_output", "ref": ref["__cohost_async_ref__"]}) == "resolved"
 
 
+def test_a_member_without_warmup_still_takes_its_capture_turn(tmp_path, fake_vllm, monkeypatch):
+    """The members after it capture only once it has had its turn."""
+    for name, mod in {"vllm.v1.worker": types.ModuleType("vllm.v1.worker"),
+                      "vllm.v1.worker.worker_base": types.SimpleNamespace(CompilationTimes=lambda **k: k),
+                      "vllm_tt_plugin": types.ModuleType("vllm_tt_plugin"),
+                      "vllm_tt_plugin.platform": types.SimpleNamespace(TTPlatform=None)}.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+    host, vm = _member(tmp_path, {})
+    vm.wrapper = types.SimpleNamespace(worker=types.SimpleNamespace(enable_model_warmup=False, model_runner=None))
+    threading.Thread(target=lambda: (host.loaded.wait("b"), host.compiled.wait("b")), daemon=True).start()
+    vm._phased_warmup()
+    assert host._capture_turn == 1, "member b would wait for a's capture turn forever"
+
+
 # ------------------------------------------------------------------------------ launch
 
 def test_each_vllm_member_is_a_stock_server_wired_to_the_host(tmp_path):
