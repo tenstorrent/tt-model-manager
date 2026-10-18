@@ -2666,6 +2666,8 @@ def deploy_up(
                                     "(default: stop them all)."),
 ) -> None:
     """Start every instance of a deployment, each on its own chips and port, and wait for all."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     from . import container_cli
     from .launchers import launcher_for
 
@@ -2676,6 +2678,7 @@ def deploy_up(
     from .boot_progress import diagnose_boot, summarize
 
     started, failed, not_ready = [], [], []
+    rolled_back = False
     try:
         for p in placements:
             try:
@@ -2691,24 +2694,43 @@ def deploy_up(
                 continue
             started.append(p)
         if started:
-            with console.step(f"waiting for {len(started)} instance(s) to be ready") as st:
-                for p in started:
-                    probe = launcher_for(p.manifest.container.kind).ready_probe(p.manifest)
-                    res = container.wait_ready(p.container, probe, timeout_s=container.ready_timeout_s())
-                    if not res.ready:
+            # All at once: one instance that crashes is seen (and, without --keep-going, rolls the
+            # deployment back) right away, not after another one's whole boot or timeout.
+            timeout = container.ready_timeout_s()
+            with console.step(f"waiting for {len(started)} instance(s) to be ready") as st, \
+                    ThreadPoolExecutor(len(started)) as pool:
+                try:
+                    waits = {pool.submit(container.wait_ready, p.container,
+                                         launcher_for(p.manifest.container.kind).ready_probe(p.manifest),
+                                         timeout_s=timeout): p for p in started}
+                    for fut in as_completed(waits):
+                        p, res = waits[fut], fut.result()
+                        if res.ready:
+                            continue
                         diag = diagnose_boot(res.tail, exited=res.exited, target=p.instance.model)
                         failed.append((p, summarize(diag, res.tail)))
                         not_ready.append(p)
+                        if not keep_going:
+                            break
+                except BaseException:
+                    _deploy_rollback(started)   # before the pool joins: the waits end as the containers stop
+                    rolled_back = True
+                    raise
+                if not_ready and not keep_going:
+                    _deploy_rollback(started)
+                    rolled_back = True
                 if not_ready:
                     st.fail()
                     st.detail(f"{', '.join(p.instance.name for p in not_ready)} did not come up")
     except BaseException:  # a start error, or Ctrl-C while waiting: never leave half a deployment running
-        _deploy_rollback(started)
+        if not rolled_back:
+            _deploy_rollback(started)
         raise
     for p, why in failed:
         console.note(f"{p.instance.name}: {why}", marker="✗", style="error")
     if failed and not keep_going:
-        _deploy_rollback(started)
+        if not rolled_back:
+            _deploy_rollback(started)
         raise _err(f"{dep.name}: {', '.join(p.instance.name for p, _ in failed)} did not come up; "
                    "stopped the deployment (pass --keep-going to keep the instances that did)")
     _deploy_rollback(not_ready)   # --keep-going keeps what came up, not what is still booting or broken

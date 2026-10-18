@@ -171,7 +171,10 @@ def up(tmp_path, pkg, monkeypatch):
         calls["started"].append(kw["instance"])
     monkeypatch.setattr(container_cli, "serve_container", serve)
     monkeypatch.setattr(container_cli, "pull_dir", lambda repo: tmp_path)
-    monkeypatch.setattr(container_cli, "stop_container", lambda m, **kw: calls["stopped"].append(kw["instance"]))
+    def stop(m, **kw):
+        calls["stopped"].append(kw["instance"])
+        calls.get("on_stop", lambda inst: None)(kw["instance"])
+    monkeypatch.setattr(container_cli, "stop_container", stop)
     monkeypatch.setattr(container, "container_exists", lambda n: False)
 
     def wait(name, probe, timeout_s=0):
@@ -232,3 +235,27 @@ def test_status_shows_only_this_deployments_servers_not_a_namesake(tmp_path, pkg
     assert res.exit_code == 0, res.output
     assert "✓ llm" in res.output
     assert "○ tts" in res.output, "another model's server named tts is not this deployment's tts"
+
+
+def test_an_instance_that_fails_early_rolls_back_without_waiting_for_the_others(up):
+    import threading
+
+    run, calls = up
+    a_stopped, a_finished, finished_at_stop = threading.Event(), [], []
+
+    def ready(name):
+        if name.endswith(".a"):            # a long boot, which ends when the rollback stops it
+            a_stopped.wait(10)
+            a_finished.append(name)
+            return False
+        return False                        # b crashes at once
+
+    def on_stop(inst):
+        if inst == "a":
+            finished_at_stop.append(bool(a_finished))
+            a_stopped.set()
+    calls["ready"], calls["on_stop"] = ready, on_stop
+    res = run()
+    assert res.exit_code != 0 and "b" in res.output
+    assert finished_at_stop == [False], "the rollback waited for a's whole boot before acting on b's failure"
+    assert sorted(calls["stopped"]) == ["a", "b"]
