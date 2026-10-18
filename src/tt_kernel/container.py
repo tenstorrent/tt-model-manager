@@ -91,6 +91,24 @@ def descriptor_labels(m: Manifest, profile: ServeProfile, port: int) -> Dict[str
     }
 
 
+def published_ports(m: Manifest, profile: ServeProfile) -> List[int]:
+    """Host ports a serve publishes: the profile's port, or every member's for a co-host kind."""
+    from .launchers import launcher_for  # deferred: launchers -> boot_progress -> container
+
+    spec = m.container
+    assert spec is not None
+    hook = getattr(launcher_for(spec.kind), "published_ports", None)
+    return hook(m, profile) if hook else [profile.port or DEFAULT_PORT]
+
+
+def port_span(m: Manifest, profile: ServeProfile) -> int:
+    """How many consecutive host ports from the serve's port it publishes. A co-host profile's
+    member ports can leave gaps (members 0 and 2, then the status port), so a free-port walk
+    must check the whole range, not just as many ports as are published."""
+    ports = published_ports(m, profile.model_copy(update={"port": DEFAULT_PORT}))
+    return max(ports) - DEFAULT_PORT + 1
+
+
 def _b(value: bool) -> str:
     return "true" if value else "false"
 
@@ -812,8 +830,9 @@ def compose_run(
         # is lost to `docker rm` on every stop — cold on EVERY boot, not just the first.
         "--volume", f"{tensors}:/tensor-cache",
         "--env", "TT_CACHE_PATH=/tensor-cache",
-        "--publish", f"{port}:{port}",
     ]
+    for p in published_ports(m, profile):
+        cmd += ["--publish", f"{p}:{p}"]
     # HF_HOME=/hf makes the container resolve its hub cache to /hf/hub, which is already
     # inside the mount above -- so in the default and HF_HOME-only setups there is nothing
     # more to do. Only when HF_HUB_CACHE points OUTSIDE HF_HOME does the container need a
@@ -899,14 +918,15 @@ def port_is_free(port: int) -> bool:
     return True
 
 
-def pick_free_port(preferred: int, *, attempts: int = 100) -> int:
-    """First free port at or above ``preferred``.
+def pick_free_port(preferred: int, *, attempts: int = 100, span: int = 1) -> int:
+    """First port at or above ``preferred`` with ``span`` free ports from it (a co-host group
+    serves one port per member).
 
     The Next.js behavior: 20000 busy → try 20001, 20002, ... rather than failing with
     "port is already allocated" and making the user pick one by hand.
     """
-    for port in range(preferred, min(preferred + attempts, 65536)):
-        if port_is_free(port):
+    for port in range(preferred, min(preferred + attempts, 65536 - span + 1)):
+        if all(port_is_free(port + i) for i in range(span)):
             return port
     raise ContainerError(
         f"no free port found in {preferred}-{min(preferred + attempts, 65536) - 1}; "

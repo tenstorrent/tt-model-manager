@@ -59,6 +59,16 @@ auxiliary_weights:
 #                This kind installs no engine and no default HTTP stack — runtime
 #                `packages` is what the server needs BEYOND tt-metal's editable
 #                install, and `lock` is the same frozen pin file the other kinds take.
+#   cohost       several models in ONE process that owns the chips (one process per chip),
+#                each member on its own port (serve.port + port_offset). The image is
+#                built FROM an existing package image plus the co-host runtime:
+#                  kind: cohost
+#                  runtime:
+#                    members:
+#                      - {name: gptoss, kind: vllm, model: openai/gpt-oss-20b, port_offset: 0}
+#                      - {name: llama8b, kind: vllm, model: meta-llama/Llama-3.1-8B-Instruct,
+#                         port_offset: 1, kv_tokens: 65536}
+#                    tt_config: {fabric_config: FABRIC_1D_RING, trace_region_size: 950000000}
 kind: vllm-plugin
 arch: blackhole                 # fixed by the build; every profile shares it
 
