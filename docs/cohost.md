@@ -98,9 +98,11 @@ While serving:
 |---|---|---|
 | GPT-OSS-20B, fused batch-1 path | 12.78 GiB/chip | 3.29 GiB/chip (16,512 blocks) |
 | GPT-OSS-20B, `GPT_OSS_20B_FUSED_B1=0` | 7.10 GiB/chip | 3.29 GiB/chip |
-| Llama-3.1-8B-Instruct | 1.73 GiB/chip | 1.06 GiB/chip (65,536 tokens) |
+| Llama-3.1-8B-Instruct | 1.73 GiB/chip | 1.06 GiB/chip (65,536 tokens); 2.13 GiB/chip (131,072) |
 
-Cap a member's KV pool with `kv_tokens`, so the members add up.
+Cap a member's KV pool with `kv_tokens`, so the members add up. Context length is a DRAM cost,
+not an L1 one: Llama-3.1-8B at its full 131,072-token context next to GPT-OSS-20B held the same
+381 KiB/core of L1 as at 4,096, and answered a 64,000-token prompt (2,048-token prefill chunks).
 
 **L1 per core** is the binding one. Some models keep buffers resident in L1 between steps:
 CCL semaphores, persistent CCL buffers, fused-kernel receive buffers. Those addresses are
