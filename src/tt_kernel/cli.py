@@ -2662,7 +2662,8 @@ def deploy_up(
     file: str = typer.Argument(..., help="Deployment file (YAML)."),
     print_only: bool = typer.Option(False, "--print", help="Show the placement and stop."),
     keep_going: bool = typer.Option(False, "--keep-going", help="Keep the instances that came up "
-                                    "when another fails (default: stop them all)."),
+                                    "when another fails, stop the failed ones, exit 1 "
+                                    "(default: stop them all)."),
 ) -> None:
     """Start every instance of a deployment, each on its own chips and port, and wait for all."""
     from . import container_cli
@@ -2672,40 +2673,51 @@ def deploy_up(
     _plan_table(placements)
     if print_only:
         return
-    started = []
-    try:
-        for p in placements:
-            container_cli.serve_container(
-                p.manifest, profile_name=p.profile, port=p.port, device_id=",".join(map(str, p.chips)),
-                instance=p.instance.name, detach=True, target=p.instance.model,
-                extra_args=p.instance.args, source=Path(p.instance.model).parent
-                if Path(p.instance.model).is_file() else container_cli.pull_dir(p.instance.model))
-            started.append(p)
-    except (container_cli.ContainerCliError, container.ContainerError) as e:
-        _deploy_rollback(started)
-        raise _err(f"{dep.name}: could not start {placements[len(started)].instance.name}: {e}")
     from .boot_progress import diagnose_boot, summarize
 
-    failed = []
-    with console.step(f"waiting for {len(started)} instance(s) to be ready") as st:
-        for p in started:
-            probe = launcher_for(p.manifest.container.kind).ready_probe(p.manifest)
-            res = container.wait_ready(p.container, probe, timeout_s=container.ready_timeout_s())
-            if not res.ready:
-                diag = diagnose_boot(res.tail, exited=res.exited, target=p.instance.model)
-                failed.append((p, summarize(diag, res.tail)))
-        if failed:
-            st.fail()
-            st.detail(f"{', '.join(p.instance.name for p, _ in failed)} did not come up")
+    started, failed, not_ready = [], [], []
+    try:
+        for p in placements:
+            try:
+                container_cli.serve_container(
+                    p.manifest, profile_name=p.profile, port=p.port, device_id=",".join(map(str, p.chips)),
+                    instance=p.instance.name, detach=True, target=p.instance.model,
+                    extra_args=p.instance.args, source=Path(p.instance.model).parent
+                    if Path(p.instance.model).is_file() else container_cli.pull_dir(p.instance.model))
+            except Exception as e:  # noqa: BLE001 - whatever stopped it, the rest is rolled back or kept
+                if not keep_going:
+                    raise _err(f"{dep.name}: could not start {p.instance.name}: {e}") from e
+                failed.append((p, f"could not start: {e}"))
+                continue
+            started.append(p)
+        if started:
+            with console.step(f"waiting for {len(started)} instance(s) to be ready") as st:
+                for p in started:
+                    probe = launcher_for(p.manifest.container.kind).ready_probe(p.manifest)
+                    res = container.wait_ready(p.container, probe, timeout_s=container.ready_timeout_s())
+                    if not res.ready:
+                        diag = diagnose_boot(res.tail, exited=res.exited, target=p.instance.model)
+                        failed.append((p, summarize(diag, res.tail)))
+                        not_ready.append(p)
+                if not_ready:
+                    st.fail()
+                    st.detail(f"{', '.join(p.instance.name for p in not_ready)} did not come up")
+    except BaseException:  # a start error, or Ctrl-C while waiting: never leave half a deployment running
+        _deploy_rollback(started)
+        raise
     for p, why in failed:
         console.note(f"{p.instance.name}: {why}", marker="✗", style="error")
     if failed and not keep_going:
         _deploy_rollback(started)
         raise _err(f"{dep.name}: {', '.join(p.instance.name for p, _ in failed)} did not come up; "
                    "stopped the deployment (pass --keep-going to keep the instances that did)")
-    console.milestone(f"{dep.name}: {len(started) - len(failed)} of {len(started)} instance(s) ready")
-    down = {p.instance.name for p, _ in failed}
-    _plan_table([p for p in started if p.instance.name not in down])
+    _deploy_rollback(not_ready)   # --keep-going keeps what came up, not what is still booting or broken
+    ready = [p for p in started if p not in not_ready]
+    console.milestone(f"{dep.name}: {len(ready)} of {len(placements)} instance(s) ready")
+    _plan_table(ready)
+    if failed:
+        raise _err(f"{dep.name}: {', '.join(p.instance.name for p, _ in failed)} did not come up and "
+                   "were stopped; kept the rest (--keep-going)")
 
 
 def _deploy_rollback(started) -> None:

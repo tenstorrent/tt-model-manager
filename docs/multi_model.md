@@ -85,4 +85,5 @@ tt-model deploy down examples/deploy/gptoss-2x-p150x2.yaml         # stop all
 
 `up` starts the instances one after another, then waits for all of them. If one fails to
 start or to become ready, `up` stops the whole deployment, so you never get half of it.
-`--keep-going` keeps the instances that did come up.
+This holds for any start error and for Ctrl-C while it waits. `--keep-going` keeps the instances
+that did come up, stops the ones that did not (even one still booting at the deadline), and exits 1.

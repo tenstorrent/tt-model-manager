@@ -146,3 +146,65 @@ def test_deploy_up_rolls_back_and_explains_when_an_instance_does_not_come_up(tmp
     assert started == ["a", "b"] and stopped == ["b", "a"] and len(removed) == 2
     assert "✗" in res.output and "Invalid device ID" in res.output
     assert "stopped the deployment" in res.output
+
+
+@pytest.fixture
+def up(tmp_path, pkg, monkeypatch):
+    """`deploy up` of instances a and b with docker stubbed out; returns (run, calls)."""
+    from typer.testing import CliRunner
+
+    from tt_kernel import cli, container, container_cli
+
+    dep = _dep(tmp_path, "instances:\n  - {name: a, model: org/m, profile: p300}\n  - {name: b, model: org/m, profile: p300}\n")
+    plan = _plan(dep, pkg)
+    monkeypatch.setattr(cli, "_deploy_plan", lambda f: (dep, plan))
+    calls = {"started": [], "stopped": [], "fail_start": set(), "ready": lambda name: True}
+
+    def serve(m, **kw):
+        if kw["instance"] in calls["fail_start"]:
+            raise RuntimeError("image load failed")
+        calls["started"].append(kw["instance"])
+    monkeypatch.setattr(container_cli, "serve_container", serve)
+    monkeypatch.setattr(container_cli, "pull_dir", lambda repo: tmp_path)
+    monkeypatch.setattr(container_cli, "stop_container", lambda m, **kw: calls["stopped"].append(kw["instance"]))
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+
+    def wait(name, probe, timeout_s=0):
+        ok = calls["ready"](name)
+        return container.ReadyResult(ok, False, [] if ok else ["still loading"], 1.0)
+    monkeypatch.setattr(container, "wait_ready", wait)
+    return (lambda *flags: CliRunner().invoke(cli.app, ["deploy", "up", "d.yaml", *flags])), calls
+
+
+def test_keep_going_stops_an_instance_that_timed_out_and_exits_1(up):
+    run, calls = up
+    calls["ready"] = lambda name: not name.endswith(".b")   # b is still booting at the deadline
+    res = run("--keep-going")
+    assert res.exit_code == 1
+    assert calls["stopped"] == ["b"], "b would keep booting on its chips, outside the deployment"
+
+
+def test_a_start_failure_of_any_kind_rolls_back_what_started(up):
+    run, calls = up
+    calls["fail_start"] = {"b"}
+    res = run()
+    assert res.exit_code != 0 and "could not start b" in res.output
+    assert calls["started"] == ["a"] and calls["stopped"] == ["a"]
+
+
+def test_keep_going_keeps_what_started_when_another_cannot_start(up):
+    run, calls = up
+    calls["fail_start"] = {"b"}
+    res = run("--keep-going")
+    assert res.exit_code == 1 and "1 of 2 instance(s) ready" in res.output
+    assert calls["started"] == ["a"] and calls["stopped"] == []
+
+
+def test_ctrl_c_while_waiting_rolls_back_every_started_instance(up):
+    run, calls = up
+
+    def interrupted(name):
+        raise KeyboardInterrupt
+    calls["ready"] = interrupted
+    run()
+    assert calls["stopped"] == ["b", "a"]
