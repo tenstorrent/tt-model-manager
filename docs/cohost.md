@@ -51,6 +51,12 @@ environment variable:
 `python -m tt_kernel.cohost.launch` boots the group, prints `cohost: all members ready`, and
 exits non-zero if any member fails. One failure stops the whole group.
 
+A member's `env` is set around its own load and warmup calls and put back afterwards. Only
+those keys are put back: if a model writes `os.environ` itself while it loads, the members
+after it see that value. (Fish Audio S2 Pro points `HF_MODEL` at its own weights, and
+MiniMax Music 3 then loaded S2 Pro's config.) An adapter for such a model should restore what
+it changes.
+
 ## Why the boot is phased
 
 A trace replays the exact addresses it used at capture. Any buffer or program binary
@@ -120,6 +126,15 @@ gave the same greedy output as their own baselines (16 of 16 prompts each), at t
 and still 16 of 16 when both were answering at once (their steps interleaved). With 32 users
 each, output was 1444 tok/s (GPT-OSS) and 1150 tok/s (Llama) when each was busy alone, and
 825 + 790 = 1615 tok/s with both busy.
+
+Measured with Qwen3-32B instead of Llama, also on 4 chips: same result (16 of 16 for both,
+sequential, interleaved and after a full benchmark run). Both busy at 32 users each, GPT-OSS
+gave 465 and Qwen 435 tok/s: a slow member's steps set the pace for both.
+
+Measured with three app members on ONE chip (Whisper large-v3, Fish Audio S2 Pro and MiniMax
+Music 3): S2 Pro's and Music 3's seeded audio was byte-identical to each model served alone,
+Whisper's text was identical, also with all three requests sent at once. Together they need
+29.5 GiB of the chip's 32 GB, which only fits with Music 3's context cut from 16K to 8K tokens.
 
 ## What co-hosting does not do
 
