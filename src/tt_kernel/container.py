@@ -495,7 +495,13 @@ def _host_claimed_devices(proc_root: Path = Path("/proc")) -> Set[int]:
 
 def _claimed_devices(all_ids: Sequence[int]) -> Optional[Set[int]]:
     """Chip ids already claimed by ANY running container or host process, or None on a scan
-    failure.
+    failure (see ``_container_claimed_devices``)."""
+    claimed = _container_claimed_devices(all_ids)
+    return None if claimed is None else claimed | _host_claimed_devices()
+
+
+def _container_claimed_devices(all_ids: Sequence[int]) -> Optional[Set[int]]:
+    """Chip ids already claimed by ANY running container, or None on a scan failure.
 
     Host-wide by design, not scoped to ``label={LABEL}``: the UMD lock this whole scheme
     protects against is shared through ``--ipc host`` regardless of who launched the other
@@ -511,7 +517,7 @@ def _claimed_devices(all_ids: Sequence[int]) -> Optional[Set[int]]:
             return None
         ids = ps.stdout.split()
         if not ids:
-            return _host_claimed_devices()
+            return set()
         inspected = _run(["docker", "inspect", *ids], capture_output=True, text=True)
         if inspected.returncode != 0:
             return None
@@ -530,7 +536,7 @@ def _claimed_devices(all_ids: Sequence[int]) -> Optional[Set[int]]:
     for info in containers:
         claimed |= _claimed_from_container(
             info, all_ids, host_ipc=_shares_host_ipc(info, by_id))
-    return claimed | _host_claimed_devices()
+    return claimed
 
 
 def all_device_ids(dev_root: Optional[Path] = None) -> List[int]:
@@ -1057,13 +1063,16 @@ class StopOutcome:
       reset was deliberately NOT run (it would have wiped that live sibling's mesh). This
       container's mesh is still dirty; the remedy is to stop the sibling first, or reboot.
 
-    ``left_out`` lists this host's chips a scoped reset did not cover. A later mesh spanning
-    one of them and a reset chip can fail to bring up its fabric until every chip is reset.
+    ``also_reset`` lists this host's other chips the reset covered too, because nothing held
+    them; ``left_out`` the ones it did not, because something holds them or that could not be
+    ruled out. A later mesh spanning a left-out chip and a reset one can fail to bring up its
+    fabric until every chip is reset.
     """
 
     clean: bool
     reset: str = "not_needed"
     left_out: Tuple[int, ...] = ()
+    also_reset: Tuple[int, ...] = ()
 
     def __bool__(self) -> bool:  # ergonomic: `if stop(...)` still means "was it clean?"
         return self.clean
@@ -1133,10 +1142,17 @@ def stop(name: str, image: Optional[str] = None) -> StopOutcome:
     taken = _claimed_devices(device_ids) if device_ids else None
     if taken and set(device_ids) & taken:
         return StopOutcome(False, "skipped")
+    # A reset of only these chips can leave the fabric to the host's other chips stale, so a
+    # later mesh spanning both fails to come up. The other chips join the reset when nothing
+    # holds them (see ``chips_in_use``); the rest are reported for the caller to warn about.
+    others = _left_out(device_ids)
+    in_use = chips_in_use(others) if others else {}
+    also = tuple(c for c in others if c not in in_use)
+    scope = None if device_ids is None else sorted({*device_ids, *also})
     # reset_mesh's bool is the whole fix for #107: a nonzero/timed-out tt-smi means the mesh
     # is still dirty, and the caller must say "reboot", not "a reset was attempted".
-    reset = "ran" if reset_mesh(image, device_ids=device_ids) else "failed"
-    return StopOutcome(False, reset, _left_out(device_ids))
+    reset = "ran" if reset_mesh(image, device_ids=scope) else "failed"
+    return StopOutcome(False, reset, tuple(in_use), also)
 
 
 def _left_out(device_ids: Optional[Sequence[int]]) -> Tuple[int, ...]:
@@ -1147,6 +1163,109 @@ def _left_out(device_ids: Optional[Sequence[int]]) -> Tuple[int, ...]:
         return tuple(i for i in all_device_ids() if i not in device_ids)
     except DeviceScanUnavailable:
         return ()
+
+
+#: UMD's per-chip lock, a process-shared robust pthread mutex. glibc keeps the holder's thread
+#: id in the low 30 bits of the mutex's first word and the kernel clears them when the holder
+#: dies, so non-zero bits mean a live process runs a device on that chip. Read, never taken.
+UMD_CHIP_LOCK = "/dev/shm/TT_UMD_LOCK.CHIP_IN_USE_{}_PCIe"
+_FUTEX_TID_MASK = 0x3FFFFFFF
+
+#: Tools that open a chip without UMD's lock, doing something a reset must not cut short.
+_RESET_TOOLS = ("tt-smi", "tt-flash")
+
+#: Run as root: one line per open tt device on the host, "<pid> <major>:<minor> <lock word>
+#: <comm>". The lock word is read from the process's OWN /dev/shm (a container with a private
+#: ipc namespace has its own), keyed by the chip number as that process sees it.
+_HOLDER_SCAN = r"""
+for fd in $(find /proc/[0-9]*/fd -mindepth 1 -maxdepth 1 -lname '/dev/tenstorrent/*' 2>/dev/null); do
+  pid=${fd#/proc/}; pid=${pid%%/*}
+  node=$(readlink "$fd") || continue
+  dev=$(stat -L -c '%t:%T' "$fd" 2>/dev/null) || continue
+  word=$(od -An -tx4 -N4 "/proc/$pid/root/dev/shm/TT_UMD_LOCK.CHIP_IN_USE_${node##*/}_PCIe" 2>/dev/null)
+  echo "$pid $dev ${word:-0} $(cat "/proc/$pid/comm" 2>/dev/null)"
+done
+exit 0
+"""
+
+
+def _device_holders() -> Optional[List[Tuple[int, int, int, str]]]:
+    """Every process with a tt device open, as (pid, device number, its UMD lock word, comm).
+
+    None unless the scan could read every process's fds: as root, or through passwordless
+    ``sudo -n``. A plain user cannot read root's or another user's /proc/<pid>/fd, and that is
+    exactly where another user's server shows up (under rootless docker it is invisible to
+    ``docker inspect`` too).
+    """
+    argv = ["sh", "-c", _HOLDER_SCAN]
+    if os.geteuid() != 0:
+        argv = ["sudo", "-n", *argv]
+    try:
+        out = _run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    holders = []
+    for line in out.stdout.splitlines():
+        pid, dev, word, *comm = line.split(maxsplit=3)
+        major, minor = (int(x, 16) for x in dev.split(":"))
+        holders.append((int(pid), os.makedev(major, minor), int(word, 16), "".join(comm)))
+    return holders
+
+
+def _host_lock_word(chip: int) -> Optional[int]:
+    """The chip's UMD lock word in this host's /dev/shm: 0 if no UMD ever locked it since boot,
+    None if it cannot be read."""
+    try:
+        raw = Path(UMD_CHIP_LOCK.format(chip)).read_bytes()[:4]
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return None
+    return int.from_bytes(raw, "little") if len(raw) == 4 else None
+
+
+def _device_number(chip: int) -> Optional[int]:
+    """The chip node's device number, which names it the same way inside every container."""
+    try:
+        return os.stat(f"{TT_DEVICE}/{chip}").st_rdev
+    except OSError:
+        return None
+
+
+def chips_in_use(chips: Sequence[int]) -> Dict[int, str]:
+    """Which of ``chips`` something may still hold, each with the reason; the others are free.
+
+    A chip is free only when every check clears it: no running container claims it (the same
+    rules as the picker), a scan of EVERY process's fds (root or ``sudo -n``) finds none that
+    has it open while holding UMD's lock for it (in that process's own /dev/shm) or while
+    being tt-smi/tt-flash, and its lock in this host's /dev/shm has no live holder. A process
+    that only has the node open without the lock (a telemetry daemon) does not run a device
+    there. Anything a check cannot read counts as held: another user's chip can look free to
+    docker and to an unprivileged /proc scan, and resetting it would wipe their live mesh.
+    """
+    claimed = _container_claimed_devices(all_device_ids())
+    holders = _device_holders()
+    busy: Dict[int, str] = {}
+    for chip in chips:
+        word, rdev = _host_lock_word(chip), _device_number(chip)
+        if claimed is None:
+            busy[chip] = "docker could not be asked"
+        elif chip in claimed:
+            busy[chip] = "a container claims it"
+        elif holders is None:
+            busy[chip] = "not every process could be checked (needs root or passwordless sudo)"
+        elif rdev is None:
+            busy[chip] = "its device node could not be read"
+        elif word is None or word & _FUTEX_TID_MASK:
+            busy[chip] = "a process holds its UMD lock"
+        else:
+            for pid, dev, held, comm in holders:
+                if dev == rdev and (held & _FUTEX_TID_MASK or comm.startswith(_RESET_TOOLS)):
+                    busy[chip] = f"process {pid} ({comm}) is using it"
+                    break
+    return busy
 
 
 def compose_reset_mesh(image: str, *, device_ids: Optional[Sequence[int]] = None) -> List[str]:

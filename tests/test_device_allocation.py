@@ -409,3 +409,119 @@ def test_host_claimed_devices_reads_open_device_fds(tmp_path):
     assert {2, 3} <= found and 1 not in found
     if not os.access(locked, os.R_OK):
         assert 0 not in found
+
+
+# ------------------------------------------------------------------------ chips_in_use
+#
+# Whether a dirty stop may widen its reset to the host's other chips. Every check has to
+# clear a chip; one that cannot answer keeps it out of the reset (another user's live mesh).
+
+TID = 0x1234  # a live holder's thread id in the low 30 bits of the mutex word
+OWNER_DIED = 0x40000000  # what the kernel leaves when the holder exits without unlocking
+
+
+def _host(monkeypatch, *, claimed=frozenset(), holders=(), words=None, rdev=None):
+    monkeypatch.setattr(container, "all_device_ids", lambda dev_root=None: [0, 1, 2, 3])
+    monkeypatch.setattr(container, "_container_claimed_devices",
+                        lambda ids: None if claimed is None else set(claimed))
+    monkeypatch.setattr(container, "_device_holders",
+                        lambda: None if holders is None else list(holders))
+    monkeypatch.setattr(container, "_host_lock_word", lambda chip: (words or {}).get(chip, 0))
+    monkeypatch.setattr(container, "_device_number",
+                        lambda chip: (rdev or {}).get(chip, 500 + chip))
+
+
+def test_a_chip_every_check_clears_is_free(monkeypatch):
+    _host(monkeypatch)
+    assert container.chips_in_use([0, 1]) == {}
+
+
+def test_a_chip_a_container_claims_is_in_use(monkeypatch):
+    _host(monkeypatch, claimed={1})
+    assert list(container.chips_in_use([0, 1])) == [1]
+
+
+def test_nothing_is_free_when_docker_cannot_be_asked(monkeypatch):
+    _host(monkeypatch, claimed=None)
+    assert list(container.chips_in_use([0, 1])) == [0, 1]
+
+
+def test_nothing_is_free_without_a_scan_of_every_process(monkeypatch):
+    """Without root or passwordless sudo another user's server is invisible (rootless docker,
+    unreadable /proc/<pid>/fd): such a chip looks free and must still not be reset."""
+    _host(monkeypatch, holders=None)
+    busy = container.chips_in_use([0, 1])
+    assert list(busy) == [0, 1] and "sudo" in busy[0]
+
+
+@pytest.mark.parametrize("word, held", [(TID, True), (OWNER_DIED | TID, True),
+                                        (OWNER_DIED, False), (0, False), (None, True)])
+def test_the_hosts_umd_lock_word_decides(monkeypatch, word, held):
+    """The kernel clears the holder's id when it dies, so only live holders count; a lock
+    file that cannot be read counts as held."""
+    _host(monkeypatch, words={0: word})
+    assert (0 in container.chips_in_use([0])) is held
+
+
+def test_a_process_holding_the_umd_lock_in_its_own_namespace_holds_the_chip(monkeypatch):
+    """A container with a private ipc namespace keeps the lock in its own /dev/shm, so the host
+    file is clean: the scan reads the lock where that process sees it."""
+    _host(monkeypatch, holders=[(77, 500, TID, "python3")])
+    assert "77" in container.chips_in_use([0, 1])[0]
+    assert 1 not in container.chips_in_use([0, 1])
+
+
+def test_a_process_with_the_node_open_but_no_lock_does_not_hold_it(monkeypatch):
+    """A telemetry daemon keeps every chip open without UMD's lock; it runs no device."""
+    _host(monkeypatch, holders=[(9, 500, 0, "tt_telemetry_co"), (9, 501, OWNER_DIED, "x")])
+    assert container.chips_in_use([0, 1]) == {}
+
+
+def test_tt_smi_with_the_node_open_holds_it(monkeypatch):
+    """tt-smi and tt-flash take no UMD lock, but a reset must not cut a reset or flash short."""
+    _host(monkeypatch, holders=[(5, 501, 0, "tt-smi"), (6, 502, 0, "tt-flash")])
+    assert sorted(container.chips_in_use([0, 1, 2])) == [1, 2]
+
+
+def test_holders_are_matched_by_device_number_not_by_the_path_they_opened(monkeypatch):
+    """A container may map host chip 2 as /dev/tenstorrent/0; its fd still names chip 2's
+    device number."""
+    _host(monkeypatch, holders=[(8, 502, TID, "server")])
+    assert list(container.chips_in_use([0, 2])) == [2]
+
+
+def test_device_holders_parses_the_root_scan(monkeypatch):
+    seen = []
+
+    def fake(argv, **kw):
+        seen.append(argv)
+        return _R("761 1ff:2 40000000 tt_telemetry_co\n88 1ff:0 0000002a my server\n")
+    monkeypatch.setattr(container, "_run", fake)
+    monkeypatch.setattr(container.os, "geteuid", lambda: 1000)
+    assert container._device_holders() == [
+        (761, os.makedev(0x1ff, 2), OWNER_DIED, "tt_telemetry_co"),
+        (88, os.makedev(0x1ff, 0), 0x2a, "my server"),
+    ]
+    assert seen[0][:3] == ["sudo", "-n", "sh"]  # never prompts
+
+
+def test_device_holders_runs_without_sudo_as_root(monkeypatch):
+    seen = []
+    monkeypatch.setattr(container, "_run", lambda argv, **kw: seen.append(argv) or _R(""))
+    monkeypatch.setattr(container.os, "geteuid", lambda: 0)
+    assert container._device_holders() == [] and seen[0][0] == "sh"
+
+
+def test_device_holders_is_none_when_sudo_needs_a_password(monkeypatch):
+    monkeypatch.setattr(container, "_run", lambda argv, **kw: _R("", 1))
+    monkeypatch.setattr(container.os, "geteuid", lambda: 1000)
+    assert container._device_holders() is None
+
+
+def test_host_lock_word_reads_the_first_word(tmp_path, monkeypatch):
+    monkeypatch.setattr(container, "UMD_CHIP_LOCK", str(tmp_path / "lock_{}"))
+    (tmp_path / "lock_0").write_bytes((OWNER_DIED | TID).to_bytes(4, "little") + bytes(52))
+    (tmp_path / "lock_1").write_bytes(b"\0\0")  # being created
+    assert container._host_lock_word(0) == OWNER_DIED | TID
+    assert container._host_lock_word(1) is None
+    assert container._host_lock_word(2) == 0  # no UMD locked chip 2 since boot
