@@ -118,6 +118,23 @@ def test_device_hands_ownership_out_first_come_first_served():
     assert order == ["a", "b", "c"]
 
 
+def test_a_members_second_concurrent_request_waits_its_turn_behind_other_members():
+    """An app member's requests run on several server threads; re-entry by name would starve the others."""
+    dev = Device()
+    dev.acquire("a")
+    order = []
+    tb = threading.Thread(target=lambda: (dev.acquire("b"), order.append("b"), dev.release("b")))
+    tb.start()
+    time.sleep(0.05)
+    ta = threading.Thread(target=lambda: (dev.acquire("a"), order.append("a again"), dev.release("a")))
+    ta.start()
+    time.sleep(0.05)
+    dev.release("a")
+    tb.join(2)
+    ta.join(2)
+    assert order == ["b", "a again"]
+
+
 def test_device_work_nested_inside_a_job_runs_inline_instead_of_deadlocking():
     """A member's init_device job opens the shared mesh, which is itself device work."""
     dev = Device()
