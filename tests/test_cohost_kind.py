@@ -87,6 +87,10 @@ def test_compose_run_publishes_every_member_port(manifest, tmp_path):
     ({"members": [{"name": "a", "kind": "vllm", "model": "m", "port_offset": -1}]}, ">= 0"),
     ({"members": [{"name": "a", "kind": "vllm", "model": "m"}], "gpus": 1}, "not valid"),
     ({"members": [{"name": "a", "kind": "vllm", "model": "m"}], "profiles": {"p": ["zz"]}}, "unknown member"),
+    ({"members": [{"name": "a", "kind": "vllm", "model": "m"}], "profiles": {"p": []}}, "no members"),
+    ({"members": [{"name": "a", "kind": "app"}]}, "needs app"),
+    ({"members": [{"name": "a", "kind": "vllm", "model": "m"},
+                  {"name": "b", "kind": "app", "app": "x:y", "port_offset": 1}]}, "all vllm or all app"),
 ])
 def test_bad_member_lists_are_refused(runtime, match):
     with pytest.raises(LauncherError, match=match):
@@ -107,3 +111,11 @@ def test_the_port_walk_covers_a_profile_whose_member_ports_leave_a_gap(manifest,
     busy = {20003}
     monkeypatch.setattr(container, "port_is_free", lambda p: p not in busy)
     assert container.pick_free_port(20000, span=container.port_span(manifest, profile)) == 20004
+
+
+def test_a_runtime_profile_that_names_no_serve_profile_is_refused(manifest):
+    """A typo there would serve every member under the profile the author meant."""
+    from tt_kernel.container_manifest import ContainerManifestError
+    manifest.container.runtime["profiles"]["gptoss-qwem"] = manifest.container.runtime["profiles"].pop("gptoss-qwen")
+    with pytest.raises(ContainerManifestError, match="name no serve profile"):
+        CohostLauncher().validate(manifest.container)

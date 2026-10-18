@@ -1196,6 +1196,11 @@ class CohostLauncher:
 
         try:
             self.members(m.runtime, None)
+            unknown = set(m.runtime.get("profiles") or {}) - set(m.profile_names())
+            if unknown:   # a typo would quietly serve every member under the intended profile
+                raise LauncherError(f"runtime.profiles {sorted(unknown)} name no serve profile")
+            for name in m.runtime.get("profiles") or {}:
+                self.members(m.runtime, name)
         except LauncherError as e:
             raise ContainerManifestError(str(e)) from None
 
@@ -1214,6 +1219,10 @@ class CohostLauncher:
                                     f"unknown keys {sorted(bad)}")
             if mem["kind"] == "vllm" and not mem.get("model"):
                 raise LauncherError(f"member {mem['name']}: a vllm member needs model")
+            if mem["kind"] == "app" and ":" not in str(mem.get("app", "")):
+                raise LauncherError(f"member {mem['name']}: an app member needs app = 'module:factory'")
+        if len({mem["kind"] for mem in members}) > 1:
+            raise LauncherError("runtime.members are all vllm or all app (the runtime runs no mixed groups)")
         names = [mem["name"] for mem in members]
         offsets = [int(mem.get("port_offset", 0)) for mem in members]
         if len(set(names)) != len(names) or len(set(offsets)) != len(offsets) or min(offsets) < 0:
@@ -1221,6 +1230,8 @@ class CohostLauncher:
         chosen = (runtime.get("profiles") or {}).get(profile) if profile else None
         if chosen is None:
             return members
+        if not chosen:
+            raise LauncherError(f"runtime.profiles.{profile} lists no members")
         missing = sorted(set(chosen) - set(names))
         if missing:
             raise LauncherError(f"runtime.profiles.{profile} names unknown member(s) {missing}")
