@@ -385,11 +385,14 @@ class VllmMember:
         self.vllm_config = kwargs["vllm_config"]
         self.wrapper = WorkerWrapperBase(rpc_rank=0)
         kwargs = {**kwargs, "shared_worker_lock": Lock()}
-        with _member_env(self.member):
-            if self.member.preload:
-                from .apps import load_factory
-                load_factory(self.member.preload)()
-            self.wrapper.init_worker(all_kwargs=[kwargs])
+
+        def go():   # on the device thread, like every other env change: another member may be loading
+            with _member_env(self.member):
+                if self.member.preload:
+                    from .apps import load_factory
+                    load_factory(self.member.preload)()
+                self.wrapper.init_worker(all_kwargs=[kwargs])
+        self._on_device(go)
 
     # ----------------------------------------------- step-long ownership
     def _execute(self, args, kwargs):

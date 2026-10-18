@@ -255,6 +255,26 @@ def test_deferred_outputs_come_back_as_a_ref_and_resolve_on_request(tmp_path, fa
     assert vm.handle({"op": "get_output", "ref": ref["__cohost_async_ref__"]}) == "resolved"
 
 
+def test_init_worker_sets_the_member_env_only_on_the_device_thread(tmp_path, fake_vllm, monkeypatch):
+    """os.environ is process-wide: set from a socket thread, it would leak into another member's load."""
+    seen = []
+
+    class WorkerWrapperBase:
+        def __init__(self, rpc_rank):
+            pass
+
+        def init_worker(self, all_kwargs):
+            seen.append((threading.current_thread(), os.environ.get("COHOST_TEST_ENV")))
+    monkeypatch.setitem(sys.modules, "vllm.v1.worker", types.ModuleType("vllm.v1.worker"))
+    monkeypatch.setitem(sys.modules, "vllm.v1.worker.worker_base",
+                        types.SimpleNamespace(WorkerWrapperBase=WorkerWrapperBase))
+    members = [{"name": "a", "kind": "vllm", "port": 21000, "model": "m/a", "env": {"COHOST_TEST_ENV": "a"}}]
+    host, vm = _member(tmp_path, {}, members=members)
+    vm._init_worker({"vllm_config": None})
+    assert seen == [(host.device._thread, "a")]
+    assert "COHOST_TEST_ENV" not in os.environ
+
+
 def test_a_member_without_warmup_still_takes_its_capture_turn(tmp_path, fake_vllm, monkeypatch):
     """The members after it capture only once it has had its turn."""
     for name, mod in {"vllm.v1.worker": types.ModuleType("vllm.v1.worker"),
