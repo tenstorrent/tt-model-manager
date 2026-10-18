@@ -25,7 +25,7 @@ import asyncio
 import importlib
 import logging
 import threading
-from typing import Any, Callable, List
+from typing import Any, Callable, Dict, List
 
 from .config import Member
 
@@ -69,8 +69,9 @@ def serve_asgi(app: Any, port: int, name: str) -> threading.Thread:
     return t
 
 
-def boot_apps(host, members: List[Member]) -> List[AppMember]:
-    """Load, warm, release and re-warm every app member (see the module docstring), then serve."""
+def boot_apps(host, members: List[Member]) -> Dict[str, threading.Thread]:
+    """Load, warm, release and re-warm every app member (see the module docstring), then serve.
+    Returns each member's server thread."""
     apps = []
     for m in members:
         app = load_factory(m.app)(host, m)
@@ -95,6 +96,4 @@ def boot_apps(host, members: List[Member]) -> List[AppMember]:
             for m, app in apps:
                 host.device.run(m.name, app.release_traces)
     host.device.run("host", host.after_all_captured)
-    for m, app in apps:
-        serve_asgi(app.asgi_app(), m.port, m.name)
-    return [app for _, app in apps]
+    return {m.name: serve_asgi(app.asgi_app(), m.port, m.name) for m, app in apps}

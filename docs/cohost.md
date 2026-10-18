@@ -18,6 +18,8 @@ to share a process. `tt_kernel.cohost` is that process.
   the device host, on their own port.
 - **Status.** The host serves `GET /` on `status_port`, with each member's readiness and its
   measured DRAM and L1.
+- **One member down, the group down.** If a vLLM frontend exits or an app member's HTTP server
+  thread ends, the whole group stops, so a container that is up always serves every member.
 
 Members take turns on the device. Nothing runs at the same time; see "What co-hosting does not
 do".
