@@ -212,3 +212,22 @@ def test_ctrl_c_while_waiting_rolls_back_every_started_instance(up):
     calls["ready"] = interrupted
     run()
     assert calls["stopped"] == ["b", "a"]
+
+
+def test_status_shows_only_this_deployments_servers_not_a_namesake(tmp_path, pkg, monkeypatch):
+    from typer.testing import CliRunner
+
+    from tt_kernel import cli, container
+
+    _dep(tmp_path, "instances:\n  - {name: llm, model: org/m, profile: p300}\n  - {name: tts, model: org/m}\n")
+    monkeypatch.setattr(cli, "_require_container", lambda target: pkg)
+    ours = container.container_name(pkg, pkg.container.resolve_profile("p300"), "llm")
+    row = {"repo": "org/m", "chips": "0,1", "url": "http://127.0.0.1:20000"}
+    monkeypatch.setattr(cli, "_running_servers", lambda: [
+        {**row, "name": ours, "instance": "llm"},
+        {**row, "name": "tt-model-other-p150.tts", "instance": "tts", "repo": "org/other"}])
+    monkeypatch.chdir(tmp_path)
+    res = CliRunner().invoke(cli.app, ["deploy", "status", "d.yaml"])
+    assert res.exit_code == 0, res.output
+    assert "✓ llm" in res.output
+    assert "○ tts" in res.output, "another model's server named tts is not this deployment's tts"

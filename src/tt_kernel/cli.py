@@ -2747,17 +2747,24 @@ def deploy_down(file: str = typer.Argument(..., help="Deployment file (YAML)."))
 @deploy_app.command("status")
 def deploy_status(file: str = typer.Argument(..., help="Deployment file (YAML).")) -> None:
     """Show which instances of a deployment are running, with their chips and endpoints."""
-    from . import deploy
+    from . import container_cli, deploy
 
     try:
-        names = {i.name for i in deploy.load(file).instances}
-    except deploy.DeployError as e:
+        dep = deploy.load(file)
+        # by container name (model, profile and instance), as `deploy down` stops them: an instance
+        # name alone could match another deployment's server, or one started by hand with --name
+        wanted = {}
+        for i in dep.instances:
+            m = _require_container(i.model)
+            assert m.container is not None
+            wanted[container.container_name(m, m.container.resolve_profile(i.profile), i.name)] = i.name
+    except (deploy.DeployError, container_cli.ContainerCliError, container.ContainerError, ValueError) as e:
         raise _err(str(e))
-    rows = [r for r in _running_servers() if r["instance"] in names]
-    running = {r["instance"] for r in rows}
+    rows = [r for r in _running_servers() if r["name"] in wanted]
+    running = {wanted[r["name"]] for r in rows}
     for r in rows:
         console.raw(f"  ✓ {r['instance']:<16} {r['repo']}  chips {r['chips'] or '-'}  {r['url'] or '-'}")
-    for n in sorted(names - running):
+    for n in sorted(set(wanted.values()) - running):
         console.raw(f"  ○ {n:<16} not running")
 
 
