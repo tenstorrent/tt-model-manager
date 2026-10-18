@@ -311,21 +311,24 @@ class VllmMember:
     def _accept(self, srv: socket.socket) -> None:
         conn = rpc.accept(srv)
         log.info("cohost: %s frontend connected", self.name)
-        while True:
-            try:
+        try:
+            while True:
                 req = rpc.recv(conn)
-            except ConnectionError:
-                log.warning("cohost: %s frontend disconnected", self.name)
-                return
-            try:
-                reply = rpc.ok(self.handle(req))
-            except BaseException as e:  # noqa: BLE001 - every failure goes back to the frontend
-                log.exception("cohost: %s %s failed", self.name, req.get("method", req["op"]))
-                if req.get("method") in self.LOAD_TIME:
-                    self.host.loaded.fail(f"{self.name}: {e}")
-                    self.host.compiled.fail(f"{self.name}: {e}")
-                reply = rpc.error(e)
-            rpc.send(conn, reply)
+                try:
+                    reply = rpc.ok(self.handle(req))
+                except BaseException as e:  # noqa: BLE001 - every failure goes back to the frontend
+                    log.exception("cohost: %s %s failed", self.name, req.get("method", req["op"]))
+                    if req.get("method") in self.LOAD_TIME:
+                        self.host.loaded.fail(f"{self.name}: {e}")
+                        self.host.compiled.fail(f"{self.name}: {e}")
+                    reply = rpc.error(e)
+                rpc.send(conn, reply)
+        except ConnectionError:
+            log.warning("cohost: %s frontend disconnected", self.name)
+        finally:
+            if self._sample_pending:           # it went away between execute_model and sample_tokens
+                self._sample_pending = False
+                self.host.device.release(self.name)
 
     # ------------------------------------------------------------ dispatch
     def handle(self, req: dict) -> Any:

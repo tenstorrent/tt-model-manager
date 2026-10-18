@@ -212,8 +212,8 @@ def fake_vllm(monkeypatch):
     return types.SimpleNamespace(calls=calls, Async=AsyncModelRunnerOutput)
 
 
-def _member(tmp_path, results):
-    cfg = cfgmod.load(_write(tmp_path))
+def _member(tmp_path, results, **over):
+    cfg = cfgmod.load(_write(tmp_path, **over))
     host = hostmod.Host(cfg)
     vm = hostmod.VllmMember(host, cfg.members[0])
     vm.wrapper = types.SimpleNamespace(results=results)
@@ -225,6 +225,20 @@ def test_a_pending_sample_keeps_the_device_until_sample_tokens(tmp_path, fake_vl
     assert vm.handle({"op": "run", "method": "execute_model", "args": ("so",)}) is None
     assert host.device.owner == "a", "another member's replay could land before the readback"
     assert vm.handle({"op": "run", "method": "sample_tokens", "args": (None,)}) == "out"
+    assert host.device.owner is None
+
+
+def test_a_frontend_that_drops_mid_step_gives_the_device_back(tmp_path, fake_vllm):
+    """Otherwise every other member, and the mesh close at exit, waits on it forever."""
+    host, vm = _member(tmp_path, {"execute_model": None}, socket_dir=str(tmp_path / "socks"))
+    vm.serve()
+    c = rpc.Client(host.cfg.socket_path("a"))
+    assert c.call("run", method="execute_model", args=("so",)) is None
+    assert host.device.owner == "a"
+    c.close()
+    deadline = time.time() + 5
+    while host.device.owner is not None and time.time() < deadline:
+        time.sleep(0.05)
     assert host.device.owner is None
 
 
