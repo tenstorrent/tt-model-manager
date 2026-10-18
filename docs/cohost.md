@@ -10,7 +10,10 @@ to share a process. `tt_kernel.cohost` is that process.
 - **vLLM members.** Each one keeps its own stock vLLM OpenAI server on its own port. Its
   worker runs inside the device host, behind
   `--distributed-executor-backend tt_kernel.cohost.vllm_remote.RemoteExecutor`. The
-  scheduler, the tool and reasoning parsers, and the whole API stay vLLM's own.
+  scheduler, the tool and reasoning parsers, and the whole API stay vLLM's own. The frontend
+  and the host talk in pickle frames over a Unix socket (vLLM configs and worker calls, as
+  vLLM's own multiprocess executor sends them). The socket directory is private to the host's
+  user, and the host drops a peer that runs as any other user.
 - **App members** (speech, music: models with their own HTTP API) run their ASGI app in
   the device host, on their own port.
 - **Status.** The host serves `GET /` on `status_port`, with each member's readiness and its

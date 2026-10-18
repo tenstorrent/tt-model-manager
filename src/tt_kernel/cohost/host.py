@@ -26,7 +26,6 @@ import socket
 import threading
 import time
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from . import rpc
@@ -305,18 +304,12 @@ class VllmMember:
 
     # ------------------------------------------------------------- serving
     def serve(self) -> None:
-        path = self.host.cfg.socket_path(self.name)
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        if os.path.exists(path):
-            os.unlink(path)
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(path)
-        srv.listen(1)
+        srv = rpc.listen(self.host.cfg.socket_path(self.name))
         threading.Thread(target=self._accept, args=(srv,), daemon=True,
                          name=f"tt-cohost-{self.name}").start()
 
     def _accept(self, srv: socket.socket) -> None:
-        conn, _ = srv.accept()
+        conn = rpc.accept(srv)
         log.info("cohost: %s frontend connected", self.name)
         while True:
             try:

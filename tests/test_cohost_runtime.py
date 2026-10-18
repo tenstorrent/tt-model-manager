@@ -4,7 +4,7 @@
 """The co-host runtime's device-free core: config, device ownership, barriers, RPC, lock window."""
 
 import json
-import socket
+import os
 import sys
 import threading
 import time
@@ -152,12 +152,10 @@ def test_a_failed_member_fails_the_barrier_for_everyone():
 
 def test_rpc_round_trip_and_remote_errors_carry_the_host_traceback(tmp_path):
     path = str(tmp_path / "s.sock")
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(path)
-    srv.listen(1)
+    srv = rpc.listen(path)
 
     def serve():
-        conn, _ = srv.accept()
+        conn = rpc.accept(srv)
         for _ in range(2):
             req = rpc.recv(conn)
             try:
@@ -172,6 +170,21 @@ def test_rpc_round_trip_and_remote_errors_carry_the_host_traceback(tmp_path):
     with pytest.raises(rpc.RemoteError, match="no such ref") as err:
         c.call("boom")
     assert "device host traceback" in str(err.value)
+
+
+def test_the_host_socket_is_private_and_drops_peers_of_another_user(tmp_path, monkeypatch):
+    path = str(tmp_path / "socks" / "a.sock")
+    srv = rpc.listen(path)
+    assert (tmp_path / "socks").stat().st_mode & 0o777 == 0o700
+    uid = os.getuid()
+    monkeypatch.setattr(rpc.os, "getuid", lambda: uid + 1)   # so this test's own client is a stranger
+    accepted = []
+    threading.Thread(target=lambda: accepted.append(rpc.accept(srv)), daemon=True).start()
+    c = rpc.Client(path)
+    c._sock.settimeout(10)                                   # an accepted stranger would hang here
+    with pytest.raises(ConnectionError):
+        c.call("ping")
+    assert accepted == [], "a peer of another user reached the pickle frames"
 
 
 # ------------------------------------------------------------- step-long device ownership
