@@ -104,6 +104,10 @@ def test_too_few_hugepages_is_refused_before_anything_starts(tmp_path, pkg):
     ("instances:\n  - {model: org/m}\n", "needs `name`"),
     ("instances:\n  - {name: a, model: org/m, gpu: 1}\n", "unknown key"),
     ("instances:\n  - {name: a, model: org/m}\n  - {name: a, model: org/m}\n", "used twice"),
+    ("instances:\n  - {name: a, model: org/m, args: --max-model-len 4096}\n", "`args` is a list"),
+    ("instances:\n  - {name: a, model: org/m, chips: \"23\"}\n", "list of chip ids"),
+    ("instances:\n  - {name: a, model: org/m, chips: 0}\n", "list of chip ids"),
+    ("instances:\n  - {name: a, model: org/m, port: high}\n", "`port` is `auto` or a number"),
 ])
 def test_bad_files_are_refused_with_the_reason(tmp_path, body, match):
     with pytest.raises(deploy.DeployError, match=match):

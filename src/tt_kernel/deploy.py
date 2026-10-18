@@ -72,11 +72,19 @@ def load(path: str) -> Deployment:
         unknown = set(item) - known
         if unknown:
             raise DeployError(f"{path}: instance {item['name']}: unknown key(s) {', '.join(sorted(unknown))}")
-        chips, port = item.get("chips", "auto"), item.get("port", "auto")
+        chips, port, args = item.get("chips", "auto"), item.get("port", "auto"), item.get("args") or []
+        if chips != "auto" and not (isinstance(chips, list) and all(isinstance(c, int) for c in chips)):
+            raise DeployError(f"{path}: instance {item['name']}: `chips` is `auto` or a list of chip ids, "
+                              f"e.g. [2, 3] (got {chips!r})")
+        if port != "auto" and not isinstance(port, int):
+            raise DeployError(f"{path}: instance {item['name']}: `port` is `auto` or a number (got {port!r})")
+        if not isinstance(args, list):   # a string would become one argument per character
+            raise DeployError(f"{path}: instance {item['name']}: `args` is a list, e.g. "
+                              f"[--max-model-len, \"8192\"] (got {args!r})")
         out.append(Instance(
             name=str(item["name"]), model=str(item["model"]), profile=item.get("profile"),
-            chips=None if chips == "auto" else [int(c) for c in chips],
-            port=None if port == "auto" else int(port), args=[str(a) for a in item.get("args") or []],
+            chips=None if chips == "auto" else chips,
+            port=None if port == "auto" else port, args=[str(a) for a in args],
         ))
     names = [i.name for i in out]
     dup = sorted({n for n in names if names.count(n) > 1})
