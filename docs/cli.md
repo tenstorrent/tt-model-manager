@@ -27,6 +27,7 @@ tt-model curl "hello" --name b                     # send it to the instance nam
 tt-model stop you/mymodel                          # stop the running server (SIGTERM first; container or v5/v6 bundle)
 tt-model stop you/mymodel --name b                 # stop only instance b (without --name: every instance)
 tt-model logs you/mymodel                          # container packages: show the server logs
+tt-model ps                                        # every model server on this host: chips, endpoint, status (--json too)
 ```
 
 `tt-model serve <id>` is the one-command path. For an already-installed bundle it runs the
