@@ -28,13 +28,14 @@ Inside one co-host process the models take turns on the device; nothing runs at 
 | situation | layout |
 | --- | --- |
 | the models fit on separate chips (count each profile's chips) | one deploy file, one instance per model |
-| many users of one model, more than one instance's limit | several instances of it, one per board, each its own endpoint (or a package profile that serves them in one endpoint, if the package has one: `tt-model profiles <id>`) |
+| many users of one model, more than one instance decodes at once | first measure one instance with the extra users queued (it can beat the others on throughput); a profile that decodes them all at once on one endpoint, if the package has one (`tt-model profiles <id>`); or several instances, one per board, each its own endpoint |
 | two models that each need every chip, or more models than chips | a co-host package that already holds them (or build one) |
 | a co-host package plus other models | one deploy file: the co-host package is one instance with several ports |
 
 Check each package's profiles first: `tt-model profiles <org/name>` lists the chips (mesh) and
 port each needs. Per-model limits that decide the layout live in the package's card (for example
-GPT-OSS-20B's server accepts at most 32 concurrent sequences, so 64 users need two instances).
+GPT-OSS-20B decodes at most 32 sequences at once; for 64 users one 4-chip server that queues the
+rest gave the most throughput, see reference/layouts.md).
 
 ## Step 2 — Place chips
 

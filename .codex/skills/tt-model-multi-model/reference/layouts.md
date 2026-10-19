@@ -6,14 +6,23 @@ a fixed seed.
 
 ## 64 users of one 4-chip LLM (GPT-OSS-20B)
 
-| layout | result |
-| --- | --- |
-| two `p150x2-throughput` instances, one per board, via `tt-model deploy` | **1594 tok/s at 64 users** (797 + 797); one instance alone 854 tok/s at 32 users; both instances 16/16 greedy vs a plain `serve`; up in 3 min 12 s |
-| one instance with 64 users | not possible: the model's vLLM class accepts at most 32 sequences and no TT data parallelism |
-| two 4-chip replicas on the same chips (one co-host process) | does not fit: each keeps about 366 KiB/core of L1 resident (`L1 buffer allocated at ... and static circular buffer region ends at ...`) |
+One server decodes at most 32 sequences at once; vLLM queues the rest. Three ways to serve 64
+users, measured on the same box (ISL 128, OSL 128, greedy, exact input length, one warmup):
 
-Throughput: ISL 128, OSL 128, greedy, exact input length, one warmup. The two instances together
-are 7% below twice one alone; the shared part is the host CPU.
+| layout | endpoints | 64 users | pick it when |
+| --- | --- | --- | --- |
+| one `p150x4-throughput` instance (32 decode, 32 queue) | 1 | **1795 tok/s**; time to first token median 2.7 s, whole answer median 4.6 s | total throughput and median answer time matter most; requests 33-64 wait for a free slot |
+| one `p150x4-dp2` instance (two 2-chip lanes, 64 decode at once) | 1 | 1497 tok/s; first token median 1.1 s, whole answer median 5.5 s | every request must start streaming at once on one endpoint |
+| two `p150x2-throughput` instances, one per board, via `tt-model deploy` | 2 | 1594 tok/s (797 + 797); both 16/16 greedy vs a plain `serve`; up in 3 min 12 s | two independent servers (one restarts without the other); the client splits the users |
+| two 4-chip replicas on the same chips (one co-host process) | - | does not fit: each keeps about 366 KiB/core of L1 resident (`L1 buffer allocated at ... and static circular buffer region ends at ...`) | never |
+
+With long answers (ISL 128, OSL 1024) at 64 users the gap in waiting grows: `p150x4-throughput`
+1938 tok/s but first token median 17.5 s (half the users wait for a whole answer first);
+`p150x4-dp2` 1593 tok/s with first token median 1.1 s. The two `p150x2-throughput` instances
+together are 7% below twice one alone (854 tok/s at 32 users); the shared part is the host CPU.
+
+One endpoint: `tt-model serve jashansinghTT/gpt-oss-20b-blackhole-fast --profile p150x4-throughput`
+(or `--profile p150x4-dp2`). Two endpoints:
 
 ```yaml
 deployment: gptoss-64u
