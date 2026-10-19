@@ -4,6 +4,8 @@ A Tenstorrent chip can be opened by one process at a time. UMD takes a per-chip 
 device starts and holds it until the process exits. So two models that must share chips have
 to share a process. `tt_kernel.cohost` is that process.
 
+Agents building such a package: follow the `tt-model-cohost-package` skill.
+
 - **The device host** opens one mesh over the group's chips and owns every device call. Its
   device loop runs on the process's main thread: tt-metal closes the chips on the main thread
   at exit, and UMD's per-chip lock can only be released by the thread that took it.

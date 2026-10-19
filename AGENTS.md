@@ -123,8 +123,8 @@ plugin marketplace for TT-Metalium bring-up, review, and debugging work (`tt-mod
 `tt-autodebug`, `tt-review-skills`, `tt-skills`). It does not overlap with or replace anything in
 this repo: `tt-model` packages, publishes, and serves already-built models, while that marketplace
 helps an agent bring a model up on TT-Metalium in the first place. This repo's own skills
-(`tt-model-yaml`, `tt-model-package-test`, `cli-design`, and `feature-branch-pr`, under
-`.claude/skills/` and `.codex/skills/`) are specific to authoring and testing `tt-model` packages
+(`tt-model-yaml`, `tt-model-package-test`, `tt-model-multi-model`, `tt-model-cohost-package`,
+`cli-design`, and `feature-branch-pr`, under `.claude/skills/` and `.codex/skills/`) are specific to authoring and testing `tt-model` packages
 and to this repo's conventions, and are not published there. Install the marketplace with
 `/plugin marketplace add git@github.com:tenstorrent/skills.git` then `/plugin install
 tt-skills@tenstorrent-skills` (Claude Code) if bring-up work on the model you are packaging would
@@ -150,6 +150,11 @@ for Codex under `.codex/skills/`): `tt-model-yaml` authors the manifest from a v
 bring-up; `tt-model-package-test` builds it, serves it on hardware, proves the API works (tool
 calling included), and pushes. Prefer them over improvising the flow. The copy-paste recipe for
 this path is [docs/E2E_RECIPE_V5.1.md](docs/E2E_RECIPE_V5.1.md).
+
+For **several models on one box**, two more skills (same two locations): `tt-model-multi-model`
+chooses the layout and serves models on separate chips side by side with `tt-model deploy`, each on
+its own endpoint; `tt-model-cohost-package` builds and validates a `kind: cohost` package for models
+that must share chips (one process per chip; see [docs/cohost.md](docs/cohost.md)).
 
 There is one **venv-based authoring path**, also self-contained (a consumer needs only a card
 and firmware):
