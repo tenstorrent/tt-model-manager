@@ -1207,10 +1207,13 @@ def _device_holders() -> Optional[List[Tuple[int, int, int, str]]]:
     if out.returncode != 0:
         return None
     holders = []
-    for line in out.stdout.splitlines():
-        pid, dev, word, *comm = line.split(maxsplit=3)
-        major, minor = (int(x, 16) for x in dev.split(":"))
-        holders.append((int(pid), os.makedev(major, minor), int(word, 16), "".join(comm)))
+    try:
+        for line in out.stdout.splitlines():
+            pid, dev, word, *comm = line.split(maxsplit=3)
+            major, minor = (int(x, 16) for x in dev.split(":"))
+            holders.append((int(pid), os.makedev(major, minor), int(word, 16), "".join(comm)))
+    except ValueError:  # a scan it cannot read is not a full scan; never fail the stop over it
+        return None
     return holders
 
 

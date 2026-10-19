@@ -505,6 +505,14 @@ def test_device_holders_parses_the_root_scan(monkeypatch):
     assert seen[0][:3] == ["sudo", "-n", "sh"]  # never prompts
 
 
+def test_an_unreadable_scan_counts_as_incomplete(monkeypatch):
+    """stop() runs this after the container is gone and before its own chips are reset; a
+    scan line it cannot parse must make every other chip held, not raise."""
+    monkeypatch.setattr(container, "_run", lambda argv, **kw: _R("761 garbage\n"))
+    monkeypatch.setattr(container.os, "geteuid", lambda: 1000)
+    assert container._device_holders() is None
+
+
 def test_device_holders_runs_without_sudo_as_root(monkeypatch):
     seen = []
     monkeypatch.setattr(container, "_run", lambda argv, **kw: seen.append(argv) or _R(""))
