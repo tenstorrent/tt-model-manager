@@ -24,7 +24,7 @@ _runner = CliRunner()
 
 def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=None,
                 models_wheels=None, vllm_wheel=None, with_vllm=True, constraints=None,
-                vllm_common_requirements=None):
+                vllm_common_requirements=None, provision_sfpi=False):
     model_py = tmp_path / "model.py"
     model_py.write_text("class QwenForCausalLM:  # the runner\n    pass\n")
     staged = tmp_path / "thin"
@@ -36,7 +36,7 @@ def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=Non
         plugin_wheel=plugin_wheel, extra_wheels=extra_wheels,
         models_wheels=models_wheels,
         vllm_wheel=vllm_wheel, vllm_common_requirements=vllm_common_requirements,
-        with_vllm=with_vllm,
+        with_vllm=with_vllm, provision_sfpi=provision_sfpi,
         weights=WeightsRef(repo="Qwen/Qwen3-4B"), mesh=Mesh(devices=1, topology="P150"),
         resources=Resources(max_num_seqs=32, block_size=64),
     )
@@ -107,6 +107,47 @@ def test_thin_prebuilt_vllm_wheel_installed_by_path_not_built(tmp_path):
     inst = (staged / "install.sh").read_text()
     assert "--no-binary vllm" not in inst                    # not built from source
     assert f'--no-deps "$HERE/wheels/{vw.name}"' in inst     # installed by path
+
+
+def test_thin_install_sh_omits_sfpi_provision_by_default(tmp_path):
+    # SFPI stays an external box dep unless the author opts in: a missing SFPI fails with guidance.
+    staged, m = _stage_thin(tmp_path)
+    assert m.deps.provision_sfpi is False
+    inst = (staged / "install.sh").read_text()
+    assert "PYSFPI" not in inst and "releases/download" not in inst
+    assert "install the matching external host package" in inst   # plain missing-SFPI message
+
+
+def test_thin_install_sh_provisions_sfpi_when_requested(tmp_path):
+    staged, m = _stage_thin(tmp_path, provision_sfpi=True)
+    assert m.deps.provision_sfpi is True
+    inst = (staged / "install.sh").read_text()
+    # The provision step (in the "SFPI missing" branch): read the wheel's sfpi-version for version +
+    # per-arch sha256, download the pinned release, sha256-verify, extract to runtime/sfpi.
+    assert "SFPI missing: provisioning" in inst
+    assert '"tt_metal", "sfpi-version"' in inst
+    assert "sfpi_%s_debian_txz_hash" in inst
+    assert "https://github.com/tenstorrent/sfpi/releases/download/%s/%s" in inst
+    assert "hashlib.sha256()" in inst and "sha256 mismatch" in inst
+    # Idempotent: provisioning is only reached when neither the local nor system SFPI is present.
+    assert '[ -e "$local_sfpi/compiler/bin/riscv-tt-elf-g++" ]' in inst
+    # Runs AFTER ttnn is installed (the requirements step) so the wheel is on disk to read.
+    assert inst.index('-r "$HERE/requirements.txt"') < inst.index("PYSFPI")
+
+
+def test_cli_package_thin_provision_sfpi_flag(tmp_path):
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    out = tmp_path / "staged"
+    res = _runner.invoke(cli.app, [
+        "package-thin", "--model-py", str(model_py), "--arch", "blackhole",
+        "--arch-name", "QwenForCausalLM", "--main-class", "model:C",
+        "--weights", "Qwen/Qwen3-4B", "--mesh", "P150", "--provision-sfpi", "--out", str(out),
+    ])
+    assert res.exit_code == 0, res.output
+    m = Manifest.from_json((out / "tt_kernel_manifest.json").read_text())
+    assert m.deps.provision_sfpi is True
+    assert "PYSFPI" in (out / "install.sh").read_text()
 
 
 def test_thin_stages_resolved_constraints_and_pinned_vllm_common(tmp_path):

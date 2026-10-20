@@ -445,7 +445,56 @@ def imported_top_level(py_path: Path) -> set:
     return names
 
 
-def _render_sfpi_validation(*, discover_ttnn: bool) -> str:
+# The "SFPI missing" branch when provisioning is opted in: fetch SFPI into the wheel's runtime/sfpi
+# from the pinned GitHub release, driven by the wheel's tt_metal/sfpi-version (version + per-arch
+# sha256). Runs only when neither the local nor the system SFPI exists, so it is idempotent. Mirrors
+# the validated direct-download fallback (ttnn.download_sfpi is broken on 0.80). Network at install.
+_SFPI_PROVISION_MISSING_BRANCH = r'''  if [ -z "$sfpi_version" ]; then
+    printf 'SFPI missing and not provisionable: this TTNN wheel declares no sfpi-version\n' >&2
+    exit 1
+  fi
+  printf 'SFPI missing: provisioning %s into %s ...\n' "$sfpi_want" "$local_sfpi" >&2
+  "$PYBIN" -I - "$TTNN_DIR" <<'PYSFPI'
+import hashlib, os, re, sys, tarfile, urllib.request
+ttnn_dir = sys.argv[1]
+runtime_dir = os.path.join(ttnn_dir, "runtime")
+meta = {}
+with open(os.path.join(ttnn_dir, "tt_metal", "sfpi-version")) as f:
+    for line in f:
+        m = re.match(r"\s*(\w+)='([^']*)'", line)
+        if m:
+            meta[m.group(1)] = m.group(2)
+version = meta.get("sfpi_version")
+arch = os.uname().machine
+sha = meta.get("sfpi_%s_debian_txz_hash" % arch)
+if not version or not sha:
+    sys.exit("SFPI: sfpi-version missing version/%s hash" % arch)
+fname = "sfpi_%s_%s_debian.txz" % (version, arch)
+url = "https://github.com/tenstorrent/sfpi/releases/download/%s/%s" % (version, fname)
+os.makedirs(runtime_dir, exist_ok=True)
+dl = os.path.join(runtime_dir, fname)
+print("SFPI: downloading", url, file=sys.stderr)
+urllib.request.urlretrieve(url, dl)
+h = hashlib.sha256()
+with open(dl, "rb") as f:
+    for chunk in iter(lambda: f.read(1 << 20), b""):
+        h.update(chunk)
+if h.hexdigest() != sha:
+    os.remove(dl)
+    sys.exit("SFPI: sha256 mismatch (expected %s, got %s)" % (sha, h.hexdigest()))
+with tarfile.open(dl, "r:*") as tar:
+    tar.extractall(runtime_dir)
+os.remove(dl)
+PYSFPI
+  if [ -e "$local_sfpi/compiler/bin/riscv-tt-elf-g++" ]; then
+    selected_sfpi="$local_sfpi"
+  else
+    printf 'SFPI provisioning did not populate %s\n' "$local_sfpi" >&2
+    exit 1
+  fi'''
+
+
+def _render_sfpi_validation(*, discover_ttnn: bool, provision: bool = False) -> str:
     """Render the SFPI gate for an installed TTNN wheel: missing or older SFPI fails, newer warns.
 
     SFPI is intentionally an external host dependency for schema-6 bundles. TT-Metal's runtime
@@ -455,12 +504,21 @@ def _render_sfpi_validation(*, discover_ttnn: bool) -> str:
     ``TT_MODEL_PRINT=1``); a wheel without ``tt_metal/sfpi-version`` skips the version check.
     ``PYBIN`` must name the bundle interpreter; ``TTNN_DIR`` may already be
     available in run.sh.
+
+    With ``provision`` (opt-in, install-time only), a MISSING SFPI is fetched into the wheel's own
+    ``runtime/sfpi`` from the pinned GitHub release — driven by the wheel's ``tt_metal/sfpi-version``
+    (``ttnn``'s own ``python -m ttnn.download_sfpi`` is broken on 0.80: the wheel omits
+    ``build/sfpi-version.json``) — instead of failing. The normal version gate then validates the
+    just-provisioned compiler. Already-present SFPI is left untouched (so it stays idempotent).
     """
     discover = (
         """TTNN_DIR="$("$PYBIN" -I -c 'import importlib.util,pathlib;s=importlib.util.find_spec("ttnn");assert s and s.origin;print(pathlib.Path(s.origin).resolve().parent)')"
 """
         if discover_ttnn else ""
     )
+    missing_branch = _SFPI_PROVISION_MISSING_BRANCH if provision else r'''  printf 'SFPI missing: TTNN requires %s; install the matching external host package\n' \
+    "$sfpi_want" >&2
+  exit 1'''
     return discover + r'''sfpi_meta="$TTNN_DIR/tt_metal/sfpi-version"
 sfpi_version=""
 sfpi_build=""
@@ -494,9 +552,7 @@ if [ -e "$local_sfpi/compiler/bin/riscv-tt-elf-g++" ]; then
 elif [ -e "$system_sfpi/compiler/bin/riscv-tt-elf-g++" ]; then
   selected_sfpi="$system_sfpi"
 else
-  printf 'SFPI missing: TTNN requires %s; install the matching external host package\n' \
-    "$sfpi_want" >&2
-  exit 1
+''' + missing_branch + r'''
 fi
 gxx="$selected_sfpi/compiler/bin/riscv-tt-elf-g++"
 test -x "$gxx" || { printf 'SFPI compiler is not executable: %s\n' "$gxx" >&2; exit 1; }
@@ -630,7 +686,9 @@ def render_install_sh(manifest: Manifest) -> str:
             f'-r "$HERE/{d.requirements}" {model_wheels}'.rstrip()
         )
         # Check the external SFPI against the just-installed TTNN wheel before the expensive vLLM build.
-        steps.append(_render_sfpi_validation(discover_ttnn=True))
+        # With provision_sfpi, a missing SFPI is fetched into the wheel's runtime/sfpi here instead
+        # of failing (network at install only).
+        steps.append(_render_sfpi_validation(discover_ttnn=True, provision=d.provision_sfpi))
         # (2) vLLM core for the plugin: STOCK upstream vLLM built with VLLM_TARGET_DEVICE=empty (NOT
         # the CUDA `vllm` on PyPI). Mirrors tenstorrent/vllm-tt-plugin docs/install-vllm-tt.sh: install
         # vLLM's common deps under the TT override set (so ttnn's numpy<2 is not bumped by opencv),
@@ -1316,6 +1374,7 @@ def stage_thin_package(
     provenance: Optional[Path] = None,
     python_version: str = "3.12",
     tt_metal_version: str = "unknown",
+    provision_sfpi: bool = False,
 ) -> Manifest:
     """Materialize a v6 "thin" bundle (issue #29) and return its manifest.
 
@@ -1512,6 +1571,7 @@ def stage_thin_package(
                                     or (vllm_spec and vllm_spec.wheel)) else None),
         vllm=vllm_spec,
         model_dir=".",
+        provision_sfpi=provision_sfpi,
         extra_code_dir=extra_code_rel,
         verify=list(verify or []),
         kind=kind,
