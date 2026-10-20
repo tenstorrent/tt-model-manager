@@ -151,6 +151,18 @@ Run every check that applies; each one catches a real, observed failure mode.
 5. **Every profile this box can run** — repeat 1–3 per profile with
    `--profile <name>` (stop between profiles). Report profiles the box CANNOT run as
    not verified; never silently substitute hardware.
+6. **Quality at concurrency 1** — when you score quality subsets (GSM8K, IFEval, … through
+   the API) and the model has a batch-1 fast path (a decode path or trace bucket that runs
+   only when exactly one request is decoding, or per-bucket decode code), run them again at
+   concurrency 1, or once per special-cased bucket width. A 32-way concurrent eval puts
+   almost every decode step on the batched path: on a real package, a change to the batch-1
+   path did not move the 32-concurrent scores at all, and only a concurrency-1 run
+   exercised it. With lm-eval it is `num_concurrent` (or the concurrency argument of the
+   package's own eval script):
+   ```bash
+   lm_eval --model local-chat-completions --apply_chat_template --tasks gsm8k,ifeval --limit 250 \
+     --model_args model=<weights-id>,base_url=http://localhost:<port>/v1/chat/completions,num_concurrent=1
+   ```
 
 ## Step 5 — Stop cleanly
 
