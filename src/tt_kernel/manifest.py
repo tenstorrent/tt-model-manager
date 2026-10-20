@@ -161,7 +161,8 @@ class Deps(BaseModel):
     because it needs its own ordered build. ``model_dir`` is where ``model.py`` lives (added to
     PYTHONPATH at serve). ``extra_code_dir`` ships a tree of hand-written pure-Python model ops
     alongside ``model.py`` and is also put on PYTHONPATH (issue #127); ``verify`` holds install-time
-    ``python -c`` sanity checks. SFPI and firmware are external, box-managed deps — never in here.
+    ``python -c`` sanity checks. Firmware is an external, box-managed dep; SFPI is too by default,
+    unless ``provision_sfpi`` asks install.sh to fetch it into the installed ttnn's runtime/sfpi.
 
     ``custom_ops`` is METADATA, not an install list: at package time the tool records which of the
     shipped ``generic_op`` wheels ``model.py`` actually imports, so a reader (catalog, provenance)
@@ -196,6 +197,10 @@ class Deps(BaseModel):
     # vLLM core install (empty-target, for the plugin). None => bundle serves no vLLM (non-vLLM model).
     vllm: Optional["Vllm"] = None
     model_dir: str = "."                     # where model.py lives (bundle root), added to PYTHONPATH
+    # Opt-in: provision the SFPI kernel-JIT toolchain into the installed ttnn's runtime/sfpi at
+    # install (the pip ttnn wheel omits it). Off by default — SFPI stays an external box dep unless
+    # the author asks the bundle to self-provision it. See packaging.render_install_sh.
+    provision_sfpi: bool = False
     # A bundle-relative directory of hand-written, pure-Python model ops that ride WITH the bundle
     # (issue #127) — custom attention/decode/vision code that composes stock ttnn ops but isn't in
     # ttnn/tt-metal/tt_transformers. Staged and added to PYTHONPATH ahead of model_dir at serve, so
