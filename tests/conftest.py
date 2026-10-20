@@ -79,3 +79,9 @@ def _no_real_proc_scan(monkeypatch):
     real = container._host_claimed_devices
     monkeypatch.setattr(container, "_host_claimed_devices",
                         lambda proc_root=None: real(proc_root) if proc_root else set())
+
+
+@pytest.fixture(autouse=True)
+def _no_real_board_scan(monkeypatch, tmp_path_factory):
+    """Keep ``chip_boards`` off this host's real sysfs; board tests pass their own ``sys_root``."""
+    monkeypatch.setattr(container, "TT_SYS_CLASS", str(tmp_path_factory.getbasetemp() / "no-tt-sysfs"))

@@ -140,6 +140,8 @@ MIN_DOCKER_MAJOR = 25
 HUGEPAGES_MOUNT = "/dev/hugepages-1G"
 
 TT_DEVICE = "/dev/tenstorrent"
+#: sysfs class of the KMD; each ``tenstorrent!N`` entry has the chip's board ``tt_serial``.
+TT_SYS_CLASS = "/sys/class/tenstorrent"
 
 
 @dataclass(frozen=True)
@@ -547,8 +549,51 @@ def all_device_ids(dev_root: Optional[Path] = None) -> List[int]:
         raise DeviceScanUnavailable(f"could not list {root}: {e}") from e
 
 
-def pick_free_devices(count: int, *, dev_root: Optional[Path] = None) -> List[int]:
-    """The lowest ``count`` chip indices not already claimed by any running container.
+def chip_boards(sys_root: Optional[Path] = None) -> Dict[int, str]:
+    """Chip id -> board serial from sysfs (both chips of a P300 share one); {} when unreadable."""
+    root = sys_root or Path(TT_SYS_CLASS)
+    boards: Dict[int, str] = {}
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return boards
+    for entry in entries:
+        m = re.fullmatch(r"tenstorrent!(\d+)", entry.name)
+        if not m:
+            continue
+        try:
+            serial = (entry / "tt_serial").read_text().strip()
+        except OSError:
+            continue
+        if serial:
+            boards[int(m.group(1))] = serial
+    return boards
+
+
+def _choose_chips(free: Sequence[int], count: int, boards: Dict[int, str]) -> Optional[List[int]]:
+    """Pick ``count`` of the ``free`` chips: whole boards for a multi-chip mesh, and a chip
+    from an already part-used board for a smaller one. None when no whole boards are left."""
+    members: Dict[str, List[int]] = {}
+    for chip, serial in boards.items():
+        members.setdefault(serial, []).append(chip)
+    sizes = {len(m) for m in members.values()}
+    if not boards or not set(free) <= set(boards) or len(sizes) != 1:
+        return sorted(free)[:count]
+    size = sizes.pop()
+    if count >= size > 1 and count % size == 0:
+        whole = sorted((sorted(m) for m in members.values() if set(m) <= set(free)), key=min)
+        if len(whole) < count // size:
+            return None
+        return sorted(c for m in whole[:count // size] for c in m)
+    # Fewer chips than a board: fill boards that are already partly in use first.
+    free_on_board = {s: sum(c in free for c in m) for s, m in members.items()}
+    return sorted(sorted(free), key=lambda c: (free_on_board[boards[c]], c))[:count]
+
+
+def pick_free_devices(count: int, *, dev_root: Optional[Path] = None,
+                      sys_root: Optional[Path] = None) -> List[int]:
+    """``count`` chip indices not already claimed by any running container, chosen by
+    ``_choose_chips``: whole boards for a multi-chip mesh, else the lowest free ids.
 
     Ascending and deterministic: the common, uncontended case always lands on the same low
     indices, which matches what a model's own hardcoded env (if any) is likely to assume --
@@ -580,7 +625,14 @@ def pick_free_devices(count: int, *, dev_root: Optional[Path] = None) -> List[in
             f"(chip(s) {', '.join(map(str, sorted(claimed))) or 'none'} in use); "
             f"this profile needs {count}"
         )
-    return free[:count]
+    chosen = _choose_chips(free, count, chip_boards(sys_root))
+    if chosen is None:
+        raise ContainerError(
+            f"chip(s) {', '.join(map(str, free))} are free but do not make up {count} chip(s) "
+            "on whole boards, which a multi-chip mesh needs; stop the serve that shares a "
+            "board with them, or pin chips with --device-id"
+        )
+    return chosen
 
 
 def ensure_devices_free(device_ids: Sequence[int], *,
