@@ -24,7 +24,7 @@ _runner = CliRunner()
 
 def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=None,
                 models_wheels=None, vllm_wheel=None, with_vllm=True, constraints=None,
-                vllm_common_requirements=None):
+                vllm_common_requirements=None, mesh_shape_env=None):
     model_py = tmp_path / "model.py"
     model_py.write_text("class QwenForCausalLM:  # the runner\n    pass\n")
     staged = tmp_path / "thin"
@@ -36,7 +36,7 @@ def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=Non
         plugin_wheel=plugin_wheel, extra_wheels=extra_wheels,
         models_wheels=models_wheels,
         vllm_wheel=vllm_wheel, vllm_common_requirements=vllm_common_requirements,
-        with_vllm=with_vllm,
+        with_vllm=with_vllm, mesh_shape_env=mesh_shape_env,
         weights=WeightsRef(repo="Qwen/Qwen3-4B"), mesh=Mesh(devices=1, topology="P150"),
         resources=Resources(max_num_seqs=32, block_size=64),
     )
@@ -538,3 +538,59 @@ def test_cli_package_thin_is_marked_beta_and_unsupported(tmp_path):
     # It points at the v5.1 container path, not the legacy v5 fat bundle.
     assert "tt-model package --container" in _plain(res.output)
     assert "v5 self-contained" not in _plain(res.output)
+
+
+# --- mesh_shape_env + serve --chips (turnkey multichip serve) -------------------------------------
+
+def test_thin_mesh_shape_env_round_trips_and_is_exported(tmp_path):
+    staged, m = _stage_thin(tmp_path, mesh_shape_env="MOSS_MESH")
+    assert m.deps.mesh_shape_env == "MOSS_MESH"
+    m2 = Manifest.from_json((staged / "tt_kernel_manifest.json").read_text())
+    assert m2.deps.mesh_shape_env == "MOSS_MESH"
+    run = (staged / "run.sh").read_text()
+    # run.sh hands the model the mesh shape through its declared var, defaulting to MESH_DEVICE.
+    assert 'export MOSS_MESH="${MOSS_MESH:-$MESH_DEVICE}"' in run
+    # serve-time chip count drives both the fence and the mesh shape.
+    assert 'NCHIPS="${TT_MODEL_CHIPS:-1}"' in run
+    assert '_DEFAULT_MESH="1x$NCHIPS"' in run
+
+
+def test_thin_without_mesh_shape_env_exports_no_extra_var(tmp_path):
+    staged, m = _stage_thin(tmp_path)
+    assert m.deps.mesh_shape_env is None
+    run = (staged / "run.sh").read_text()
+    assert "MOSS_MESH" not in run and ":-$MESH_DEVICE}" not in run
+
+
+def test_cli_package_thin_mesh_shape_env_flag(tmp_path):
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    out = tmp_path / "staged"
+    res = _runner.invoke(cli.app, [
+        "package-thin", "--model-py", str(model_py), "--arch", "blackhole",
+        "--arch-name", "QwenForCausalLM", "--main-class", "model:C",
+        "--weights", "Qwen/Qwen3-4B", "--mesh", "P150", "--mesh-shape-env", "MOSS_MESH",
+        "--out", str(out),
+    ])
+    assert res.exit_code == 0, res.output
+    m = Manifest.from_json((out / "tt_kernel_manifest.json").read_text())
+    assert m.deps.mesh_shape_env == "MOSS_MESH"
+
+
+def test_cli_package_thin_rejects_a_bad_mesh_shape_env(tmp_path):
+    model_py = tmp_path / "model.py"
+    model_py.write_text("class C: pass\n")
+    res = _runner.invoke(cli.app, [
+        "package-thin", "--model-py", str(model_py), "--arch", "blackhole",
+        "--arch-name", "QwenForCausalLM", "--main-class", "model:C",
+        "--mesh-shape-env", "1BAD NAME", "--out", str(tmp_path / "staged"),
+    ])
+    assert res.exit_code != 0
+    assert "mesh-shape-env" in _plain(res.output)
+
+
+def test_cli_serve_chips_must_be_positive(tmp_path):
+    # Validated before any Hub access, so no network/install is needed to reach the error.
+    res = _runner.invoke(cli.app, ["serve", "org/model", "--chips", "0"])
+    assert res.exit_code != 0
+    assert "--chips" in _plain(res.output)

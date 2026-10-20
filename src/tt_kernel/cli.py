@@ -8,13 +8,14 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import urllib.request
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import click
 import typer
@@ -774,6 +775,10 @@ def package_thin(
         None, "--weights-ignore", help="Glob excluded from the weights prefetch (repeatable)."),
     mesh_topology: Optional[str] = typer.Option(None, "--mesh", help='Device topology, e.g. "P150" / "1x4".'),
     mesh_fabric: Optional[str] = typer.Option(None, "--mesh-fabric", help="TT fabric configuration, e.g. FABRIC_1D."),
+    mesh_shape_env: Optional[str] = typer.Option(
+        None, "--mesh-shape-env", help='Env var the model reads its mesh shape ("1xN") from, e.g. '
+        '"MOSS_MESH". `serve --chips N` and run.sh set it to the served mesh so a multichip model '
+        "picks up the shape automatically. Omit for a single-chip model."),
     device_count: int = typer.Option(1, "--device-count"),
     python_version: str = typer.Option("3.12", "--python", help="Pinned interpreter (uv provisions)."),
     tt_metal_version: Optional[str] = typer.Option(
@@ -838,6 +843,9 @@ def package_thin(
                    "generates; rename the runner.")
     if kind not in THIN_KINDS:
         raise _err(f"--kind {kind!r} is not supported; use one of {THIN_KINDS}.")
+    if mesh_shape_env is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", mesh_shape_env):
+        raise _err(f"--mesh-shape-env {mesh_shape_env!r} is not a valid environment variable name "
+                   "— expected letters, digits and '_', not starting with a digit.")
     vmeta: Optional[dict] = None
     if kind == "vllm":
         if asgi_app:
@@ -940,6 +948,7 @@ def package_thin(
         weights=weights_block, device_count=device_count, mesh=mesh, env=env_map,
         resources=resources, capabilities=capabilities, readme=readme_path,
         provenance=provenance_path, python_version=python_version,
+        mesh_shape_env=mesh_shape_env,
         tt_metal_version=(
             tt_metal_version
             or packaging.pinned_ttnn_version(Path(requirements).expanduser().read_text()
@@ -1323,28 +1332,31 @@ def _install_root(entry: dict) -> Path:
                 or Path(entry.get("run_script") or "").parent)
 
 
-def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional[List[str]] = None) -> None:
+def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional[List[str]] = None,
+                          extra_env: Optional[Dict[str, str]] = None) -> None:
     """Serve a v5 self-contained bundle by running its own ``run.sh`` in its own venv.
 
     ``run.sh`` wires the engine env (LD_PRELOAD of _ttnncpp.so, TT_METAL_HOME, EXTRA_MODELS_DIR,
     fabric-off) and launches the OpenAI server from the bundle's venv — no host stack involved.
+    ``extra_env`` (e.g. ``TT_MODEL_CHIPS`` from ``serve --chips N``) is added to run.sh's env.
     """
     run_script = entry.get("run_script")
     if not run_script or not Path(run_script).is_file():
         raise _err(f"Self-contained bundle for {entry.get('repo_id')} is missing its run.sh "
                    f"({run_script}). Re-run `tt-model pull {entry.get('repo_id')}`.")
     argv = ["bash", str(run_script), *(extra_args or [])]
+    run_env = {**os.environ, **(extra_env or {})}
     typer.secho(f"[vLLM self-contained: {entry.get('repo_id')} via {run_script}]", fg=typer.colors.CYAN)
     if print_only:
         # run.sh resolves the interpreter/LD_PRELOAD/paths at runtime; ask it to echo the fully
         # resolved command + env instead of the bare `bash run.sh` line.
-        subprocess.run(argv, env={**os.environ, "TT_MODEL_PRINT": "1"})
+        subprocess.run(argv, env={**run_env, "TT_MODEL_PRINT": "1"})
         return
     # run.sh execs the server, so the PID bash writes here is the server's own.
     pid_file = _install_root(entry) / SERVE_PID_FILE
     argv = ["bash", "-c", 'echo $$ > "$0" && exec "$@"', str(pid_file), *argv]
     try:
-        raise typer.Exit(code=subprocess.run(argv).returncode)
+        raise typer.Exit(code=subprocess.run(argv, env=run_env).returncode)
     except KeyboardInterrupt:
         raise typer.Exit(code=130)
     finally:
@@ -1450,6 +1462,14 @@ def serve(
         "(comma-separated, e.g. '0,1') instead of auto-picking free ones. The count must "
         "match what the profile needs."
     ),
+    chips: Optional[int] = typer.Option(
+        None, "--chips", help="For a v6 thin bundle: serve on this many cards instead of the "
+        "authored count. run.sh fences visibility to N dies (or the first N of a TT_VISIBLE_DEVICES "
+        "lease grant) and, for a multichip model, hands it a 1xN mesh (via MESH_DEVICE and the "
+        "bundle's mesh_shape_env). For a non-linear mesh set MESH_DEVICE yourself. The chips must "
+        "already be reset/clean (a lease release or `tt-smi -r` does this); ignored for a container "
+        "package."
+    ),
     refresh: bool = typer.Option(
         False, "--refresh", help="Before serving an already-installed package, re-pull it if "
         "the Hub has a newer revision (so a republished source isn't served with stale launch "
@@ -1472,6 +1492,10 @@ def serve(
     """
     repo_id, revision = _split_revision(repo_id)
     extra_args = list(ctx.args)  # anything after the bundle id is passed through to vLLM
+    if chips is not None and chips < 1:
+        raise _err(f"--chips must be >= 1, got {chips}.")
+    # run.sh reads the served chip count from TT_MODEL_CHIPS (fence + mesh shape derive from it).
+    serve_env = {"TT_MODEL_CHIPS": str(chips)} if chips is not None else None
 
     # --- container (v5.1) --------------------------------------------------------------
     # A pulled package, or a local manifest path (how an author serves a build before
@@ -1520,6 +1544,9 @@ def serve(
             refreshed = container_cli.refresh_if_newer(repo_id, print_only=print_only)
             if refreshed is not None:
                 cmani = refreshed
+        if chips is not None:
+            console.note(f"--chips applies only to v6 thin bundles; {repo_id} is a container "
+                         "package (use --profile / --device-id), so it was ignored", marker="•")
         src = Path(repo_id).parent if Path(repo_id).is_file() else \
             container_cli.pull_dir(repo_id)
         try:
@@ -1586,7 +1613,7 @@ def serve(
             entry = localdb.get(repo_id) or entry  # re-read: the refresh may have updated the record
         elif not local_only and not no_update_check:
             _warn_if_update_available(repo_id, entry)
-        _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
+        _serve_self_contained(entry, print_only=print_only, extra_args=extra_args, extra_env=serve_env)
         return
 
     if local_only:
@@ -1612,7 +1639,7 @@ def serve(
                                 revision=revision, resolved_revision=resolved)
     entry = localdb.get(repo_id)
     if entry and entry.get("self_contained"):
-        _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
+        _serve_self_contained(entry, print_only=print_only, extra_args=extra_args, extra_env=serve_env)
 
 
 # ---------------------------------------------------------------------------- curl
