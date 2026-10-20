@@ -381,6 +381,15 @@ run on a build host; a later `serve` starts the container. Around them:
   that only a host reboot restores, and the boot then wedges at the first large host→device
   DMA (`could only pin N of M pages` in dmesg). If a stop reports anything but a clean
   shutdown and the next boot hangs early, reboot the host rather than retrying (issue #107).
+  A reset of only some chips can leave the fabric to the others stale: on a QuietBox 2, a
+  4-chip mesh after a reset of chips 2,3 hung once and failed with `Fabric Router Sync:
+  Timeout` once. So the reset also covers the host's other chips when nothing holds them: no
+  running container claims them, a scan of every process (as root, or through passwordless
+  `sudo -n`) finds none that holds UMD's chip lock for them or is `tt-smi`/`tt-flash`, and
+  their lock in `/dev/shm` has no live holder. A process that only keeps a chip open without
+  the lock (a telemetry daemon) does not count. A chip any check cannot clear is left alone
+  and named, because under rootless Docker another user's chip can look free; before a mesh
+  that spans it, reset every chip once nothing else uses them.
 - `tt-model rm you/my-model` — removes a *pulled* container package, including its HF
   snapshot. `--keep-cache` keeps the JIT/weight caches for a fast re-pull;
   `--include-weights` also deletes the weights from the HF cache (off by default — they

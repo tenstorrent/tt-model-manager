@@ -640,9 +640,11 @@ def test_reset_mesh_runs_tt_smi_from_the_image_not_the_host():
 
 
 def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="",
-                 inspect_rc=0, now_claimed=None):
+                 inspect_rc=0, now_claimed=None, in_use=None):
     """``now_claimed`` is what the pre-reset re-scan should report as taken by someone
-    else -- i.e. a serve that grabbed the chip in the gap after the container was removed."""
+    else -- i.e. a serve that grabbed the chip in the gap after the container was removed.
+    ``in_use`` is what ``chips_in_use`` says about the host's other chips (default: all held,
+    so the reset stays scoped to the container's own chips)."""
     calls = []
 
     class R:
@@ -671,7 +673,15 @@ def _fake_docker(monkeypatch, *, running_state, exit_code, devices_label="",
         return R()
 
     monkeypatch.setattr(container, "_run", fake)
+    monkeypatch.setattr(container, "all_device_ids", lambda dev_root=None: [0, 1, 2, 3])
+    monkeypatch.setattr(container, "chips_in_use", lambda chips: {
+        c: "held" for c in chips if in_use is None or c in in_use})
     return calls
+
+
+def _reset_devices(calls):
+    reset = next(c for c in calls if "--entrypoint" in c)
+    return [reset[i + 1].split(":")[0] for i, a in enumerate(reset) if a == "--device"]
 
 
 def test_a_clean_sigterm_stop_does_not_reset_the_mesh(monkeypatch):
@@ -704,6 +714,38 @@ def test_a_dirty_stop_resets_only_the_chips_that_container_held(monkeypatch):
         "/dev/tenstorrent/1:/dev/tenstorrent/1",
     ]
     assert "/dev/tenstorrent" not in reset  # never the whole directory
+
+
+def test_a_scoped_reset_names_the_chips_it_left_out(monkeypatch):
+    """A mesh spanning a reset chip and one that was not reset can fail to bring up its fabric
+    (seen on a QuietBox 2), so the caller must be told which chips the reset did not cover."""
+    _fake_docker(monkeypatch, running_state="true", exit_code="137", devices_label="2,3")
+    outcome = container.stop("c", image="img")
+    assert outcome.reset == "ran" and outcome.left_out == (0, 1)
+
+
+def test_a_whole_directory_reset_leaves_no_chip_out(monkeypatch):
+    _fake_docker(monkeypatch, running_state="true", exit_code="137")
+    assert container.stop("c", image="img").left_out == ()
+
+
+def test_a_dirty_stop_also_resets_the_chips_nothing_holds(monkeypatch):
+    """A reset of chips 2,3 alone left the fabric to chips 0,1 stale, and the next 4-chip mesh
+    failed (QuietBox 2, twice). When nothing holds 0 and 1 they join the reset."""
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
+                         devices_label="2,3", in_use={})
+    outcome = container.stop("c", image="img")
+    assert outcome.reset == "ran" and outcome.also_reset == (0, 1) and outcome.left_out == ()
+    assert _reset_devices(calls) == [f"/dev/tenstorrent/{i}" for i in range(4)]
+
+
+def test_a_dirty_stop_never_resets_a_chip_something_may_hold(monkeypatch):
+    calls = _fake_docker(monkeypatch, running_state="true", exit_code="137",
+                         devices_label="2,3", in_use={1})
+    outcome = container.stop("c", image="img")
+    assert outcome.also_reset == (0,) and outcome.left_out == (1,)
+    assert _reset_devices(calls) == ["/dev/tenstorrent/0", "/dev/tenstorrent/2",
+                                     "/dev/tenstorrent/3"]
 
 
 def test_a_chip_taken_since_the_removal_is_not_reset_under_the_new_owner(monkeypatch):
