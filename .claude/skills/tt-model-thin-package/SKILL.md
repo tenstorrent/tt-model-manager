@@ -51,7 +51,7 @@ Answer each before building anything. A "no" is a stop-and-fix, not a footnote.
    it still depends on another model.
 3. **Does any tooling module import your model back?** It must not, or a tooling-only wheel breaks.
 4. **Do you have a fully resolved `constraints.txt`?** Without one, Step 4's install can silently
-   resolve stale networking packages (see Known issues).
+   resolve different versions than the ones you tested.
 5. **What does the model need at serve time?** Max context, sequences, block size, the
    `tt` additional config (fabric, trace region), env, tool and reasoning parsers. Copy these
    from the configuration you have actually validated; do not guess.
@@ -191,13 +191,6 @@ Re-run Step 5's checks and confirm the result matches Step 5 (same greedy text).
 
 Remove each note when its fix lands.
 
-- **The requirements step ranks the PyTorch CPU index above PyPI.** uv then takes any package that
-  index carries — `certifi`, `urllib3`, `requests`, `idna` — *only* from it, at a single years-old
-  version. With `--constraints` the install fails loudly; **without, it silently installs a stale
-  CA bundle and old `requests`/`urllib3`**. That is why `--constraints` is required here, and why
-  the tooling wheel goes through `--ops-wheel` (installed by path after vLLM) rather than
-  `--models-wheel`. Once tt-transformers publishes, do not pin it in `requirements.txt` until this
-  is fixed.
 - **`deps.custom_ops` reads only `model.py`.** Hence the explicit ops import in Step 2d.
 - **Serving a local v6 path errors misleadingly** ("not a tt-model bundle"). Use `run.sh` (Step 5).
 
