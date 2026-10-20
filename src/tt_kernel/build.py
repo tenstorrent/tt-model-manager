@@ -1335,9 +1335,12 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
             detail.append(f"{p.max_model_len:,}-token context")
         if p.max_num_seqs:
             detail.append(f"up to {p.max_num_seqs} concurrent sequences")
+        # No profile table here, so the profile's description (e.g. KV capacity) goes inline.
+        note = " ".join((p.description or "").split())
         lines += [
             f"Runs on Tenstorrent **{p.hardware}** (mesh `{p.mesh_device}`)"
-            + (" — " + ", ".join(detail) if detail else "") + ".",
+            + (" — " + ", ".join(detail) if detail else "") + "."
+            + (f" {note}" if note else ""),
             "",
         ]
     else:
