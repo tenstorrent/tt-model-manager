@@ -147,3 +147,28 @@ def test_invoked_as_legacy(monkeypatch):
     assert compat.invoked_as_legacy() is True
     monkeypatch.setattr("sys.argv", ["/usr/bin/tt-model", "serve", "x"])
     assert compat.invoked_as_legacy() is False
+
+
+
+def test_localdb_atomic_write_and_corrupt_index_recovery(tmp_path, monkeypatch, capsys):
+    """#197: a truncated installed.json is quarantined and recovered from pulled/ manifests
+    rather than silently wiping every other cached bundle."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    pulled = tmp_path / "tt-model" / "pulled" / "org__existing"
+    pulled.mkdir(parents=True)
+    (pulled / "tt_kernel_manifest.json").write_text(
+        '{"schema_version": "5.1", "container": {"repo": "org/existing"}}'
+    )
+    idx = localdb._index_path()
+    idx.parent.mkdir(parents=True, exist_ok=True)
+    idx.write_text('{"truncated": ')
+
+    localdb.record("org/new", {"repo_id": "org/new", "container": True})
+
+    entries = {e["repo_id"]: e for e in localdb.all_entries()}
+    assert "org/existing" in entries
+    assert "org/new" in entries
+    corrupt_files = list(idx.parent.glob("installed.json.corrupt-*"))
+    assert len(corrupt_files) == 1
+    out = " ".join(capsys.readouterr().out.split())
+    assert "unreadable and moved to" in out
