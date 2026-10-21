@@ -985,6 +985,8 @@ def test_a_rendered_card_repoints_cleanly_end_to_end(tmp_path):
     out = readme.read_text()
     assert "tt serve pushed/model" in out
     assert "Without tt-cli: `tt-model serve pushed/model`." in out
+    assert "https://huggingface.co/pushed/model/discussions" in out
+    assert "https://huggingface.co/authored/model/discussions" not in out
     # No generated Quickstart COMMAND still names the authored repo (prose lede may).
     assert "pull  authored/model" not in out and "serve authored/model" not in out
 
