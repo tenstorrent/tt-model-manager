@@ -9,6 +9,7 @@ tagged ``tt-model-cache`` so ``search`` can filter for it.
 
 from __future__ import annotations
 
+import glob
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ from tqdm import tqdm as _tqdm
 
 from . import MANIFEST_NAME, TT_MODEL_CATALOG_TAG, TT_MODEL_TAG
 from .manifest import Manifest
+from .packaging import METADATA_DIR, WHEELS_DIR
 
 _REPO_TYPE = "model"
 
@@ -85,8 +87,14 @@ def _foreign_overwrites(api, repo_id: str, folder: Path) -> List[str]:
     return sorted((local & remote) - {".gitattributes"})
 
 
-def push_folder(repo_id: str, folder: Path, commit_message: str, *,
-                refuse_foreign: bool = False) -> None:
+def push_folder(
+    repo_id: str,
+    folder: Path,
+    commit_message: str,
+    *,
+    refuse_foreign: bool = False,
+    replace: bool = False,
+) -> None:
     """Upload an entire staged bundle folder. Large binaries go to LFS automatically.
 
     ``upload_folder`` takes no ``tqdm_class``, so the bridge here silences HF's writers and
@@ -102,20 +110,34 @@ def push_folder(repo_id: str, folder: Path, commit_message: str, *,
     ``.gitattributes`` is HF's own LFS config, so neither is swept.
 
     ``refuse_foreign`` raises :class:`ForeignFilesError` instead of overwriting files in a
-    repo that is not a tt-model bundle yet.
+    repo that is not a tt-model bundle yet. ``replace`` also removes stale files under the
+    directories the stage ships, in a repo that is already a bundle; top-level files and
+    other directories (card, LICENSE, weights, images) are never swept. ``wheels/`` and
+    ``vllm_models/`` are always tt-model's to own, so ``replace`` prunes stale files under
+    them even when this stage ships neither directory -- including any a human added there
+    by hand. It only prunes in a repo that already carries a bundle manifest.
     """
     api = _api()
     if refuse_foreign:
         clobbered = _foreign_overwrites(api, repo_id, folder)
         if clobbered:
             raise ForeignFilesError(repo_id, clobbered)
+    delete_patterns = ["code/**", "image/**"]
+    if replace:
+        local = {p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file()}
+        # Dirs the stage ships, plus the ones tt-model always owns, so a bundle that stops
+        # shipping wheels still loses its old ones.
+        shipped_dirs = {f.split("/", 1)[0] for f in local if "/" in f} | {WHEELS_DIR, METADATA_DIR}
+        remote = set(api.list_repo_files(repo_id=repo_id, repo_type=_REPO_TYPE))
+        stale = [f for f in remote - local if "/" in f and f.split("/", 1)[0] in shipped_dirs]
+        delete_patterns = sorted(glob.escape(f) for f in stale) if MANIFEST_NAME in remote else []
     with progress_bridge(f"Uploading to {repo_id}"):
         api.upload_folder(
             repo_id=repo_id,
             repo_type=_REPO_TYPE,
             folder_path=str(folder),
             commit_message=commit_message,
-            delete_patterns=["code/**", "image/**"],
+            delete_patterns=delete_patterns,
         )
 
 

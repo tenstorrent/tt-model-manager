@@ -19,6 +19,7 @@ import errno
 import re
 import shlex
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import List, Optional
@@ -28,7 +29,10 @@ from .boot_progress import BootTracker, diagnose_boot, summarize
 from .build import BuildError, build_log_path, finalize, run_build, stage
 from .container_manifest import (
     ContainerManifestError,
+    PERFORMANCE_COLUMNS,
+    card_performance_gaps,
     card_publish_gaps,
+    card_retired_notes,
     hardware_chip_count,
 )
 from .launchers import launcher_for
@@ -85,6 +89,18 @@ def card_gap_warning(gaps: List[str]) -> Optional[str]:
     )
 
 
+def card_performance_warning(gaps: List[str]) -> Optional[str]:
+    """The one-line warning `package` prints when an LLM performance table is incomplete."""
+    if not gaps:
+        return None
+    names = [g.upper() if g in ("isl", "osl", "n", "ttft", "e2el") else g for g in gaps]
+    if len(gaps) == len(PERFORMANCE_COLUMNS):
+        return ("card.performance has no table with the required columns ("
+                + ", ".join(names) + "), one row per serving profile")
+    return ("card.performance's table has no " + ", ".join(names)
+            + " column" + ("s" if len(gaps) > 1 else ""))
+
+
 def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> Path:
     """``tt-model package --container <manifest.yaml>``.
 
@@ -133,6 +149,13 @@ def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> 
     warning = card_gap_warning(card_publish_gaps(staged.manifest.card))
     if warning:
         console.note(warning, marker="!", style="warning")
+    warning = card_performance_warning(
+        card_performance_gaps(staged.manifest.card, staged.manifest.kind))
+    if warning:
+        console.note(warning, marker="!", style="warning")
+    for note in card_retired_notes(staged.manifest.card):
+        console.note(f"{note} — update tt-model.yaml before these keys are removed",
+                     marker="!", style="warning")
 
     console.phase("Stage")
     console.note(f"{len(staged.code_tree)} code path(s) → code/", marker="•")
@@ -180,22 +203,14 @@ def is_package_dir(path: Path) -> Optional[Manifest]:
     return m if m.is_container else None
 
 
-# The generated Quickstart's command lines, anchored on the COMMAND, not the repo that
-# happens to be on them. `render_model_card` emits four (two `tt` CLI, two `tt-model`):
-#     tt model pull <repo>
-#     tt serve <repo>
-#     tt-model pull  <repo> --with-weights
-#     tt-model serve <repo>
-# Anchoring on the old repo instead (an earlier version of this fix) only worked for the
-# FIRST redirected push: `built.repo` never moves, so once the card no longer literally
-# contains it every later push matched nothing and silently did nothing — #109 again, and
-# worse when a plain push after a redirected one left the canonical repo's card naming
-# someone else's repo (thanks @anirudTT for catching this). The command prefix is fixed, so
-# the swap works no matter what repo is currently on the line and is idempotent by nature.
-# The `\S+/\S+` (a `namespace/name`) means a stray prose line like `tt serve is fast` is not
-# mistaken for a command — a repo id always has exactly one slash, prose words do not.
+# Generated Quickstart command lines, anchored on the command (never the old repo) so every
+# push repoints correctly; the fence patterns also cover cards staged by older versions.
 _QUICKSTART_CMD = re.compile(
     r"(?m)^(tt model pull |tt serve |tt-model pull  |tt-model serve )(\S+/\S+)"
+)
+# The generated one-line tt-model path; anchored on its fixed prefix so author prose is safe.
+_QUICKSTART_INLINE = re.compile(
+    r"(?m)^(Without tt-cli: `tt-model serve )[^\s`]+/[^\s`]+(`\.)$"
 )
 
 
@@ -215,6 +230,7 @@ def _repoint_card_quickstart(readme: Path, new_repo: str) -> bool:
         return False
     text = readme.read_text()
     swapped = _QUICKSTART_CMD.sub(lambda mo: mo.group(1) + new_repo, text)
+    swapped = _QUICKSTART_INLINE.sub(lambda mo: mo.group(1) + new_repo + mo.group(2), swapped)
     if swapped == text:
         return False
     readme.write_text(swapped)
@@ -664,7 +680,7 @@ def _space_preflight(ref) -> None:
     )
 
 
-def _weights_notice(manifest: Manifest, target: Optional[str]) -> None:
+def _weights_notice(ref, target: Optional[str]) -> None:
     """Say so when serve is about to boot without the weights on the host.
 
     The in-container fetch is a supported path — the HF cache is bind-mounted, so the bytes
@@ -679,7 +695,6 @@ def _weights_notice(manifest: Manifest, target: Optional[str]) -> None:
     a different fix (resume, not restart), and telling the user how much is already on disk
     is what stops them deleting it.
     """
-    ref = manifest.weights
     at = f"@{ref.revision[:8]}" if ref.revision else ""
     if has_partial_download(ref):
         head = (f"weights {ref.repo_id}{at}: a download was interrupted — "
@@ -781,43 +796,44 @@ def ensure_weights(manifest: Manifest, target: Optional[str], *,
     a refusal (``_weights_incomplete_error``) rather than the advisory note. ``no_weights`` is
     the escape hatch: the user has said they know better, so it stays a note.
     """
-    ref = manifest.weights
-    if ref is None:
+    refs = manifest.weight_refs
+    if not refs:
         return
-    at = f"@{ref.revision[:8]}" if ref.revision else ""
-    pinned = _pinned_weights_env(ref, profile) if profile is not None else None
-    if no_weights or local_only:
-        # The one place a local verdict is still needed, because fetching is off the table.
-        # `.incomplete` blobs are checked too: a resolvable-but-partial snapshot would
-        # otherwise read as present and cost the user the warning.
-        cached = _cached_locally(ref)
-        if cached is None or has_partial_download(ref):
-            if pinned and not no_weights:
-                raise _weights_incomplete_error(ref, target, pinned)
-            _weights_notice(manifest, target)
-        else:
-            _ensure_default_ref(cached)
-            console.note(f"weights {ref.repo_id}{at} already on host", marker="•")
-        return
+    for ref in refs:
+        at = f"@{ref.revision[:8]}" if ref.revision else ""
+        pinned = _pinned_weights_env(ref, profile) if profile is not None else None
+        if no_weights or local_only:
+            # The one place a local verdict is still needed, because fetching is off the table.
+            # `.incomplete` blobs are checked too: a resolvable-but-partial snapshot would
+            # otherwise read as present and cost the user the warning.
+            cached = _cached_locally(ref)
+            if cached is None or has_partial_download(ref):
+                if pinned and not no_weights:
+                    raise _weights_incomplete_error(ref, target, pinned)
+                _weights_notice(ref, target)
+            else:
+                _ensure_default_ref(cached)
+                console.note(f"weights {ref.repo_id}{at} already on host", marker="•")
+            continue
 
-    label = f"weights {ref.repo_id}{at}"
-    if has_partial_download(ref):
-        # "Resuming" reads as a stall otherwise, and the user is owed the reason their last
-        # attempt left bytes behind here.
-        label += " — resuming a partial download"
-    _space_preflight(ref)
+        label = f"weights {ref.repo_id}{at}"
+        if has_partial_download(ref):
+            # "Resuming" reads as a stall otherwise, and the user is owed the reason their last
+            # attempt left bytes behind here.
+            label += " — resuming a partial download"
+        _space_preflight(ref)
 
-    try:
-        # progress_bridge silences HF's own tqdm/xet writers and returns the tqdm_class that
-        # routes their byte counts into the activity row -- the same treatment
-        # `hub.download_bundle` gets. Without it this download writes bars straight to the
-        # terminal, on top of whatever else owns the line.
-        with console.step(label) as st, hub.progress_bridge(label) as tqdm_class:
-            snapshot = _download_weights(ref, tqdm_class=tqdm_class)
-            _ensure_default_ref(snapshot)
-            st.detail(str(snapshot))
-    except Exception as e:  # noqa: BLE001
-        _weights_failed(ref, e, target, pinned=pinned)
+        try:
+            # progress_bridge silences HF's own tqdm/xet writers and returns the tqdm_class that
+            # routes their byte counts into the activity row -- the same treatment
+            # `hub.download_bundle` gets. Without it this download writes bars straight to the
+            # terminal, on top of whatever else owns the line.
+            with console.step(label) as st, hub.progress_bridge(label) as tqdm_class:
+                snapshot = _download_weights(ref, tqdm_class=tqdm_class)
+                _ensure_default_ref(snapshot)
+                st.detail(str(snapshot))
+        except Exception as e:  # noqa: BLE001
+            _weights_failed(ref, e, target, pinned=pinned)
 
 
 def _weights_failed(ref, exc: BaseException, target: Optional[str], *,
@@ -1483,44 +1499,48 @@ def describe_pulled(entry: dict) -> dict:
 # --------------------------------------------------------------------------------- rm
 
 
-def hf_cache_dir(repo_id: str) -> Optional[Path]:
-    """Where huggingface_hub keeps this repo's snapshot, or None if it cannot be located.
-
-    Computed with hub's own helpers rather than by string-formatting a path, so it follows
-    HF_HOME / HF_HUB_CACHE and any future layout change.
-    """
-    try:
-        from huggingface_hub.constants import HF_HUB_CACHE
-        from huggingface_hub.file_download import repo_folder_name
-    except ImportError:  # pragma: no cover - hub is a hard dependency
-        return None
-    d = Path(HF_HUB_CACHE) / repo_folder_name(repo_id=repo_id, repo_type="model")
-    return d if d.is_dir() else None
-
-
 def _tree_size(d: Path) -> str:
-    """Formatted size of a directory tree, for a message about removing or keeping it.
-
-    A cache is only worth a sentence because of how big it is — the converted-weight tree
-    is 105 GB for FLUX.2 — so the number is the message. Broken files are skipped rather
-    than raising: this only ever decorates a note.
-    """
+    """Formatted size of a directory tree, counting each file once and skipping symlinks."""
+    seen = set()
     total = 0
     for f in d.rglob("*"):
         try:
-            if f.is_file():
-                total += f.stat().st_size
+            st = f.lstat()
         except OSError:
             continue
+        if stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) not in seen:
+            seen.add((st.st_dev, st.st_ino))
+            total += st.st_size
     return console.fmt_bytes(total)
 
 
 def _purge_hf(repo_id: str, what: str) -> None:
-    d = hf_cache_dir(repo_id)
-    if d is None:
+    """Delete every cached revision of a repo through the hub, which owns the shared blob store."""
+    from huggingface_hub import scan_cache_dir
+    from huggingface_hub.file_download import repo_folder_name
+    from huggingface_hub.utils import CacheNotFound
+
+    try:
+        cache = scan_cache_dir()
+    except CacheNotFound:
         return
-    with console.step(f"removing the cached {what} ({_tree_size(d)})"):
-        shutil.rmtree(d, ignore_errors=True)
+    repo = next((r for r in cache.repos
+                 if r.repo_type == "model" and r.repo_id.lower() == repo_id.lower()), None)
+    if repo is None:
+        # An unparseable repo lands in `warnings`, not `repos`; rmtree would orphan its shared blobs.
+        folder = re.compile(re.escape(repo_folder_name(repo_id=repo_id, repo_type="model"))
+                            + r"(?![^/\\])", re.IGNORECASE)
+        for warning in cache.warnings:
+            if folder.search(str(warning)):
+                console.note(f"could not remove the cached {what} — the cache entry is "
+                             f"damaged: {warning}", marker="!", style="warning")
+        return
+    strategy = cache.delete_revisions(*(r.commit_hash for r in repo.revisions))
+    with console.step(f"removing the cached {what} ({console.fmt_bytes(strategy.expected_freed_size)})"):
+        strategy.execute()
+    if any(p.exists() for p in strategy.repos):
+        console.note(f"could not fully remove {repo.repo_path} — check its permissions",
+                     marker="!", style="warning")
 
 
 def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = False,
@@ -1598,12 +1618,14 @@ def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = Fal
     _purge_hf(repo_id, "package snapshot")
 
     # 6. weights, only when asked
-    if manifest.weights:
+    if manifest.weight_refs:
         if include_weights:
-            _purge_hf(manifest.weights.repo_id, f"weights {manifest.weights.repo_id}")
+            for ref in manifest.weight_refs:
+                _purge_hf(ref.repo_id, f"weights {ref.repo_id}")
         else:
+            repos = ", ".join(ref.repo_id for ref in manifest.weight_refs)
             console.note(
-                f"weights kept ({manifest.weights.repo_id}) — shared with other models, "
+                f"weights kept ({repos}) — shared with other models, "
                 "and not part of this package. --include-weights removes them too",
                 marker="○",
             )

@@ -35,16 +35,25 @@ violates one of these is wrong even if tests pass:
      Initiative (OCI) image rather than a venv, so the consumer needs only Docker and a
      Tenstorrent card.
    - A **v6 "thin"** bundle (schema `6`, the `deps` block, authored with `tt-model package-thin`)
-     builds the venv from pip pins (`ttnn` / `tt-metal-models`) plus bundled wheels, with no
-     embedded `ttnn` wheel and no `metal/` tree. `deps.kind` picks the serving front end
+     builds the venv from pip pins (**stock** `ttnn`) plus bundled wheels, with no embedded or
+     forked `ttnn` wheel and no `metal/` tree. tt-transformers is a **tooling** dependency only; the
+     model's own code ships in the bundle (`deps.extra_code_dir`), and custom kernels ship only as
+     `generic_op` wheels. See [docs/E2E_RECIPE_V6.md](docs/E2E_RECIPE_V6.md#the-canonical-shape). `deps.kind` picks the serving front end
      `render_run_sh` puts in `run.sh`: `"vllm"` (the default, and v6's only behavior before this
      field existed) adds an empty-target vLLM build step (the `vllm-tt-plugin` plus any
      `generic_op` wheel) and serves `vllm.entrypoints.openai.api_server`; `"tt-dit-server"` (no
      vLLM step regardless of `--vllm`/`--no-vllm`) serves `deps.app` directly with uvicorn
      instead, for a model with no tokens, KV cache, or continuous batching, mirroring the
-     same-named v5.1 CONTAINER kind (`launchers.TtDitServerLauncher`).
+     same-named v5.1 CONTAINER kind (`launchers.TtDitServerLauncher`). The model's code — and any
+     hand-written **pure-Python** ops (composing stock `ttnn`, no new C++ op or forked build) —
+     ships in `deps.extra_code_dir`, which rides in the bundle and goes on PYTHONPATH ahead of the
+     runner; `deps.verify` holds install-time sanity checks (issue #127).
 
    In every case the engine that serves is the one the bundle builds rather than a shared host install.
+   A v6 bundle's custom-op (`generic_op`) wheels are **auto-recorded in `deps.custom_ops`** from what
+   `model.py` imports — metadata only (discovery/provenance), never an install list; `--ops-wheel`
+   shipping and the by-path install are unchanged. Only `model.py`'s own imports are read, so a
+   model whose code lives in `extra_code/` must import its ops wheel in `model.py` to be recorded.
 5. **Manifest support is gated on `SUPPORTED_SCHEMAS`.** A bundle whose `schema_version` is not
    in `manifest.py`'s `SUPPORTED_SCHEMAS` is refused ("re-publish the bundle with a current
    `tt-model`") rather than silently half-read. Bump `SCHEMA_VERSION` only for a genuinely new
@@ -70,8 +79,8 @@ violates one of these is wrong even if tests pass:
    pytest            # expected: all pass (no hardware, no network)
    ```
 5. If the change touches the serve/device path, validate on hardware (see
-   `docs/thin_packages.md` → Testing, or the `tt-model-package-test` skill for a container
-   package) — package → pull → serve → `curl`.
+   `docs/E2E_RECIPE_V6.md` → Step 2b and the `tt-model-thin-package` skill for a v6 bundle, or the
+   `tt-model-package-test` skill for a container package) — package → pull → serve → `curl`.
 6. Commit messages: imperative subject and a body explaining *why* — the rationale that
    doesn't belong in a code comment goes here. **No AI attribution**: no `Co-Authored-By`
    trailer, no "Generated with Claude Code", no mention of Claude or Anthropic, in commits
@@ -145,30 +154,49 @@ this path is [docs/E2E_RECIPE_V5.1.md](docs/E2E_RECIPE_V5.1.md).
 There is one **venv-based authoring path**, also self-contained (a consumer needs only a card
 and firmware):
 
-- **v6 "thin"**: `tt-model package-thin …` builds the venv from pip pins (`ttnn` /
-  `tt-metal-models`) plus bundled wheels (`vllm-tt-plugin` plus any `generic_op`). Gated on
-  `tt-metal-models` publishing (`tt-metal#54478`) and `tt_transformers` being broken out; the
-  generated `requirements.txt` ships with a TODO pin until then. Design:
-  [docs/thin_packages.md](docs/thin_packages.md); copy-paste recipe:
-  [docs/E2E_RECIPE_V6.md](docs/E2E_RECIPE_V6.md).
+- **v6 "thin"**: `tt-model package-thin …` builds the venv from pip pins (**stock** `ttnn`) plus
+  bundled wheels. For this path the repo ships the `tt-model-thin-package` skill (same two
+  locations); follow it rather than improvising. Copy-paste recipe:
+  [docs/E2E_RECIPE_V6.md](docs/E2E_RECIPE_V6.md); design and `deps` schema:
+  [docs/thin_packages.md](docs/thin_packages.md).
+
+  The canonical v6 bundle has one right answer per layer — use it, and do not reproduce the
+  alternatives that exist in published bundles:
+
+  | layer | canonical | do NOT |
+  |---|---|---|
+  | engine | stock `ttnn` from PyPI | ship a forked or custom-built `ttnn` |
+  | custom kernels | a `generic_op` wheel (`--ops-wheel`) | compile kernels into `ttnn` |
+  | tooling | tt-transformers, **tooling only** | contribute the model *into* tt-transformers |
+  | model code | inside the bundle (`--extra-code`) | pin a whole-`models/`-tree wheel (e.g. `tt-metal-models`) to run one model |
+  | dependency safety | `--constraints`, fully resolved | rely on index order; index options in `requirements.txt` |
+  | capabilities | `--tool-parser` / `--reasoning-parser` | leave them unset |
 
 ### The canonical sequence
 
-1. **Bring up** the model on `tt-metal-community`.
-2. **package-thin** (producer). Pushes to HF unless you pass `--out <dir>` to stage locally.
-   Omit `--requirements` and it writes the template with the `tt-metal-models` TODO pin:
+1. **Bring up** the model as **its own package** against stock `ttnn` and tt-transformers'
+   tooling; custom kernels as a `generic_op` wheel.
+2. **Lay out** the inputs: a tooling-only tt-transformers wheel, the model in `extra_code/`
+   (every import proven to resolve), a `model.py` that imports the ops wheel, `requirements.txt`
+   with no index options, a fully resolved `constraints.txt`, and `--verify` guards.
+3. **package-thin, staged** (producer). **Omit the positional `<org>/<name>`**, which pushes:
    ```
-   tt-model package-thin <org>/<name> --model-py model.py --requirements requirements.txt \
-     [--plugin-wheel …] [--ops-wheel …] --arch <isa> --arch-name <HFArch> \
-     --main-class <module:Class> --weights <hf-id> --mesh <mesh>
+   tt-model package-thin --out <dir> --model-py model.py --extra-code extra_code \
+     --requirements requirements.txt --constraints constraints.txt \
+     --plugin-wheel … --ops-wheel <ops>.whl --ops-wheel <tooling>.whl --vllm-wheel … \
+     --arch <isa> --arch-name <HFArch> --main-class model:<Class> --weights <hf-id> \
+     --mesh <mesh> --tool-parser … --reasoning-parser … --verify '…'
    ```
-3. **pull** (consumer): `tt-model pull <org>/<name>` (`--with-weights` to pre-download weights).
-4. **serve** (consumer): `tt-model serve <org>/<name> [--port N] [--print] [--local-only]`.
-5. **verify**: `curl .../v1/chat/completions` returns coherent text.
+4. **Prove it locally**: run the staged bundle's `install.sh` and `run.sh` on a copy, and verify.
+5. **Push** (only when asked): re-run step 3 **with** `<org>/<name>`, after checking the target repo.
+6. **pull** (consumer): `tt-model pull <org>/<name>` (`--with-weights` to pre-download weights).
+7. **serve** (consumer): `tt-model serve <org>/<name> [--port N] [--print] [--local-only]`.
+8. **verify**: identity, coherent text, tool calling and reasoning where declared.
 
-There is no `install`, `run`, or `start` command. `package-thin` pushes; `pull` installs;
-`serve` installs then serves. `tt-model push` exists only for a staged v5.1 container
-directory. See the pass-through rule in [docs/cli.md](docs/cli.md#run-a-model) for which `serve`
+There is no `install`, `run`, or `start` command. `package-thin` with a positional repo id stages
+and pushes; without one it only stages. `pull` installs; `serve` installs then serves.
+`tt-model push` exists only for a staged v5.1 container directory, and `serve` takes a pulled
+`<org>/<name>`, not a local v6 folder. See the pass-through rule in [docs/cli.md](docs/cli.md#run-a-model) for which `serve`
 options are its own and which go to vLLM.
 
 ### Invariants when helping a user
@@ -183,13 +211,20 @@ above in a suggested workflow. In particular:
   and system libc: interpreter (`.python/`), venv, engine, and caches all live inside. Do not
   point the model at a shared or system cache to "fix" something.
 - Weights are a pointer (`--weights <hf-id>`).
-- The engine is what the bundle builds: v6 builds it from the pinned deps.
+- The engine is what the bundle builds: v6 builds it from the pinned deps, and that engine is
+  **stock** `ttnn`. Never ship a forked `ttnn` to carry custom kernels; ship a `generic_op` wheel.
+- The model's code ships with its bundle. Do not add a model to tt-transformers to make a bundle
+  work; it is tooling only.
 
 ### Verification checkpoints: do not claim success without them
 
-- **After package-thin (v6):** the bundle has `model.py`, `requirements.txt`, the bundled
-  `vllm-tt-plugin` (plus any `generic_op`) wheel, `vllm_models/<name>/vllm_metadata.json`,
-  `install.sh`, `run.sh`, `tt_kernel_manifest.json`.
+- **After package-thin (v6):** the bundle has `model.py`, `extra_code/<model>/`,
+  `requirements.txt`, `constraints.txt`, the bundled wheels, `vllm_models/<name>/vllm_metadata.json`,
+  `install.sh`, `run.sh`, `tt_kernel_manifest.json`. `deps.custom_ops` lists exactly the
+  `generic_op` wheel(s), never the tooling wheel; every JSON argument in `run.sh`'s argv expands to
+  one token.
+- **Before pushing (v6):** the staged bundle's `install.sh` passed on a copy (with its `--verify`
+  guards), and `import model` loaded the adapter from `extra_code/`.
 - **After pull:** `install.sh` succeeded; `<install>/venv/bin/python` exists.
 - **After serve:** the log reaches **`Application startup complete`**. Model load plus JIT warmup
   takes minutes on a single chip; wait rather than declaring failure early. For a container
@@ -222,6 +257,8 @@ Beyond those:
 Prefer a clear, actionable message over a silent workaround. If `pull` refuses (glibc,
 interpreter, or arch), the fix is to **repackage on the right OS** rather than to force past the gate.
 Consult the Troubleshooting table in [docs/E2E_RECIPE_V6.md](docs/E2E_RECIPE_V6.md) (v6) or
-[docs/E2E_RECIPE_V5.1.md](docs/E2E_RECIPE_V5.1.md) (container). If the
-`tt-metal-models` pin cannot resolve yet, that is the expected gate. The path is not runnable until
-`tt-metal#54478` publishes; see [docs/thin_packages.md](docs/thin_packages.md).
+[docs/E2E_RECIPE_V5.1.md](docs/E2E_RECIPE_V5.1.md) (container). One v6 failure deserves a
+specific note: a resolve error naming `certifi` (or `urllib3`, `requests`, `idna`) and
+`download.pytorch.org` means the PyTorch CPU index captured that package. Fix the packaging (see
+the recipe); never drop `--constraints` to make it "work" — without them the same install succeeds
+silently with a stale CA bundle.

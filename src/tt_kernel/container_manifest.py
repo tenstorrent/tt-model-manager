@@ -28,7 +28,14 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from .manifest import (
     CONTAINER_SCHEMA,
@@ -286,6 +293,40 @@ class CardSettings(CardSpec):
     # checks below. What each field means is documented once, for authors, in
     # examples/container-example.yaml and docs/container_packages.md.
 
+    _retired_notes: List[str] = PrivateAttr(default_factory=list)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _fold_retired_fields(cls, data, handler):
+        """Accept the retired keys for one release, moved into the field that replaced them."""
+        if not isinstance(data, dict) or not RETIRED_CARD_FIELDS.keys() & data.keys():
+            return handler(data)
+        data, notes = dict(data), []
+        for key, target in RETIRED_CARD_FIELDS.items():
+            if key not in data:
+                continue
+            value = data.pop(key)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"card.{key} must be text")
+            text = (value or "").strip()
+            if target is None or not text:
+                notes.append(f"card.{key} is retired and was dropped")
+                continue
+            current = data.get(target)
+            if current is not None and not isinstance(current, str):
+                raise ValueError(f"card.{target} must be text")
+            if key == "architecture":
+                text = f"Architecture: {text.rstrip('.')}."
+            elif key == "out_of_scope_use":
+                text = f"Out of scope: {text}"
+            sep = " " if key == "architecture" else "\n\n"
+            current = (current or "").strip()
+            data[target] = f"{current}{sep}{text}" if current else text
+            notes.append(f"card.{key} is retired; its text was moved into card.{target}")
+        card = handler(data)
+        card._retired_notes = notes
+        return card
+
     @field_validator("license", "pipeline_tag", "base_model", mode="before")
     @classmethod
     def _collapse_authored_whitespace(cls, v):
@@ -351,6 +392,54 @@ _HUB_LICENSE_ID_RE = re.compile(r"[a-z0-9][a-z0-9.+-]*")
 #: state the catalog is already full of — see DEVSTACK-447.
 REQUIRED_CARD_SECTIONS = ("performance", "limitations")
 
+#: Card fields retired by the template review, and the field each one folds into
+#: (``None``: dropped). Still read on the wire so published manifests stay valid.
+RETIRED_CARD_FIELDS = {
+    "architecture": "description",
+    "status": None,
+    "out_of_scope_use": "limitations",
+    "risks": "limitations",
+}
+
+
+def card_retired_notes(card: Optional[CardSpec]) -> List[str]:
+    """One line per retired card key the author still wrote."""
+    return list(getattr(card, "_retired_notes", None) or [])
+
+
+#: Columns an LLM card's performance table carries, one row per serving profile.
+PERFORMANCE_COLUMNS = ("profile", "isl", "osl", "concurrency", "n", "ttft", "prefill",
+                       "decode", "e2el")
+_LLM_KINDS = ("vllm-plugin", "vllm-fork")
+
+
+def _header_words(row: str) -> List[List[str]]:
+    """Each cell of a Markdown table row as lowercase words, units and rate suffixes dropped."""
+    cells = []
+    for cell in row.strip().strip("|").split("|"):
+        cell = re.sub(r"\([^)]*\)", " ", cell.lower())
+        cell = re.sub(r"tok/s(/u)?", " ", cell)
+        cells.append(cell.split())
+    return cells
+
+
+def card_performance_gaps(card: Optional[CardSpec], kind: str) -> List[str]:
+    """Required columns an LLM card's best performance table lacks (all, if it has none).
+
+    vLLM kinds only; an empty ``performance`` is :func:`card_publish_gaps`' job."""
+    if kind not in _LLM_KINDS or card is None or not (card.performance or "").strip():
+        return []
+    rows = [l for l in card.performance.splitlines() if l.strip().startswith("|")]
+    headers = [r for r, nxt in zip(rows, rows[1:]) if re.fullmatch(r"[|\s:-]+", nxt.strip())]
+    best = list(PERFORMANCE_COLUMNS)
+    for header in headers:
+        cells = _header_words(header)
+        missing = [c for c in PERFORMANCE_COLUMNS
+                   if not any((words == ["n"]) if c == "n" else c in words for words in cells)]
+        if len(missing) < len(best):
+            best = missing
+    return best
+
 
 def card_publish_gaps(card: Optional[CardSpec]) -> List[str]:
     """Which required card sections are missing. Pure, so every call site agrees.
@@ -379,6 +468,9 @@ class ContainerManifest(BaseModel):
     # An HF id, or a WeightsSpec to pin a revision / select files. Downloaded to the
     # HOST HF cache at pull time; never baked into the image.
     weights: Union[str, WeightsSpec]
+    # Additional runtime checkpoints (drafter weights, adapters, and similar), fetched and
+    # mounted by tt-model exactly like the primary weights. Declaration order is preserved.
+    auxiliary_weights: List[Union[str, WeightsSpec]] = Field(default_factory=list)
     kind: str = "vllm-plugin"  # launcher flavour; see tt_kernel.launchers.KINDS
     arch: str  # blackhole | wormhole_b0 — fixed by the build
 
@@ -445,6 +537,23 @@ class ContainerManifest(BaseModel):
             ignore_patterns=self.weights.ignore_patterns,
         )
 
+    @property
+    def auxiliary_weight_refs(self) -> List[WeightsRef]:
+        refs: List[WeightsRef] = []
+        for weight in self.auxiliary_weights:
+            if isinstance(weight, str):
+                refs.append(WeightsRef(repo=weight))
+            else:
+                refs.append(
+                    WeightsRef(
+                        repo=weight.repo,
+                        revision=weight.revision,
+                        allow_patterns=weight.allow_patterns,
+                        ignore_patterns=weight.ignore_patterns,
+                    )
+                )
+        return refs
+
     def profile_names(self) -> List[str]:
         return [p.name for p in self.effective_profiles()]
 
@@ -492,6 +601,18 @@ class ContainerManifest(BaseModel):
         if "/" not in self.weights_repo:
             raise ContainerManifestError(
                 f"weights must be a namespaced HF id (org/name), got {self.weights_repo!r}"
+            )
+        for ref in self.auxiliary_weight_refs:
+            if "/" not in ref.repo_id:
+                raise ContainerManifestError(
+                    "auxiliary_weights must use namespaced HF ids (org/name), got "
+                    f"{ref.repo_id!r}"
+                )
+        repos = [self.weights_repo] + [ref.repo_id for ref in self.auxiliary_weight_refs]
+        duplicates = sorted({repo for repo in repos if repos.count(repo) > 1})
+        if duplicates:
+            raise ContainerManifestError(
+                f"duplicate weight repositories across weights/auxiliary_weights: {duplicates}"
             )
 
         names = self.profile_names()
@@ -625,9 +746,6 @@ class ContainerManifest(BaseModel):
             tt_metal_version=tt_metal_version,
             arch=self.arch,
             device_count=hardware_chip_count(default.hardware or "") or 1,
-            build_key=None,  # kernels JIT inside the container into a mounted cache dir
-            kernel_count=0,
-            fast_path_kernels=None,
             producer=Producer(
                 tt_kernel_version=tt_kernel_version,
                 created_at=created_at
@@ -635,6 +753,7 @@ class ContainerManifest(BaseModel):
                 hostname=hostname if hostname is not None else socket.gethostname(),
             ),
             weights=self.weights_ref,
+            auxiliary_weights=self.auxiliary_weight_refs,
             container=ContainerSpec(
                 image=ImageRef(
                     registry=self.image.registry,
