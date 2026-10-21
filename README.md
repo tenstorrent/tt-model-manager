@@ -32,7 +32,7 @@ is not required and is not touched.
 tt-model login                       # reuses huggingface_hub's token store
 tt-model search gemma                # discover published bundles
 tt-model serve <org>/<model>         # pull and install if needed, then launch the OpenAI server
-tt-model curl "hello"                # send a chat completion to the running model
+tt-model curl "hello"                # send the running model a request that suits it
 ```
 
 New here? There is a copy-paste, end-to-end recipe per package format:
