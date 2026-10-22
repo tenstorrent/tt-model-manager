@@ -511,6 +511,27 @@ roughly equal to the weights (105 GB for FLUX.2, on top of what the HF cache alr
 and nothing reports it, because `tt_dit` silently reconverts when `TT_DIT_CACHE_DIR` is unset
 rather than failing. `tt-model rm` removes the whole parent; `--keep-cache` keeps it.
 
+### Where the files live
+
+- **tt-model's own state** always lives under `~/.cache/tt-model`: pulled manifests
+  (`pulled/`), the per-model caches above, and build logs. It does not follow
+  `XDG_CACHE_HOME`, except the index of installed packages (`installed.json`), which does.
+- **Weights and package files** live in the Hugging Face cache: `HF_HOME` (or
+  `HF_HUB_CACHE`), which defaults to `$XDG_CACHE_HOME/huggingface` and otherwise
+  `~/.cache/huggingface`.
+
+So setting `XDG_CACHE_HOME` moves the weights but not tt-model's state: a "fresh" cache made
+that way still serves the manifest and compiled caches tt-model already has. For a first-start
+check from a truly clean state, give tt-model a fresh `HOME`, and point `HF_HOME` at the
+existing HF cache to keep the weights (set `HF_HOME` first, before `HOME` changes):
+
+```
+HF_HOME=$HOME/.cache/huggingface HOME=$(mktemp -d) tt-model serve org/model
+```
+
+Leave out `HF_HOME` to download the weights again as well. Remove the image (`docker rmi`)
+too if the check should load it from the Hub.
+
 ### Which chips a serve gets
 
 A container is scoped to exactly as many chips as its profile needs — the count comes from

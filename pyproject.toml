@@ -12,7 +12,7 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "Tenstorrent" }]
 keywords = ["tenstorrent", "tt-metal", "ttnn", "vllm", "huggingface"]
 dependencies = [
-    "huggingface_hub>=0.23",
+    "huggingface_hub>=1.32",  # first release with the shared blob store rm must go through
     "typer>=0.12",
     "rich>=13",
     "pydantic>=2",

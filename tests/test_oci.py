@@ -106,9 +106,9 @@ def test_save_cleans_up_when_docker_fails(tmp_path, monkeypatch):
     "ignore:Python 3.14 will, by default, filter extracted tar archives:DeprecationWarning"
 )
 def test_extraction_works_without_the_data_filter(tmp_path, monkeypatch):
-    """`extractall(filter="data")` only exists from Python 3.11.4, and this package
-    declares requires-python >=3.9 — there it is a TypeError. The fallback must extract
-    the same content."""
+    """`extractall(filter="data")` only exists from Python 3.10.12 / 3.11.4, and this
+    package declares requires-python >=3.10 — on an earlier 3.10 it is a TypeError. The
+    fallback must extract the same content."""
     import tarfile
 
     from tt_kernel import oci as oci_mod
