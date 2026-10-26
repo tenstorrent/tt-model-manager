@@ -546,16 +546,19 @@ def test_the_reasoning_field_follows_the_packaged_vllm_version(version, field):
     assert f"the thinking text arrives in {field}, apart from `content`." in card
 
 
-@pytest.mark.parametrize("runtime", [
-    {**BASE["runtime"], "vllm": {"wheel": "/tmp/vllm-0.30.0-py3-none-any.whl"}},
-    {"vllm": {"repo": "https://github.com/tenstorrent/vllm", "ref": "bf98d556"},
-     "model_dir": "models/common"},
-])
-def test_the_reasoning_field_names_both_when_the_vllm_version_is_unknown(runtime):
-    kind = "vllm-fork" if "repo" in runtime["vllm"] else "vllm-plugin"
-    card = _card(kind=kind, serve=_REASONING, runtime=runtime)
+def test_the_reasoning_field_names_both_when_the_vllm_version_is_unknown():
+    runtime = {**BASE["runtime"], "vllm": {"wheel": "/tmp/vllm-0.30.0-py3-none-any.whl"}}
+    card = _card(kind="vllm-plugin", serve=_REASONING, runtime=runtime)
     assert ("the thinking text arrives in `reasoning` (`reasoning_content` on vLLM "
             "before 0.11.1), apart from `content`." in card)
+
+
+def test_the_reasoning_field_names_only_reasoning_for_vllm_fork():
+    runtime = {"vllm": {"repo": "https://github.com/tenstorrent/vllm", "ref": "bf98d556"},
+               "model_dir": "models/common"}
+    card = _card(kind="vllm-fork", serve=_REASONING, runtime=runtime)
+    assert "the thinking text arrives in `reasoning`, apart from `content`." in card
+    assert "reasoning_content" not in card
 
 
 def test_a_card_without_capabilities_claims_no_tool_calling():
