@@ -1514,16 +1514,20 @@ def _tree_size(d: Path) -> str:
     return console.fmt_bytes(total)
 
 
-def _purge_hf(repo_id: str, what: str) -> None:
-    """Delete every cached revision of a repo through the hub, which owns the shared blob store."""
+def _purge_hf(repo_id: str, what: str) -> bool:
+    """Delete every cached revision of a repo through the hub, which owns the shared blob store.
+
+    Returns False when the cached repo directory survives deletion (e.g. permission denied).
+    """
+    import logging
     from huggingface_hub import scan_cache_dir
     from huggingface_hub.file_download import repo_folder_name
-    from huggingface_hub.utils import CacheNotFound
+    from huggingface_hub.utils import CacheNotFound, logging as hf_logging
 
     try:
         cache = scan_cache_dir()
     except CacheNotFound:
-        return
+        return True
     repo = next((r for r in cache.repos
                  if r.repo_type == "model" and r.repo_id.lower() == repo_id.lower()), None)
     if repo is None:
@@ -1534,13 +1538,25 @@ def _purge_hf(repo_id: str, what: str) -> None:
             if folder.search(str(warning)):
                 console.note(f"could not remove the cached {what} — the cache entry is "
                              f"damaged: {warning}", marker="!", style="warning")
-        return
+        return True
     strategy = cache.delete_revisions(*(r.commit_hash for r in repo.revisions))
-    with console.step(f"removing the cached {what} ({console.fmt_bytes(strategy.expected_freed_size)})"):
-        strategy.execute()
-    if any(p.exists() for p in strategy.repos):
+    size_label = console.fmt_bytes(strategy.expected_freed_size)
+    with console.step(f"removing the cached {what}") as s:
+        prev_level = hf_logging.get_verbosity()
+        hf_logging.set_verbosity(logging.CRITICAL)
+        try:
+            strategy.execute()
+        finally:
+            hf_logging.set_verbosity(prev_level)
+        if any(p.exists() for p in strategy.repos):
+            s.fail()
+        else:
+            s.detail(size_label)
+    if s.failed:
         console.note(f"could not fully remove {repo.repo_path} — check its permissions",
                      marker="!", style="warning")
+        return False
+    return True
 
 
 def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = False,
@@ -1615,13 +1631,16 @@ def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = Fal
         )
 
     # 5. the package's own blobs in the HF cache, so a re-pull really downloads
-    _purge_hf(repo_id, "package snapshot")
+    failed_purge: List[str] = []
+    if _purge_hf(repo_id, "package snapshot") is False:
+        failed_purge.append(repo_id)
 
     # 6. weights, only when asked
     if manifest.weight_refs:
         if include_weights:
             for ref in manifest.weight_refs:
-                _purge_hf(ref.repo_id, f"weights {ref.repo_id}")
+                if _purge_hf(ref.repo_id, f"weights {ref.repo_id}") is False:
+                    failed_purge.append(ref.repo_id)
         else:
             repos = ", ".join(ref.repo_id for ref in manifest.weight_refs)
             console.note(
@@ -1629,6 +1648,11 @@ def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = Fal
                 "and not part of this package. --include-weights removes them too",
                 marker="○",
             )
+
+    if failed_purge:
+        raise ContainerCliError(
+            f"could not fully remove cached HF files for {', '.join(failed_purge)} — check permissions"
+        )
 
     console.milestone(f"removed {repo_id}")
 
