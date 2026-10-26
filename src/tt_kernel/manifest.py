@@ -209,6 +209,11 @@ class Deps(BaseModel):
     # The ASGI entrypoint ("module:attribute") a "tt-dit-server" kind serves with uvicorn — the v6
     # analog of ContainerSpec.runtime["app"]. Unused (must be None) for kind="vllm".
     app: Optional[str] = None
+    # The env var the model reads its mesh shape ("1xN") from, e.g. "MOSS_MESH" — the v6 analog of
+    # the v5.1 container tt-dit-server kind's runtime.mesh_shape_env (see launchers.py). `serve
+    # --chips N` / run.sh set it to the served mesh so a multichip model picks up the shape without
+    # a manual env dance. None => the model reads no such var (e.g. a 1-chip model).
+    mesh_shape_env: Optional[str] = None
 
     @model_serializer(mode="wrap")
     def _omit_empty_custom_ops(self, handler):

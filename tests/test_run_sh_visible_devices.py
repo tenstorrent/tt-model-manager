@@ -20,7 +20,7 @@ from tt_kernel.manifest import Mesh, WeightsRef
 GRANT = "0000:01:00.0,0000:02:00.0,0000:03:00.0,0000:04:00.0"
 
 
-def _bundle(tmp_path, *, devices, env=None, arch="blackhole", descriptor=True):
+def _bundle(tmp_path, *, devices, env=None, arch="blackhole", descriptor=True, mesh_shape_env=None):
     tmp_path.mkdir(parents=True, exist_ok=True)
     model_py = tmp_path / "model.py"
     model_py.write_text("class C: pass\n")
@@ -29,6 +29,7 @@ def _bundle(tmp_path, *, devices, env=None, arch="blackhole", descriptor=True):
         b, name="m", arch=arch, model_py=model_py, tt_kernel_version="0",
         vllm_metadata={"arch": "A", "main_class": "model:C"}, weights=WeightsRef(repo="o/w"),
         device_count=devices, mesh=Mesh(devices=devices, topology="P150"), env=env or {},
+        mesh_shape_env=mesh_shape_env,
     )
     # Stand-in venv: `python -c` is real (run.sh's find_spec probe), `python -m ...` reports.
     (b / "venv" / "bin").mkdir(parents=True)
@@ -64,6 +65,19 @@ def _bundle(tmp_path, *, devices, env=None, arch="blackhole", descriptor=True):
 
 def _mgd(stderr):
     return next(l for l in stderr.splitlines() if l.startswith("MGD=")).removeprefix("MGD=")
+
+
+def _mesh(stderr):
+    return next(l for l in stderr.splitlines() if l.startswith("MESH=")).removeprefix("MESH=")
+
+
+def _echo_mesh(b):
+    """Make the stand-in interpreter also report MESH_DEVICE + the model's mesh_shape_env."""
+    py = b / "venv" / "bin" / "python"
+    py.chmod(0o700)
+    py.write_text(py.read_text() + 'echo "MESH=${MESH_DEVICE:-} SHAPE=${MOSS_MESH:-}" >&2\n')
+    py.chmod(0o500)
+    return b
 
 
 def _run(b, **env):
@@ -166,3 +180,53 @@ def test_the_ttnn_cache_is_bundle_local(tmp_path):
     assert ovr == {"cache_path": f"{b}/.cache/ttnn", "model_cache_path": f"{b}/.cache/ttnn/models"}
     _, _, err = _run(b, TTNN_CONFIG_OVERRIDES='{"enable_model_cache": true}')
     assert 'OVR={"enable_model_cache": true}' in err  # the operator's own overrides win
+
+
+# --- serve --chips N: TT_MODEL_CHIPS overrides the served chip count at serve time ---------------
+
+@pytest.mark.parametrize("n,tmvd,shape", [(1, "0", "P150"), (2, "0,1", "1x2"), (4, "0,1,2,3", "1x4")])
+def test_chips_override_fences_and_meshes(tmp_path, n, tmvd, shape):
+    """`serve --chips N` (TT_MODEL_CHIPS=N) fences to N dies and hands a multichip model a 1xN mesh,
+    from a bundle authored for a single chip — no manual env dance."""
+    b = _echo_mesh(_bundle(tmp_path / f"n{n}", devices=1, mesh_shape_env="MOSS_MESH"))
+    code, out, err = _run(b, TT_MODEL_CHIPS=str(n))
+    assert (code, out) == (0, f"TVD= TMVD={tmvd}"), err
+    # N>1 → linear 1xN mesh in MESH_DEVICE and the model's mesh_shape_env; N==1 keeps the authored one.
+    assert _mesh(err) == f"{shape} SHAPE={shape}"
+
+
+def test_chips_override_narrows_a_grant(tmp_path):
+    """Under a lease grant, --chips takes the first N granted chips (fence 0..N-1)."""
+    b = _bundle(tmp_path, devices=1)
+    code, out, _ = _run(b, TT_MODEL_CHIPS="2", TT_VISIBLE_DEVICES=GRANT)
+    assert (code, out) == (0, "TVD=0000:01:00.0,0000:02:00.0 TMVD=0,1")
+
+
+def test_chips_override_too_large_for_the_grant_fails_fast(tmp_path):
+    b = _bundle(tmp_path, devices=1)
+    code, out, err = _run(b, TT_MODEL_CHIPS="4", TT_VISIBLE_DEVICES=BOARD)  # BOARD = 2 chips
+    assert code != 0 and "TMVD" not in out
+    assert "4 chip" in err and "TT_VISIBLE_DEVICES" in err
+
+
+def test_chips_1_on_a_multichip_bundle_gets_the_descriptor(tmp_path):
+    """Serving a 4-chip bundle on one chip still gets the P150 single-chip descriptor."""
+    b = _bundle(tmp_path, devices=4)
+    code, out, err = _run(b, TT_MODEL_CHIPS="1", TT_VISIBLE_DEVICES=BOARD)
+    assert (code, out) == (0, "TVD=0000:01:00.0 TMVD=0"), err
+    assert _mgd(err).endswith(P150_MGD)
+
+
+@pytest.mark.parametrize("bad", ["xyz", "0", "-1", "2.5", " "])
+def test_chips_override_rejects_a_non_positive_integer(tmp_path, bad):
+    # An empty TT_MODEL_CHIPS is treated as unset (bash ${:-default}); these are genuine junk.
+    code, _, err = _run(_bundle(tmp_path, devices=1), TT_MODEL_CHIPS=bad)
+    assert code != 0 and "TT_MODEL_CHIPS" in err
+
+
+def test_no_chips_override_is_byte_for_byte_the_authored_mesh(tmp_path):
+    """Without TT_MODEL_CHIPS, a bundle serves on its authored count/mesh (no 1xN synthesis)."""
+    b = _echo_mesh(_bundle(tmp_path, devices=2, mesh_shape_env="MOSS_MESH"))
+    code, out, err = _run(b)
+    assert (code, out) == (0, "TVD= TMVD=0,1"), err
+    assert _mesh(err) == "P150 SHAPE=P150"            # the authored topology, not 1x2

@@ -806,14 +806,25 @@ def render_run_sh(manifest: Manifest) -> str:
     # tt-metal refuses to open without a mesh graph descriptor, so a 1-chip Blackhole bundle
     # under a grant gets ttnn's own P150 one unless something already set it.
     nchips = max(int(manifest.device_count or 1), 1)
-    first_n = ",".join(str(i) for i in range(nchips))
-    default_chips = author_env.pop("TT_METAL_VISIBLE_DEVICES", None) or first_n
-    single_chip_desc = "" if nchips != 1 or manifest.arch != "blackhole" else """
-    _P150_MGD="$TTNN_DIR/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto"
-    if [ -z "${TT_MESH_GRAPH_DESC_PATH:-}" ] && [ -f "$_P150_MGD" ]; then
-      export TT_MESH_GRAPH_DESC_PATH="$_P150_MGD"
+    # The served chip count is a SERVE-TIME value (TT_MODEL_CHIPS, set by `serve --chips N`),
+    # defaulting to the authored device_count. The fence (TT_METAL_VISIBLE_DEVICES=0..N-1, or the
+    # first N of a TT_VISIBLE_DEVICES grant) and the mesh shape below both derive from it, so one
+    # bundle serves on N cards without a manual env dance.
+    author_tmvd = author_env.pop("TT_METAL_VISIBLE_DEVICES", None)
+    default_chips_expr = f'"{author_tmvd}"' if author_tmvd else '"$_FIRSTN"'
+    # The P150 single-chip mesh-graph descriptor: only a Blackhole bundle can need it, and only when
+    # exactly one chip ends up visible. Guard it on $NCHIPS at runtime so `serve --chips N` is honored.
+    single_chip_desc = "" if manifest.arch != "blackhole" else """
+    if [ "$NCHIPS" -eq 1 ]; then
+      _P150_MGD="$TTNN_DIR/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto"
+      if [ -z "${TT_MESH_GRAPH_DESC_PATH:-}" ] && [ -f "$_P150_MGD" ]; then
+        export TT_MESH_GRAPH_DESC_PATH="$_P150_MGD"
+      fi
     fi"""
-    chips_block = f"""NCHIPS={nchips}
+    chips_block = f"""NCHIPS="${{TT_MODEL_CHIPS:-{nchips}}}"
+case "$NCHIPS" in ''|*[!0-9]*) echo "run.sh: TT_MODEL_CHIPS must be a positive integer, got '$NCHIPS'" >&2; exit 1;; esac
+[ "$NCHIPS" -ge 1 ] || {{ echo "run.sh: TT_MODEL_CHIPS must be >= 1" >&2; exit 1; }}
+_FIRSTN="$(seq -s, 0 "$((NCHIPS - 1))")"
 if [ -z "${{TT_METAL_VISIBLE_DEVICES:-}}" ]; then
   if [ -n "${{TT_VISIBLE_DEVICES:-}}" ]; then
     IFS=, read -ra _GRANT <<< "$TT_VISIBLE_DEVICES"
@@ -823,12 +834,27 @@ if [ -z "${{TT_METAL_VISIBLE_DEVICES:-}}" ]; then
     fi
     TT_VISIBLE_DEVICES="$(IFS=,; echo "${{_GRANT[*]:0:$NCHIPS}}")"
     export TT_VISIBLE_DEVICES
-    TT_METAL_VISIBLE_DEVICES="{first_n}"{single_chip_desc}
+    TT_METAL_VISIBLE_DEVICES="$_FIRSTN"{single_chip_desc}
   else
-    TT_METAL_VISIBLE_DEVICES="{default_chips}"
+    TT_METAL_VISIBLE_DEVICES={default_chips_expr}
   fi
 fi
 export TT_METAL_VISIBLE_DEVICES
+"""
+    # Mesh shape: default to the authored topology, but when `serve --chips N` asked for N cards use a
+    # linear 1xN mesh, and (if the model declares a mesh_shape_env, e.g. MOSS_MESH) hand the model the
+    # shape through that var too. An operator-set MESH_DEVICE / mesh_shape_env still wins.
+    mesh_shape_env = manifest.deps.mesh_shape_env if manifest.deps else None
+    shape_env_line = (
+        f'\nexport {mesh_shape_env}="${{{mesh_shape_env}:-$MESH_DEVICE}}"'
+        if mesh_shape_env else ""
+    )
+    mesh_block = f"""if [ -n "${{TT_MODEL_CHIPS:-}}" ] && [ "$NCHIPS" -gt 1 ]; then
+  _DEFAULT_MESH="1x$NCHIPS"
+else
+  _DEFAULT_MESH="{mesh_device}"
+fi
+export MESH_DEVICE="${{MESH_DEVICE:-$_DEFAULT_MESH}}"{shape_env_line}
 """
     extra_env = "".join(
         f'export {k}="{v}"\n' for k, v in author_env.items()
@@ -998,8 +1024,7 @@ export TT_VLLM_BUILTIN_MODELS=0
 # group, so the model's tool/reasoning-parser overrides would silently not load. The TT platform
 # + model registry load via entry points without it.
 export PYTHONPATH="{pythonpath_entry}:${{PYTHONPATH:-}}"   # resolves the adapter/model imports
-export MESH_DEVICE="${{MESH_DEVICE:-{mesh_device}}}"
-{chips_block}# HERMETIC RUNTIME: keep every cache/home INSIDE the folder wall, so serving writes and reads
+{chips_block}{mesh_block}# HERMETIC RUNTIME: keep every cache/home INSIDE the folder wall, so serving writes and reads
 # nothing outside it (the ttnn tensor cache even DEFAULTS to a hard-coded /mnt/... path upstream —
 # a classic other-machine leak we must override). Each is overridable if the operator sets it.
 export HF_HOME="${{HF_HOME:-$HERE/.hf}}"                  # HF weights + hub cache
@@ -1316,6 +1341,7 @@ def stage_thin_package(
     provenance: Optional[Path] = None,
     python_version: str = "3.12",
     tt_metal_version: str = "unknown",
+    mesh_shape_env: Optional[str] = None,
 ) -> Manifest:
     """Materialize a v6 "thin" bundle (issue #29) and return its manifest.
 
@@ -1516,6 +1542,7 @@ def stage_thin_package(
         verify=list(verify or []),
         kind=kind,
         app=app,
+        mesh_shape_env=mesh_shape_env,
     )
     manifest = Manifest(
         schema_version="6",
