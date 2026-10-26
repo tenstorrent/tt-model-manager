@@ -259,6 +259,5 @@ interpreter, or arch), the fix is to **repackage on the right OS** rather than t
 Consult the Troubleshooting table in [docs/E2E_RECIPE_V6.md](docs/E2E_RECIPE_V6.md) (v6) or
 [docs/E2E_RECIPE_V5.1.md](docs/E2E_RECIPE_V5.1.md) (container). One v6 failure deserves a
 specific note: a resolve error naming `certifi` (or `urllib3`, `requests`, `idna`) and
-`download.pytorch.org` means the PyTorch CPU index captured that package. Fix the packaging (see
-the recipe); never drop `--constraints` to make it "work" — without them the same install succeeds
-silently with a stale CA bundle.
+`download.pytorch.org` means the PyTorch CPU index captured that package. That only happens in a bundle staged by an older
+`tt-model`. Restage it (see the recipe); never drop `--constraints` to make it "work".
