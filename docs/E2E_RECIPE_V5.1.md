@@ -393,6 +393,18 @@ Pass: `finish_reason` is `tool_calls` and the arguments are valid JSON matching 
 Fail: prose in `content` with `finish_reason` `stop`, which means the parser is not in the
 launch (check `--print` for `--enable-auto-tool-choice --tool-call-parser <name>`).
 
+If you score quality subsets through the API (GSM8K, IFEval, and so on) and the model has a
+batch-1 fast path, meaning a decode path or trace bucket that runs only when exactly one request
+is decoding, or per-bucket decode code, also run the subsets at concurrency 1 (or once per
+special-cased bucket width). A 32-way concurrent eval puts almost every decode step on the
+batched path: on a real package, a change to the batch-1 path did not move the 32-concurrent
+scores at all, and only a concurrency-1 run exercised it. With lm-eval, set `num_concurrent`:
+
+```bash
+lm_eval --model local-chat-completions --apply_chat_template --tasks gsm8k,ifeval --limit 250 \
+  --model_args model=unsloth/Llama-3.2-3B-Instruct,base_url=http://localhost:20000/v1/chat/completions,num_concurrent=1
+```
+
 ---
 
 ## The self-containment guarantee (why this is safe to hand around)
