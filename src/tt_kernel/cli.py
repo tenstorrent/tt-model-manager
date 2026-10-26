@@ -777,6 +777,10 @@ def package_thin(
     mesh_fabric: Optional[str] = typer.Option(None, "--mesh-fabric", help="TT fabric configuration, e.g. FABRIC_1D."),
     device_count: int = typer.Option(1, "--device-count"),
     python_version: str = typer.Option("3.12", "--python", help="Pinned interpreter (uv provisions)."),
+    provision_sfpi: bool = typer.Option(
+        False, "--provision-sfpi/--no-provision-sfpi", help="Have install.sh fetch the SFPI kernel-JIT "
+        "toolchain into the installed ttnn's runtime/sfpi (the pip ttnn wheel omits it). Off by "
+        "default: SFPI stays an external box dep. Network at install only; idempotent."),
     tt_metal_version: Optional[str] = typer.Option(
         None, "--tt-metal-version", help="Record this TT-Metalium version in the manifest. "
         "Default: the exact ttnn (or tt-metal-models) pin in --requirements, else this host's."),
@@ -941,6 +945,7 @@ def package_thin(
         weights=weights_block, device_count=device_count, mesh=mesh, env=env_map,
         resources=resources, capabilities=capabilities, readme=readme_path,
         provenance=provenance_path, python_version=python_version,
+        provision_sfpi=provision_sfpi,
         tt_metal_version=(
             tt_metal_version
             or packaging.pinned_ttnn_version(Path(requirements).expanduser().read_text()
