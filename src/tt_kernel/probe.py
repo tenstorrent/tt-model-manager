@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-"""The request `tt-model curl` sends, chosen by the task the served model performs.
+"""The request `tt-model check` sends, chosen by the task the served model performs.
 
 Tasks use the Hugging Face ``pipeline_tag`` vocabulary, which the model card already uses,
 so a caller that knows a model from elsewhere (tt-cli's catalog) can name it with ``--task``.
@@ -23,9 +23,9 @@ IMAGE_TEXT_TO_TEXT = "image-text-to-text"
 TEXT_TO_IMAGE = "text-to-image"
 FEATURE_EXTRACTION = "feature-extraction"
 
-# Tasks `curl` sends a real request for.
+# Tasks `check` sends a real request for.
 TASKS = (TEXT_GENERATION, IMAGE_TEXT_TO_TEXT, TEXT_TO_IMAGE, FEATURE_EXTRACTION)
-# Tasks a served model can have that `curl` cannot exercise yet: it only checks the server is up.
+# Tasks a served model can have that `check` cannot exercise yet: it only checks the server is up.
 HEALTH_ONLY_TASKS = (
     "automatic-speech-recognition",
     "text-to-speech",

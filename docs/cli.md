@@ -18,10 +18,10 @@ tt-model serve you/mymodel --local-only            # require an installed bundle
 tt-model serve you/mymodel --port 8001             # serve's own option; see the pass-through rule below
 tt-model serve you/mymodel --extra vllm-arg        # anything serve does not own is passed through to vLLM
 
-tt-model curl "hello"                              # send the running model a request that suits it
-tt-model curl "write a haiku" --temperature 0.7 --max-tokens 200
-tt-model curl "hello" --print                      # emit the equivalent curl instead of sending
-tt-model curl "a red fox" --task text-to-image -o fox.jpg   # name the task when no manifest says it
+tt-model check "hello"                              # send the running model a request that suits it
+tt-model check "write a haiku" --temperature 0.7 --max-tokens 200
+tt-model check "hello" --print                      # emit the equivalent curl instead of sending
+tt-model check "a red fox" --task text-to-image -o fox.jpg   # name the task when no manifest says it
 
 tt-model stop you/mymodel                          # stop the running server (SIGTERM first; container or v5/v6 bundle)
 tt-model logs you/mymodel                          # container packages: show the server logs
@@ -48,7 +48,7 @@ advisory if a newer one exists. Skip it with `--no-update-check`, `--local-only`
 
 ### Checking it answers
 
-`tt-model curl` builds the request for whatever is being served, so verifying a bring-up
+`tt-model check` builds the request for whatever is being served, so verifying a bring-up
 does not mean hand-writing JSON and matching the model id exactly. The model id comes from the
 running server (`GET /v1/models`). With nothing serving yet, `--print` falls back to the
 installed bundle's weights id so it still emits something pasteable. Any option the command

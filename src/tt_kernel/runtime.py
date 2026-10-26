@@ -84,7 +84,7 @@ def install_self_contained(bundle_dir: Path, venv_dir: Path) -> Path:
     return venv_dir / "bin" / "python"
 
 
-# ------------------------------------------------------------------ verify (tt-model curl)
+# ------------------------------------------------------------------ verify (tt-model check)
 # The consumer's last step is "did it actually answer?". Everything below (with probe.py) builds
 # that one request so the user never has to retype the model id, the endpoint or the JSON
 # body. Stdlib only — tt-model takes no HTTP dependency.
@@ -162,7 +162,7 @@ def parse_extra_params(extra: List[str]) -> dict:
     underscores, value typed by :func:`parse_param`); a lone ``--flag`` becomes ``True``.
 
     Raises ``ValueError`` on a bare positional, which is almost always a quoting mistake
-    (``tt-model curl hello there``) and would otherwise be silently dropped.
+    (``tt-model check hello there``) and would otherwise be silently dropped.
     """
     params: dict = {}
     i = 0

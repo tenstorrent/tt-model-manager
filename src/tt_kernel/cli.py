@@ -1616,7 +1616,7 @@ def serve(
         _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
 
 
-# ---------------------------------------------------------------------------- curl
+# ---------------------------------------------------------------------------- check
 def _discover_model(served: List[str]) -> "tuple[Optional[str], Optional[str]]":
     """Which model id to put in the request, and why — ``(model, source)``.
 
@@ -1637,7 +1637,7 @@ def _discover_model(served: List[str]) -> "tuple[Optional[str], Optional[str]]":
 
 @dataclass(frozen=True)
 class _Pulled:
-    """A pulled package as `curl` sees it: what it serves under, and what it can do."""
+    """A pulled package as `check` sees it: what it serves under, and what it can do."""
 
     repo_id: str
     name: str
@@ -1703,9 +1703,9 @@ def _image_path(model_id: str, data: bytes) -> Path:
     return Path(f"{name}-{datetime.now():%Y%m%d-%H%M%S}{probe.image_suffix(data)}")
 
 
-@app.command(name="curl", context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+@app.command(name="check", context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
              rich_help_panel="Run a model")
-def curl_cmd(
+def check_cmd(
     ctx: typer.Context,
     prompt: Optional[str] = typer.Argument(None, help="The prompt to send (default: one "
                                            "suited to the task)."),
@@ -1736,11 +1736,11 @@ def curl_cmd(
 
     Fills in the endpoint and the model id — which has to match what the server registered
     or the request 404s — so the last step of a bring-up is one line:
-    `tt-model curl "hello"`.
+    `tt-model check "hello"`.
 
     Any option this command does not reserve is passed straight into the request body, so
     the whole sampling surface works without new flags:
-    `tt-model curl "write a haiku" --temperature 0.7 --max-tokens 200`.
+    `tt-model check "write a haiku" --temperature 0.7 --max-tokens 200`.
 
     --print emits the equivalent curl instead of sending it, for a doc or a bug report.
     """
@@ -1748,7 +1748,7 @@ def curl_cmd(
     try:
         params = runtime.parse_extra_params(list(ctx.args))
     except ValueError as exc:
-        raise _err(f"{exc}\n  usage: tt-model curl \"your prompt\" [--key value ...]")
+        raise _err(f"{exc}\n  usage: tt-model check \"your prompt\" [--key value ...]")
     if task is not None and task not in probe.TASKS + probe.HEALTH_ONLY_TASKS:
         raise _err(f"unknown --task {task!r}; one of: "
                    + ", ".join(probe.TASKS + probe.HEALTH_ONLY_TASKS))
@@ -1780,7 +1780,7 @@ def curl_cmd(
     caps = probe.Capabilities(task, tools, source=task_source)
     notes = [] if source == "--model" else [f"model id from {source}: {resolved}"]
     if caps.task is None or caps.task in probe.HEALTH_ONLY_TASKS:
-        _curl_health_check(base, served, resolved, caps, package, notes, print_only=print_only)
+        _check_health(base, served, resolved, caps, package, notes, print_only=print_only)
         return
 
     text = prompt if prompt is not None else probe.default_prompt(caps.task, tools=caps.tools)
@@ -1819,14 +1819,14 @@ def curl_cmd(
                     fg=typer.colors.YELLOW, err=True)
 
 
-def _curl_health_check(base: str, served: List[str], model_id: str, caps: probe.Capabilities,
+def _check_health(base: str, served: List[str], model_id: str, caps: probe.Capabilities,
                        package: Optional[_Pulled], notes: List[str], *, print_only: bool) -> None:
-    """For a task `curl` cannot exercise: confirm the server answers, and say that is all."""
+    """For a task `check` cannot exercise: confirm the server answers, and say that is all."""
     if caps.task:
-        why = f"`tt-model curl` cannot exercise {caps.task} models yet"
+        why = f"`tt-model check` cannot exercise {caps.task} models yet"
     else:
         what = f"{package.repo_id} ({package.kind})" if package else model_id
-        why = (f"{what} declares no task `tt-model curl` can exercise; pass --task if it "
+        why = (f"{what} declares no task `tt-model check` can exercise; pass --task if it "
                "speaks a standard API (e.g. --task text-to-image)")
     card = f"\n  Its own routes are in its model card: https://huggingface.co/{package.repo_id}" \
         if package else ""
