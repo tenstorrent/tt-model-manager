@@ -110,7 +110,65 @@ They name real machines and cannot live in a repo anyone can pull.
   SFPI, so multi-host must be documented as a distinct deployment mode with its own prereqs rather
   than the "just pull and run" contract single-host v6 offers.
 
-## 5. Sequenced slices
+## 5. Correctness requirements for a multi-host per-step loop
+
+The launch contract above gets the ranks running; it does not make a per-step model *correct*
+across hosts. A bundle whose serving loop steps the device once per iteration (a diffusion
+denoise loop, any iterative sampler) must also obey the rules below. They were found the hard way
+during the MOSS-Image cross-host bring-up (a pure-`ttnn` text-to-image DiT run on two Blackhole
+hosts, `node4`+`node5`, `1x4` `FABRIC_1D`, a 2+2 split). Each is a real failure that single-host
+testing cannot surface.
+
+**a) Drain the device→host readback DMA before reusing the source.**
+`ttnn.execute_trace(..., blocking=True)` blocks on the **compute**, not on the `ttnn.to_torch`
+readback DMA that follows it. In a per-step loop, if a rank consumes that host buffer — or lets the
+next `execute_trace` overwrite the source tensor — before the DMA has drained, it corrupts the host
+heap. The bug is nasty in three ways: it is **rank-asymmetric** (the send-first rank trips; a
+recv-first rank is incidentally safe, so the job fails on one host and not the other), it is
+**memcheck-blind** (the clobber is a device DMA, not a CPU instruction, so tools that watch CPU
+writes see nothing), and it is **deterministic under a hardened malloc** (which is how it was
+pinned). Fix it one of two ways:
+
+- Call `ttnn.synchronize_device(mesh)` **immediately after** the per-step readback, or
+- keep the loop state **on device** and gather to host **once** after the loop — which also deletes
+  the per-step cross-host barrier that otherwise dominates latency.
+
+Make the drain **unconditional**. It is cheap on a single host and required on multiple hosts; do
+not branch it on host count, or single-host testing will keep passing while the multi-host run
+corrupts memory.
+
+**b) Branch single- vs multi-host on rank count, not mesh shape.**
+Select the path on the MPI world size / distributed-context rank count, **not** on the mesh shape:
+a `1x4` may be one host or a 2+2 split, so the shape tells you nothing about how many processes are
+in the job. One rank → no MPI exchange and no barrier. More than one rank → the per-step
+cross-host exchange plus `ttnn.distributed_context_barrier`.
+
+**c) Operational notes for bringing the hosts up.**
+These belong with the deployment steps in section 4 — they are how an operator makes a multi-host
+serve start cleanly and stay honest:
+
+- **Reset with a fabric-clean reset, not a warm `tt-smi -r`.** A warm reset can leave stale device
+  discovery that surfaces, on a marginal cross-host link, as `unordered_map::at` thrown from
+  `set_fabric_config` / `open_mesh_device`. Reset the participating hosts clean.
+- **Wrap mesh-open in a reset+retry loop, and count link-train retries separately from run
+  failures.** A failed open fails cleanly and immediately and never corrupts a run, so retrying it
+  is safe; keeping its count distinct keeps a flaky link from looking like a flaky model.
+- **Forward `PYTHONPATH` to the MPI children (`-x PYTHONPATH`), and do not launch with `python
+  -I`.** Isolated mode strips `PYTHONPATH`, which makes the bundle's `extra_code/` imports fail on
+  every rank.
+- **Require an identical absolute install path and the same Unix user on every host.** MPI launches
+  the same path remotely; a mismatch launches nothing. (This is the deployment requirement in
+  section 4, restated as a hard precondition.)
+- **Leave `num_links=1`.** The per-step cross-host exchange is sync/rendezvous-bound, not
+  bandwidth-bound, so more links buy nothing and a higher count can wedge the fabric. Keep the loop
+  traced and on device instead.
+
+> **Source.** These rules are the model-side findings from the MOSS-Image cross-host RCA — a
+> pure-`ttnn` DiT brought up multi-host on `node4`+`node5` under `FABRIC_1D`. The root cause was
+> the readback-DMA-vs-reuse heap corruption in (a); the rest are the operational rules that made a
+> repeatable two-host run possible.
+
+## 6. Sequenced slices
 
 | Slice | What | Depends on | Testable now? |
 |---|---|---|---|
@@ -123,7 +181,7 @@ They name real machines and cannot live in a repo anyone can pull.
 Slice 1 must come before Slice 2. Emitting `tt.rank_binding` before a real serve is validated
 risks encoding a contract that turns out subtly wrong. The fabric is proven; the serve is not.
 
-## 6. Open design questions
+## 7. Open design questions
 - **Peer discovery.** How does a pulled bundle learn its second host? A `serve`-time `--rank-binding
   <file>` (operator hands over the YAML and MGD) is the minimal answer; auto-generating the rank
   binding from `--hosts a,b` via `tt-run`'s own generator is the richer one.
