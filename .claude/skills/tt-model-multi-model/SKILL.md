@@ -59,7 +59,7 @@ instances:
 
 | key | meaning |
 | --- | --- |
-| `name` | instance name; what `--name` takes in `stop`, `logs`, `curl` |
+| `name` | instance name; what `--name` takes in `stop`, `logs`, `check` |
 | `model` | a pulled container package (`org/name`) or a manifest path |
 | `profile` | serve profile; default: the package's default |
 | `chips` | list of chip ids, or `auto` (default) |
@@ -94,7 +94,7 @@ keeps what came up, stops the rest and exits 1.
 3. **Throughput with the package's own benchmark flags** (greedy, exact input length, warmup).
    An unseeded or sampled benchmark can read several times too slow. Measure each instance
    alone, then all busy at once; report both.
-4. `tt-model curl "hello" --name <instance>` for a quick check of one instance.
+4. `tt-model check "hello" --name <instance>` for a quick check of one instance.
 
 ## Step 6 — Stop
 
