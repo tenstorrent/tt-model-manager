@@ -305,7 +305,7 @@ a checklist parsed from the container log:
 ```
 
 When the server reports ready the list is replaced by one `✓ <org>/<model-name> ready` line and
-a card with the endpoint, a `tt-model curl` example, and the `logs` and `stop` hints. A cold first
+a card with the endpoint, a `tt-model check` example, and the `logs` and `stop` hints. A cold first
 boot JIT-compiles kernels (about 10 minutes); the compiled kernels are cached on the host under
 `~/.cache/tt-model/<name>/` so the second boot is fast. A boot that fails marks the step it died
 in and renders a diagnosis card instead of dumping the log. Ctrl-C stops the watching only; the
@@ -354,10 +354,10 @@ the check per-serve with `--no-update-check`, or entirely offline with `--local-
 ## Step 6: Verify (consumer)
 
 ```bash
-tt-model curl "Say hello in one sentence."
+tt-model check "Say hello in one sentence."
 ```
 
-`tt-model curl` reads the model id from the running server and builds the request for you.
+`tt-model check` reads the model id from the running server and builds the request for you.
 The equivalent raw request, on the port the ready card printed (default 20000):
 
 ```bash
