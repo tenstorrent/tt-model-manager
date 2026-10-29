@@ -1345,17 +1345,15 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         lines += [f"Runs on Tenstorrent {targets} — see the serving profiles below.", ""]
 
     weight_refs = [m.weights_ref] + m.auxiliary_weight_refs
-    weight_links = [
-        f"[`{ref.repo_id}`](https://huggingface.co/{ref.repo_id})"
-        + (f" at `{ref.revision}`" if ref.revision else "")
-        for ref in weight_refs
-    ]
+    weight_links = [f"[`{ref.repo_id}`](https://huggingface.co/{ref.repo_id})" for ref in weight_refs]
+    pins = [f" at `{ref.revision}`" if ref.revision else "" for ref in weight_refs]
     if len(weight_links) == 1:
-        weight_description = f"the {weight_links[0]} weights"
+        weight_description = f"the {weight_links[0]} weights{pins[0]}"
     else:
         count_words = {2: "both", 3: "all three", 4: "all four"}
         count = count_words.get(len(weight_links), f"all {len(weight_links)}")
-        weight_description = f"{count} required checkpoints: " + ", ".join(weight_links)
+        weight_description = f"{count} required checkpoints: " + ", ".join(
+            link + pin for link, pin in zip(weight_links, pins))
 
     lines += [
         f"Packaged and published with [tt-model-manager]({TT_MODEL_MANAGER_URL}) "
