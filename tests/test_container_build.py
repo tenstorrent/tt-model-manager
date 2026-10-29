@@ -1015,6 +1015,11 @@ def test_the_card_names_every_auxiliary_weight_and_pin():
     assert "downloads the Docker image and all three required checkpoints: " in card
 
 
+def test_the_card_puts_a_single_weights_pin_after_the_word_weights():
+    card = _card(weights={"repo": "org/model", "revision": "deadbeef"})
+    assert "the [`org/model`](https://huggingface.co/org/model) weights at `deadbeef` (into" in card
+
+
 def test_the_card_includes_the_authors_quickstart():
     assert "point it here" in _card(card={"quickstart": "point it here"}).lower()
 
