@@ -527,9 +527,35 @@ def test_the_card_documents_tool_calling_and_reasoning_when_declared():
     assert "--tool-call-parser hermes" in card
     assert "finish_reason: tool_calls" in card
     assert "--reasoning_parser deepseek_r1" in card
-    assert "reasoning_content" in card
     # one profile: stated once, unqualified
     assert "On `--profile" not in card
+
+
+_REASONING = {**BASE["serve"], "capabilities": {"reasoning_parser": "deepseek_r1"}}
+
+
+@pytest.mark.parametrize("version, field", [
+    ("0.30.0", "`reasoning`"),
+    ("0.11.1", "`reasoning`"),
+    ("0.11.0", "`reasoning_content`"),
+])
+def test_the_reasoning_field_follows_the_packaged_vllm_version(version, field):
+    """vLLM 0.11.1 renamed the response field to `reasoning` and 0.16.0 removed
+    `reasoning_content`, so a card naming the old field sent clients to a missing key."""
+    card = _card(serve=_REASONING, runtime={**BASE["runtime"], "vllm": {"version": version}})
+    assert f"the thinking text arrives in {field}, apart from `content`." in card
+
+
+@pytest.mark.parametrize("runtime", [
+    {**BASE["runtime"], "vllm": {"wheel": "/tmp/vllm-0.30.0-py3-none-any.whl"}},
+    {"vllm": {"repo": "https://github.com/tenstorrent/vllm", "ref": "bf98d556"},
+     "model_dir": "models/common"},
+])
+def test_the_reasoning_field_names_both_when_the_vllm_version_is_unknown(runtime):
+    kind = "vllm-fork" if "repo" in runtime["vllm"] else "vllm-plugin"
+    card = _card(kind=kind, serve=_REASONING, runtime=runtime)
+    assert ("the thinking text arrives in `reasoning` (`reasoning_content` on vLLM "
+            "before 0.11.1), apart from `content`." in card)
 
 
 def test_a_card_without_capabilities_claims_no_tool_calling():
