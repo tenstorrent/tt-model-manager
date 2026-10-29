@@ -1393,6 +1393,66 @@ def _stop_self_contained(entry: dict) -> None:
     console.milestone(f"stopped {entry.get('repo_id')}")
 
 
+def _bundle_server(entry: dict) -> Optional[dict]:
+    """The running v5/v6 server ``serve`` recorded for this install, or None."""
+    install = _install_root(entry)
+    try:
+        pid = int((install / SERVE_PID_FILE).read_text().strip())
+        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")
+    except (OSError, ValueError):
+        return None
+    if str(install) not in " ".join(cmd) or not _pid_alive(pid):
+        return None
+    ports = [cmd[i + 1] for i, a in enumerate(cmd[:-1]) if a == "--port"]
+    try:
+        env = dict(kv.split("=", 1) for kv in
+                   Path(f"/proc/{pid}/environ").read_bytes().decode(errors="replace").split("\0") if "=" in kv)
+    except OSError:
+        env = {}
+    return {"name": f"pid {pid}", "repo": entry.get("repo_id", "?"), "profile": "-", "instance": "",
+            "chips": env.get("TT_VISIBLE_DEVICES", env.get("TT_METAL_VISIBLE_DEVICES", "")),
+            "port": ports[-1] if ports else "", "status": "running", "kind": "bundle"}
+
+
+def _running_servers() -> List[dict]:
+    """Every model server on this host: tt-model containers plus v5/v6 bundle servers."""
+    repo_of = {}
+    for e in localdb.all_entries():
+        if e.get("container") and e.get("manifest"):
+            try:
+                repo_of[Manifest.from_json(Path(e["manifest"]).read_text()).name] = e["repo_id"]
+            except (OSError, ValueError):
+                pass
+    rows = [{"name": r["name"], "repo": repo_of.get(r["model"], r["model"]), "profile": r["profile"],
+             "instance": r["instance"], "chips": r["devices"], "port": r["port"],
+             "status": r["status"], "kind": "container"} for r in container.labelled_containers()]
+    rows += [r for r in (_bundle_server(e) for e in localdb.all_entries()
+                         if e.get("self_contained")) if r]
+    for r in rows:
+        r["url"] = f"http://127.0.0.1:{r['port']}" if r["port"].isdigit() else ""
+    return sorted(rows, key=lambda r: (r["repo"], r["profile"], r["instance"]))
+
+
+@app.command(rich_help_panel="Run a model")
+def ps(
+    as_json: bool = typer.Option(False, "--json", help="Print the list as JSON."),
+) -> None:
+    """List the model servers running on this host, with their chips and endpoints."""
+    rows = _running_servers()
+    if as_json:
+        console.raw(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        console.note("nothing running", marker="○")
+        return
+    cols = [("repo", "MODEL"), ("profile", "PROFILE"), ("instance", "NAME"), ("chips", "CHIPS"),
+            ("url", "ENDPOINT"), ("status", "STATUS")]
+    cells = [[h for _, h in cols]] + [[r[k] or "-" for k, _ in cols] for r in rows]
+    widths = [max(len(c[i]) for c in cells) for i in range(len(cols))]
+    for c in cells:
+        console.raw("  " + "  ".join(v.ljust(w) for v, w in zip(c, widths)).rstrip())
+
+
 @app.command(rich_help_panel="Environment")
 def login(
     token: Optional[str] = typer.Option(None, help="HF token; omit for interactive login."),
@@ -1445,6 +1505,9 @@ def serve(
         "it moves BOTH the published mapping and the server's own --port (which is why "
         "it must be a flag, not a passthrough argument); for a v5/v6 bundle it is "
         "appended to the launch command, where argparse last-wins."
+    ),
+    name: Optional[str] = typer.Option(
+        None, "--name", help="For a container package: an instance name, so the same package and profile can run more than once (each needs its own chips and port). `stop`, `logs` and `check` take the same --name."
     ),
     device_id: Optional[str] = typer.Option(
         None, "--device-id", help="For a container package: pin specific chip indices "
@@ -1528,7 +1591,7 @@ def serve(
                 cmani, profile_name=profile, print_only=print_only, follow=follow,
                 extra_args=extra_args, source=src, port=port, target=repo_id,
                 local_only=local_only, no_weights=no_weights, detach=detach,
-                device_id=device_id,
+                device_id=device_id, instance=name,
             )
         except container_cli.ContainerCliError as e:
             if e.diagnosis is not None:
@@ -1566,7 +1629,7 @@ def serve(
 
     # Past the container branch, the container-only options have nothing to act on. Say so
     # rather than drop them silently.
-    ignored = [f for f, v in (("--profile", profile), ("--device-id", device_id)) if v]
+    ignored = [f for f, v in (("--profile", profile), ("--device-id", device_id), ("--name", name)) if v]
     if ignored:
         one = len(ignored) == 1
         console.note(f"{' and '.join(ignored)} {'applies' if one else 'apply'} only to container "
@@ -1714,6 +1777,8 @@ def check_cmd(
                                         "request (default: ask the running server)."),
     base_url: Optional[str] = typer.Option(None, "--base-url", envvar=runtime.ENV_BASE_URL,
                                            help=f"Server root (default: {runtime.DEFAULT_BASE_URL})."),
+    name: Optional[str] = typer.Option(None, "--name", help="Send to the running instance with "
+                                       "this name (see `serve --name`) instead of --base-url."),
     task: Optional[str] = typer.Option(
         None, "--task", help="What the model does, as a Hugging Face pipeline tag (default: "
         "from the pulled manifest, else text-generation). Requests are sent for: "
@@ -1744,7 +1809,7 @@ def check_cmd(
 
     --print emits the equivalent curl instead of sending it, for a doc or a bug report.
     """
-    base = base_url or runtime.DEFAULT_BASE_URL
+    base = _instance_base_url(name) if name else (base_url or runtime.DEFAULT_BASE_URL)
     try:
         params = runtime.parse_extra_params(list(ctx.args))
     except ValueError as exc:
@@ -1841,6 +1906,19 @@ def _check_health(base: str, served: List[str], model_id: str, caps: probe.Capab
         raise _err(f"Nothing is serving at {base}. Start it with `tt-model serve <id>`.")
     typer.echo(f"{model_id} is up at {base}.")
     typer.secho(f"warning: {message}", fg=typer.colors.YELLOW, err=True)
+
+
+def _instance_base_url(instance: str) -> str:
+    """``http://127.0.0.1:<port>`` of the running instance named ``instance``."""
+    rows = container.labelled_containers(instance=instance)
+    if not rows:
+        raise _err(f"No running instance named {instance!r}. Start one with "
+                   f"`tt-model serve <id> --name {instance}`.")
+    port = rows[0]["port"]
+    if not port.isdigit():
+        raise _err(f"Instance {instance!r} ({rows[0]['name']}) has no port label; "
+                   "pass --base-url instead.")
+    return f"http://127.0.0.1:{port}"
 
 
 # ---------------------------------------------------------------------------- info
@@ -2428,6 +2506,8 @@ def _require_container(target: str):
 def stop(
     target: str = typer.Argument(..., help="Package or bundle: org/name, or a manifest path."),
     profile: Optional[str] = typer.Option(None, "--profile", help="Stop only this profile."),
+    name: Optional[str] = typer.Option(None, "--name", help="Stop only this instance "
+                                       "(see `serve --name`); default: every instance."),
 ) -> None:
     """Stop a running container package or v5/v6 bundle server, SIGTERM first.
 
@@ -2443,7 +2523,8 @@ def stop(
         return
 
     try:
-        container_cli.stop_container(_require_container(target), profile_name=profile)
+        container_cli.stop_container(_require_container(target), profile_name=profile,
+                                     instance=name)
     except (container_cli.ContainerCliError, container.ContainerError) as e:
         raise _err(str(e))
 
@@ -2453,6 +2534,8 @@ def logs(
     target: str = typer.Argument(..., help="Container package: org/name, or a manifest path."),
     follow: bool = typer.Option(False, "--follow", "-f", help="Stream new output."),
     profile: Optional[str] = typer.Option(None, "--profile", help="Logs for this profile."),
+    name: Optional[str] = typer.Option(None, "--name", help="Logs for this instance "
+                                       "(see `serve --name`)."),
 ) -> None:
     """Show the server logs of a running container package."""
     from . import container_cli
@@ -2460,7 +2543,7 @@ def logs(
     try:
         code = container_cli.logs_container(_require_container(target),
                                             profile_name=profile, follow=follow,
-                                            target=target)
+                                            target=target, instance=name)
     except (container_cli.ContainerCliError, container.ContainerError) as e:
         raise _err(str(e))
     if code != 0:
@@ -2643,6 +2726,172 @@ def _split_revision(repo_id: str) -> "tuple[str, Optional[str]]":
 def version() -> None:
     """Print the tt-model version."""
     typer.echo(__version__)
+
+
+# -------------------------------------------------------------------------- deploy
+deploy_app = typer.Typer(help="Serve several container packages side by side, from one file.",
+                         no_args_is_help=True)
+app.add_typer(deploy_app, name="deploy", rich_help_panel="Run a model")
+
+
+def _deploy_plan(file: str):
+    from . import deploy
+
+    try:
+        dep = deploy.load(file)
+        manifests = {i.model: _require_container(i.model) for i in dep.instances}
+        inventory = container.all_device_ids()
+        claimed = container._claimed_devices(inventory)
+        if claimed is None:
+            raise _err("could not tell which chips are in use (docker ps/inspect failed); refusing to plan")
+        placements = deploy.plan(dep, manifests, inventory=inventory, claimed=claimed,
+                                 boards=container.chip_boards(), port_free=container.port_is_free,
+                                 free_hugepages=container.free_hugepages_1g())
+    except (deploy.DeployError, container.ContainerError) as e:
+        raise _err(str(e))
+    return dep, placements
+
+
+def _plan_table(placements) -> None:
+    cells = [["NAME", "MODEL", "PROFILE", "CHIPS", "ENDPOINT"]] + [
+        [p.instance.name, p.instance.model, p.profile, ",".join(map(str, p.chips)),
+         f"http://127.0.0.1:{p.port}"] for p in placements]
+    widths = [max(len(c[i]) for c in cells) for i in range(5)]
+    for c in cells:
+        console.raw("  " + "  ".join(v.ljust(w) for v, w in zip(c, widths)).rstrip())
+
+
+@deploy_app.command("up")
+def deploy_up(
+    file: str = typer.Argument(..., help="Deployment file (YAML)."),
+    print_only: bool = typer.Option(False, "--print", help="Show the placement and stop."),
+    keep_going: bool = typer.Option(False, "--keep-going", help="Keep the instances that came up "
+                                    "when another fails, stop the failed ones, exit 1 "
+                                    "(default: stop them all)."),
+) -> None:
+    """Start every instance of a deployment, each on its own chips and port, and wait for all."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from . import container_cli
+    from .launchers import launcher_for
+
+    dep, placements = _deploy_plan(file)
+    _plan_table(placements)
+    if print_only:
+        return
+    from .boot_progress import diagnose_boot, summarize
+
+    started, failed, not_ready = [], [], []
+    rolled_back = False
+    try:
+        for p in placements:
+            try:
+                container_cli.serve_container(
+                    p.manifest, profile_name=p.profile, port=p.port, device_id=",".join(map(str, p.chips)),
+                    instance=p.instance.name, detach=True, target=p.instance.model,
+                    extra_args=p.instance.args, source=Path(p.instance.model).parent
+                    if Path(p.instance.model).is_file() else container_cli.pull_dir(p.instance.model))
+            except Exception as e:  # noqa: BLE001 - whatever stopped it, the rest is rolled back or kept
+                if not keep_going:
+                    raise _err(f"{dep.name}: could not start {p.instance.name}: {e}") from e
+                failed.append((p, f"could not start: {e}"))
+                continue
+            started.append(p)
+        if started:
+            # All at once: one instance that crashes is seen (and, without --keep-going, rolls the
+            # deployment back) right away, not after another one's whole boot or timeout.
+            timeout = container.ready_timeout_s()
+            with console.step(f"waiting for {len(started)} instance(s) to be ready") as st, \
+                    ThreadPoolExecutor(len(started)) as pool:
+                try:
+                    waits = {pool.submit(container.wait_ready, p.container,
+                                         launcher_for(p.manifest.container.kind).ready_probe(p.manifest),
+                                         timeout_s=timeout): p for p in started}
+                    for fut in as_completed(waits):
+                        p, res = waits[fut], fut.result()
+                        if res.ready:
+                            continue
+                        diag = diagnose_boot(res.tail, exited=res.exited, target=p.instance.model)
+                        failed.append((p, summarize(diag, res.tail)))
+                        not_ready.append(p)
+                        if not keep_going:
+                            break
+                except BaseException:
+                    _deploy_rollback(started)   # before the pool joins: the waits end as the containers stop
+                    rolled_back = True
+                    raise
+                if not_ready and not keep_going:
+                    _deploy_rollback(started)
+                    rolled_back = True
+                if not_ready:
+                    st.fail()
+                    st.detail(f"{', '.join(p.instance.name for p in not_ready)} did not come up")
+    except BaseException:  # a start error, or Ctrl-C while waiting: never leave half a deployment running
+        if not rolled_back:
+            _deploy_rollback(started)
+        raise
+    for p, why in failed:
+        console.note(f"{p.instance.name}: {why}", marker="✗", style="error")
+    if failed and not keep_going:
+        if not rolled_back:
+            _deploy_rollback(started)
+        raise _err(f"{dep.name}: {', '.join(p.instance.name for p, _ in failed)} did not come up; "
+                   "stopped the deployment (pass --keep-going to keep the instances that did)")
+    _deploy_rollback(not_ready)   # --keep-going keeps what came up, not what is still booting or broken
+    ready = [p for p in started if p not in not_ready]
+    console.milestone(f"{dep.name}: {len(ready)} of {len(placements)} instance(s) ready")
+    _plan_table(ready)
+    if failed:
+        raise _err(f"{dep.name}: {', '.join(p.instance.name for p, _ in failed)} did not come up and "
+                   "were stopped; kept the rest (--keep-going)")
+
+
+def _deploy_rollback(started) -> None:
+    """Stop what this deploy started, and remove the containers that already exited."""
+    from . import container_cli
+
+    for p in reversed(started):
+        container_cli.stop_container(p.manifest, profile_name=p.profile, instance=p.instance.name)
+        if container.container_exists(p.container) and not container.is_running(p.container):
+            container.remove(p.container, force=True)
+
+
+@deploy_app.command("down")
+def deploy_down(file: str = typer.Argument(..., help="Deployment file (YAML).")) -> None:
+    """Stop every instance of a deployment."""
+    from . import container_cli, deploy
+
+    try:
+        dep = deploy.load(file)
+        for inst in dep.instances:
+            container_cli.stop_container(_require_container(inst.model), profile_name=inst.profile,
+                                         instance=inst.name)
+    except (deploy.DeployError, container_cli.ContainerCliError, container.ContainerError) as e:
+        raise _err(str(e))
+
+
+@deploy_app.command("status")
+def deploy_status(file: str = typer.Argument(..., help="Deployment file (YAML).")) -> None:
+    """Show which instances of a deployment are running, with their chips and endpoints."""
+    from . import container_cli, deploy
+
+    try:
+        dep = deploy.load(file)
+        # by container name (model, profile and instance), as `deploy down` stops them: an instance
+        # name alone could match another deployment's server, or one started by hand with --name
+        wanted = {}
+        for i in dep.instances:
+            m = _require_container(i.model)
+            assert m.container is not None
+            wanted[container.container_name(m, m.container.resolve_profile(i.profile), i.name)] = i.name
+    except (deploy.DeployError, container_cli.ContainerCliError, container.ContainerError, ValueError) as e:
+        raise _err(str(e))
+    rows = [r for r in _running_servers() if r["name"] in wanted]
+    running = {wanted[r["name"]] for r in rows}
+    for r in rows:
+        console.raw(f"  ✓ {r['instance']:<16} {r['repo']}  chips {r['chips'] or '-'}  {r['url'] or '-'}")
+    for n in sorted(set(wanted.values()) - running):
+        console.raw(f"  ○ {n:<16} not running")
 
 
 def main() -> None:

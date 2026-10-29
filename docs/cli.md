@@ -17,14 +17,19 @@ tt-model serve you/mymodel --print                 # print the exact launch comm
 tt-model serve you/mymodel --local-only            # require an installed bundle; do not hit the Hub
 tt-model serve you/mymodel --port 8001             # serve's own option; see the pass-through rule below
 tt-model serve you/mymodel --extra vllm-arg        # anything serve does not own is passed through to vLLM
+tt-model serve you/mymodel --name b --detach       # container packages: a second, named instance (own chips + port)
 
 tt-model check "hello"                              # send the running model a request that suits it
 tt-model check "write a haiku" --temperature 0.7 --max-tokens 200
 tt-model check "hello" --print                      # emit the equivalent curl instead of sending
 tt-model check "a red fox" --task text-to-image -o fox.jpg   # name the task when no manifest says it
 
+tt-model check "hello" --name b                     # send it to the instance named b
 tt-model stop you/mymodel                          # stop the running server (SIGTERM first; container or v5/v6 bundle)
+tt-model stop you/mymodel --name b                 # stop only instance b (without --name: every instance)
 tt-model logs you/mymodel                          # container packages: show the server logs
+tt-model ps                                        # every model server on this host: chips, endpoint, status (--json too)
+tt-model deploy up my-deployment.yaml               # several models side by side, each on its own chips + port
 ```
 
 `tt-model serve <id>` is the one-command path. For an already-installed bundle it runs the
@@ -36,11 +41,13 @@ and go straight to launch. For a v5.1 container package, `serve` runs the image 
 [container_packages.md](container_packages.md#consuming-and-serving)).
 
 **Pass-through rule.** `--port`, `--print`, `--local-only`, `--force`, `--arch`, `--profile`,
-`--detach`, `--no-weights`, `--refresh`, `--no-update-check`, and `--device-id` are `serve`'s
+`--detach`, `--no-weights`, `--refresh`, `--no-update-check`, `--device-id`, and `--name` are `serve`'s
 own options and can appear before or after the bundle id. Anything else after the id passes through to vLLM unchanged. This rule is the
-same for every package format. `--profile` and `--device-id` act only on a v5.1 container
+same for every package format. `--profile`, `--device-id` and `--name` act only on a v5.1 container
 package; a v5/v6 bundle has one launch config, so `serve` ignores them there and prints a note
 saying so.
+
+To serve several packages at once, see [multi_model.md](multi_model.md).
 
 `serve` also compares the installed revision to the Hub's tip and prints a non-blocking
 advisory if a newer one exists. Skip it with `--no-update-check`, `--local-only`, or a pinned
@@ -52,8 +59,8 @@ advisory if a newer one exists. Skip it with `--no-update-check`, `--local-only`
 does not mean hand-writing JSON and matching the model id exactly. The model id comes from the
 running server (`GET /v1/models`). With nothing serving yet, `--print` falls back to the
 installed bundle's weights id so it still emits something pasteable. Any option the command
-does not reserve (`--print`, `--model`, `--base-url`, `--task`, `--tools`, `--api-key`,
-`--output`) goes straight into the request body, so the whole sampling surface is available.
+does not reserve (`--print`, `--model`, `--base-url`, `--name`, `--task`, `--tools`,
+`--api-key`, `--output`) goes straight into the request body, so the whole sampling surface is available.
 
 The request follows the task, named as a Hugging Face `pipeline_tag`. `--task` sets it;
 otherwise it comes from the pulled package's manifest (the card's `pipeline_tag`, else what
