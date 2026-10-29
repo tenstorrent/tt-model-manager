@@ -41,7 +41,7 @@ instances:
 
 | key | meaning |
 |---|---|
-| `name` | instance name; also what `--name` takes in `stop`, `logs`, `curl` |
+| `name` | instance name; also what `--name` takes in `stop`, `logs`, `check` |
 | `model` | a pulled container package (`org/name`) or a manifest path |
 | `profile` | serve profile; default: the package's default |
 | `chips` | list of chip ids, or `auto` (default) |
@@ -79,7 +79,7 @@ tt-model deploy up examples/deploy/gptoss-2x-p150x2.yaml --print   # show the pl
 tt-model deploy up examples/deploy/gptoss-2x-p150x2.yaml           # start all, wait until every one is ready
 tt-model deploy status examples/deploy/gptoss-2x-p150x2.yaml       # which instances are up
 tt-model ps                                                         # every server on the host
-tt-model curl "hello" --name gptoss-b                               # talk to one instance
+tt-model check "hello" --name gptoss-b                              # talk to one instance
 tt-model deploy down examples/deploy/gptoss-2x-p150x2.yaml         # stop all
 ```
 

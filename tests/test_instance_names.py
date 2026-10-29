@@ -92,16 +92,16 @@ def test_serve_refuses_a_bad_instance_name_before_any_work(tmp_path, monkeypatch
         container_cli.serve_container(_manifest(tmp_path), target="org/x", instance="Bad")
 
 
-def test_curl_by_name_targets_that_instances_port(monkeypatch):
+def test_check_by_name_targets_that_instances_port(monkeypatch):
     monkeypatch.setattr(container, "labelled_containers", lambda **kw: [
         {"name": "tt-model-x-p150.a", "status": "Up", "model": "x", "profile": "p150",
          "instance": kw.get("instance"), "port": "20005", "devices": "0"}])
-    res = runner.invoke(cli.app, ["curl", "hi", "--name", "a", "--model", "m", "--print"])
+    res = runner.invoke(cli.app, ["check", "hi", "--name", "a", "--model", "m", "--print"])
     assert res.exit_code == 0, res.output
     assert "http://127.0.0.1:20005/v1/chat/completions" in res.output
 
 
-def test_curl_by_an_unknown_name_says_how_to_start_it(monkeypatch):
-    res = runner.invoke(cli.app, ["curl", "hi", "--name", "nope", "--model", "m", "--print"])
+def test_check_by_an_unknown_name_says_how_to_start_it(monkeypatch):
+    res = runner.invoke(cli.app, ["check", "hi", "--name", "nope", "--model", "m", "--print"])
     assert res.exit_code != 0
     assert "tt-model serve <id> --name nope" in res.output
