@@ -348,7 +348,7 @@ landmarks parsed out of the container log — never the log itself:
 A percentage appears only where the log states a real total (weight shards, per-layer KV
 allocation); everything else shows its running time. When the server reports ready the list
 is erased and replaced by one `✓ you/my-model ready  4m 12s` line and a card with the
-endpoint, a `tt-model curl` example, and the `logs`/`stop` hints. A boot that fails leaves
+endpoint, a `tt-model check` example, and the `logs`/`stop` hints. A boot that fails leaves
 the list in place, marks the step it died in, and renders a diagnosis card (the cause,
 one log line of evidence, what to try) instead of dumping the log. `-v` keeps every row;
 a piped run prints each row once with no escape codes. Pass `--detach` to return as soon
