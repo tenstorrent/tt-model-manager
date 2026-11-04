@@ -290,6 +290,30 @@ def _member_env(member: Member):
                 os.environ[k] = v
 
 
+class _Timing:
+    """Per-call wall time, logged every TT_COHOST_TIMING_S seconds of activity (0 = off)."""
+
+    def __init__(self, who: str):
+        self.who, self.every = who, float(os.environ.get("TT_COHOST_TIMING_S", "30"))
+        self.acc: Dict[str, List[float]] = {}
+        self.last = time.monotonic()
+        self.lock = threading.Lock()
+
+    def add(self, key, dt: float) -> None:
+        if not self.every or not isinstance(key, str):
+            return
+        with self.lock:
+            a = self.acc.setdefault(key, [0, 0.0])
+            a[0] += 1
+            a[1] += dt
+            now = time.monotonic()
+            if now - self.last >= self.every:
+                parts = ", ".join(f"{k} {n}x {1000 * t / n:.2f} ms" for k, (n, t) in sorted(self.acc.items()))
+                log.info("cohost timing %s (%.0f s): %s", self.who, now - self.last, parts)
+                self.acc.clear()
+                self.last = now
+
+
 class VllmMember:
     """The device-host side of one vLLM member: a real TTWorker driven over a Unix socket."""
 
@@ -306,6 +330,7 @@ class VllmMember:
         self._ids = itertools.count(1)
         self._sample_pending = False
         self._step = ""                       # what the current step runs, for the late-compile log
+        self.timing = _Timing(f"{member.name} host")
 
     # ------------------------------------------------------------- serving
     def serve(self) -> None:
@@ -319,8 +344,10 @@ class VllmMember:
         try:
             while True:
                 req = rpc.recv(conn)
+                t0 = time.perf_counter()
                 try:
                     reply = rpc.ok(self.handle(req))
+                    self.timing.add(req.get("method") if req["op"] == "run" else req["op"], time.perf_counter() - t0)
                 except BaseException as e:  # noqa: BLE001 - every failure goes back to the frontend
                     log.exception("cohost: %s %s failed", self.name, req.get("method", req["op"]))
                     if req.get("method") in self.LOAD_TIME:
@@ -360,7 +387,13 @@ class VllmMember:
         return self._call(method, args, kwargs)
 
     def _on_device(self, fn):
-        return self.host.device.run(self.name, fn)
+        def timed():
+            t = time.perf_counter()
+            try:
+                return fn()
+            finally:
+                self.timing.add("device", time.perf_counter() - t)
+        return self.host.device.run(self.name, timed)
 
     def _call(self, method, args, kwargs):
         from vllm.v1.serial_utils import run_method

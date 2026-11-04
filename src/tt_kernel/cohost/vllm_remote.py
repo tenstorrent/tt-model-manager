@@ -12,6 +12,7 @@ is the only process that opens the chips.
 from __future__ import annotations
 
 import os
+import time
 from concurrent.futures import Future
 from typing import Any, Callable
 
@@ -24,6 +25,15 @@ from . import rpc
 ASYNC_REF = "__cohost_async_ref__"
 
 
+def _timing():
+    from .host import _Timing  # host imports only stdlib at module level
+
+    return _Timing(f"{os.environ.get('TT_COHOST_MEMBER', '?')} frontend")
+
+
+_FRONT = _timing()
+
+
 class _RemoteOutputFuture(Future):
     """Resolved on first ``result()`` by asking the host for the deferred output (as UniProc does)."""
 
@@ -34,7 +44,9 @@ class _RemoteOutputFuture(Future):
     def result(self, timeout=None):
         if not super().done():
             try:
+                t0 = time.perf_counter()
                 out = self._client.call("get_output", ref=self._ref)
+                _FRONT.add("get_output", time.perf_counter() - t0)
                 self.set_result(out if self._single else [out])
             except Exception as e:  # noqa: BLE001 - surfaced through the future
                 self.set_exception(e)
@@ -42,6 +54,8 @@ class _RemoteOutputFuture(Future):
 
 
 class RemoteExecutor(UniProcExecutor):
+    _timing = _FRONT
+
     def _init_executor(self) -> None:
         self.driver_worker = None
         self._client = rpc.Client(os.environ["TT_COHOST_SOCKET"],
@@ -66,7 +80,9 @@ class RemoteExecutor(UniProcExecutor):
         if not isinstance(method, str):
             method = cloudpickle.dumps(method)
         try:
+            t0 = time.perf_counter()
             result = self._client.call("run", method=method, args=args, kwargs=kwargs or {})
+            self._timing.add(method, time.perf_counter() - t0)
         except Exception as e:  # noqa: BLE001 - a non-blocking caller expects a failed future
             if not non_block:
                 raise
