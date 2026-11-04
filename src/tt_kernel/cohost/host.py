@@ -96,18 +96,25 @@ class Host:
         #: Mixed groups: set once every app member has loaded. A vLLM member's ``load_model`` waits for it, so
         #: the apps' weights are in DRAM before any vLLM member sizes and allocates its KV pool.
         self.apps_loaded = threading.Event()
+        #: Set once the group's mesh is open. In a mixed group the vLLM member's worker opens it, with exactly the
+        #: arguments it would use alone (the plugin's trace mode and the model's fabric config); apps wait for it.
+        self.mesh_ready = threading.Event()
         if not any(m.kind == "app" for m in cfg.members) or not any(m.kind == "vllm" for m in cfg.members):
             self.apps_loaded.set()
 
     # ------------------------------------------------------------------ mesh
-    def open_mesh(self):
-        """Open the group's one mesh on the device thread (first caller wins)."""
+    def open_mesh(self, *args, **kwargs):
+        """Open the group's one mesh on the device thread (first caller wins). A vLLM worker's call passes its
+        own arguments through (the plugin's trace mode, the model's fabric config); without arguments the mesh
+        opens with the group's tt_config."""
         def _open():
             if self.mesh is None:
                 os.environ["MESH_DEVICE"] = self.cfg.mesh_device
-                self.mesh = self._open_mesh(self.cfg.tt_config, "all")
+                self.mesh = self._open_mesh(*args, **kwargs) if args or kwargs else \
+                    self._open_mesh(self.cfg.tt_config, "all")
                 log.info("cohost mesh %s open: %d devices", self.cfg.mesh_device,
                          self.mesh.get_num_devices())
+                self.mesh_ready.set()
             return self.mesh
         return self.device.run("host", _open)
 
@@ -132,6 +139,7 @@ class Host:
                         ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
                 self._close_mesh = close
                 log.info("cohost mesh %s open: %d devices", self.cfg.mesh_device, self.mesh.get_num_devices())
+                self.mesh_ready.set()
             return self.mesh
         return self.device.run("host", _open)
 
@@ -139,7 +147,7 @@ class Host:
         """Every TTWorker gets the shared mesh, and none of them may close it."""
         from vllm_tt_plugin import worker as ttw
         self._open_mesh, self._close_mesh = ttw.open_mesh_device, ttw.close_mesh_device
-        ttw.open_mesh_device = lambda *a, **k: self.open_mesh()
+        ttw.open_mesh_device = lambda *a, **k: self.open_mesh(*a, **k)
         ttw.close_mesh_device = lambda *a, **k: None
         blocks = ttw.get_num_available_blocks_tt
         caps = {m.name: m.kv_tokens for m in self.cfg.members if m.kv_tokens}
@@ -484,6 +492,8 @@ class VllmMember:
             decode = dict(kv_cache=runner.kv_caches, max_batch_size=runner.tt_max_batch_size,
                           num_blocks=runner.max_num_blocks_per_req,
                           can_sample_on_device=sod in ("all", "decode_only"))
+            if getattr(runner, "supports_device_grammar", False):   # newer plugins: as their warmup_model does
+                decode["can_sample_device_grammar"] = True
             return prefill, decode
 
         def compile_pass():

@@ -324,7 +324,7 @@ def test_the_shared_mesh_is_opened_once_with_the_real_opener(tmp_path, monkeypat
     the original underneath, or every TTWorker recurses into itself."""
     opened = []
     mesh = types.SimpleNamespace(get_num_devices=lambda: 4)
-    ttw = types.SimpleNamespace(open_mesh_device=lambda cfg, mode: opened.append(mode) or mesh,
+    ttw = types.SimpleNamespace(open_mesh_device=lambda cfg, mode, *rest, **kw: opened.append(mode) or mesh,
                                 close_mesh_device=lambda *a: None,
                                 get_num_available_blocks_tt=lambda cfg, n=1: 1000)
     monkeypatch.setitem(sys.modules, "vllm_tt_plugin", types.SimpleNamespace(worker=ttw))
@@ -500,7 +500,9 @@ def test_mixed_group_apps_load_before_vllm_weights_and_capture_after_vllm(tmp_pa
                {"name": "emb", "kind": "app", "port": 2, "app": "x:y"},
                {"name": "rr", "kind": "app", "port": 3, "app": "x:y"}]
     host = hostmod.Host(cfgmod.load(_write(tmp_path, members=members)))
-    monkeypatch.setattr(host, "open_mesh", lambda: "MESH")
+    host.mesh = "MESH"
+    host.mesh_ready.set()
+    monkeypatch.setattr(host, "dram_gb_per_chip", lambda: None)
     monkeypatch.setattr(host, "after_all_captured", lambda: ev("baseline"))
     monkeypatch.setattr(apps, "load_factory", lambda spec: Fake)
     monkeypatch.setattr(apps, "serve_asgi", lambda app, port, name: (app, port))
@@ -543,10 +545,28 @@ def test_a_failed_app_load_releases_the_vllm_member_with_the_failure(tmp_path, m
     members = [{"name": "llm", "kind": "vllm", "port": 1, "model": "m"},
                {"name": "emb", "kind": "app", "port": 2, "app": "x:y"}]
     host = hostmod.Host(cfgmod.load(_write(tmp_path, members=members)))
-    monkeypatch.setattr(host, "open_mesh", lambda: "MESH")
+    host.mesh = "MESH"
+    host.mesh_ready.set()
+    monkeypatch.setattr(host, "dram_gb_per_chip", lambda: None)
     monkeypatch.setattr(apps, "load_factory", lambda spec: Broken)
     with pytest.raises(RuntimeError, match="out of DRAM"):
         apps.boot_apps(host, [host.cfg.members[1]])
     assert host.apps_loaded.is_set()
     with pytest.raises(RuntimeError, match="out of DRAM"):
         host.loaded.wait("llm")
+
+
+def test_a_vllm_workers_mesh_open_passes_its_own_arguments(tmp_path, monkeypatch):
+    """The plugin's worker opens the mesh with its trace mode and the model's fabric config; the group keeps them."""
+    seen = []
+    mesh = types.SimpleNamespace(get_num_devices=lambda: 4)
+    ttw = types.SimpleNamespace(open_mesh_device=lambda *a, **k: seen.append((a, k)) or mesh,
+                                close_mesh_device=None, get_num_available_blocks_tt=lambda cfg, n=1: 1)
+    monkeypatch.setitem(sys.modules, "vllm_tt_plugin", types.SimpleNamespace(worker=ttw))
+    monkeypatch.setitem(sys.modules, "vllm_tt_plugin.worker", ttw)
+    host = hostmod.Host(cfgmod.load(_write(tmp_path)))
+    host.install_mesh_hooks()
+    assert ttw.open_mesh_device({"fabric_config": "FABRIC_1D"}, "all", 0, model_fabric_config="X") is mesh
+    assert ttw.open_mesh_device("ignored", "second") is mesh            # first caller wins
+    assert seen == [(({"fabric_config": "FABRIC_1D"}, "all", 0), {"model_fabric_config": "X"})]
+    assert host.mesh_ready.is_set()

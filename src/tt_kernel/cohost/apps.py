@@ -28,6 +28,7 @@ import threading
 from typing import Any, Callable, Dict, List
 
 from .config import Member
+from .host import BARRIER_TIMEOUT_S
 
 log = logging.getLogger("tt_cohost")
 
@@ -102,9 +103,10 @@ def boot_apps(host, members: List[Member]) -> Dict[str, threading.Thread]:
 
 
 def _boot_mixed(host, apps) -> Dict[str, threading.Thread]:
-    """App members in a group with vLLM members, on the mesh the vLLM plugin opens (its fabric, trace region and
-    dispatch settings), through the same phases as the vLLM members:
+    """App members in a group with vLLM members, on the mesh the vLLM member's worker opens (its fabric, trace
+    region and dispatch settings, as when it is served alone), through the same phases as the vLLM members:
 
+    0. wait for the mesh: the vLLM member's worker opens it in ``init_device`` with its own arguments;
     1. load every app (before any vLLM member's ``load_model``: ``host.apps_loaded``), then the ``loaded`` barrier
        (the vLLM members arrive once their weights and KV pool are allocated);
     2. warm every app once (compiles every program; may capture traces), release the traces, ``compiled`` barrier;
@@ -116,7 +118,10 @@ def _boot_mixed(host, apps) -> Dict[str, threading.Thread]:
 
     names = [m.name for m, _ in apps]
     try:
-        mesh = host.open_mesh()
+        # the vLLM member's worker opens the mesh (init_device precedes load_model), exactly as it would alone
+        if not host.mesh_ready.wait(BARRIER_TIMEOUT_S):
+            raise TimeoutError(f"no vLLM member opened the mesh within {BARRIER_TIMEOUT_S:.0f} s")
+        mesh = host.mesh
         for m, app in apps:
             def load(m=m, app=app):
                 before = host.dram_gb_per_chip()
