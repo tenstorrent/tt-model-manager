@@ -1,0 +1,6 @@
+# Two GPT-OSS-20B servers on a QuietBox 2, one per P300 board (chips 0,1 and 2,3).
+# 32 users each, 64 in total, each with its own endpoint. `-throughput` is the profile for concurrent traffic.
+deployment: gptoss-64u
+instances:
+  - {name: gptoss-a, model: jashansinghTT/gpt-oss-20b-blackhole-fast, profile: p150x2-throughput}
+  - {name: gptoss-b, model: jashansinghTT/gpt-oss-20b-blackhole-fast, profile: p150x2-throughput}

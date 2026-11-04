@@ -79,3 +79,23 @@ def _no_real_proc_scan(monkeypatch):
     real = container._host_claimed_devices
     monkeypatch.setattr(container, "_host_claimed_devices",
                         lambda proc_root=None: real(proc_root) if proc_root else set())
+
+
+#: The real label listing, for the tests that exercise it against a faked ``_run``.
+_REAL_LABELLED_CONTAINERS = container.labelled_containers
+
+
+@pytest.fixture(autouse=True)
+def _no_real_container_listing(monkeypatch):
+    """Keep ``labelled_containers`` from asking this host's docker which containers exist."""
+    monkeypatch.setattr(container, "labelled_containers", lambda **kw: [])
+
+
+@pytest.fixture
+def real_labelled_containers(monkeypatch):
+    monkeypatch.setattr(container, "labelled_containers", _REAL_LABELLED_CONTAINERS)
+    return _REAL_LABELLED_CONTAINERS
+@pytest.fixture(autouse=True)
+def _no_real_board_scan(monkeypatch, tmp_path_factory):
+    """Keep ``chip_boards`` off this host's real sysfs; board tests pass their own ``sys_root``."""
+    monkeypatch.setattr(container, "TT_SYS_CLASS", str(tmp_path_factory.getbasetemp() / "no-tt-sysfs"))

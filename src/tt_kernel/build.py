@@ -1257,6 +1257,15 @@ def _capability_notes(m: ContainerManifest) -> List[str]:
     and a reasoning parser only the default set was claimed for every profile — directly
     under a table inviting the reader to pick a different one.
     """
+    # vLLM 0.11.1 renamed `reasoning_content` to `reasoning`; 0.16.0 dropped the old name.
+    ver = re.match(r"(\d+)\.(\d+)\.(\d+)", str((m.runtime.get("vllm") or {}).get("version") or ""))
+    if not ver:  # a wheel, a source tree or the fork: the version is unknown here
+        field = "`reasoning` (`reasoning_content` on vLLM before 0.11.1)"
+    elif tuple(map(int, ver.groups())) >= (0, 11, 1):
+        field = "`reasoning`"
+    else:
+        field = "`reasoning_content`"
+
     def _sentences(cap) -> List[str]:
         out = []
         if cap and cap.tool_parser:
@@ -1269,7 +1278,7 @@ def _capability_notes(m: ContainerManifest) -> List[str]:
             out.append(
                 f"reasoning output is separated (`--reasoning_parser "
                 f"{cap.reasoning_parser}`): the thinking text arrives in "
-                "`reasoning_content`, apart from `content`"
+                f"{field}, apart from `content`"
             )
         return out
 

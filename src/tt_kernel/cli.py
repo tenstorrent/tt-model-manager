@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
@@ -30,7 +31,7 @@ from . import (
 )
 from . import (
     auth, compat, container, hub, localdb, metal,
-    packaging, runtime,
+    packaging, probe, runtime,
 )
 from .manifest import (
     DEFAULT_PORT,
@@ -1392,6 +1393,66 @@ def _stop_self_contained(entry: dict) -> None:
     console.milestone(f"stopped {entry.get('repo_id')}")
 
 
+def _bundle_server(entry: dict) -> Optional[dict]:
+    """The running v5/v6 server ``serve`` recorded for this install, or None."""
+    install = _install_root(entry)
+    try:
+        pid = int((install / SERVE_PID_FILE).read_text().strip())
+        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")
+    except (OSError, ValueError):
+        return None
+    if str(install) not in " ".join(cmd) or not _pid_alive(pid):
+        return None
+    ports = [cmd[i + 1] for i, a in enumerate(cmd[:-1]) if a == "--port"]
+    try:
+        env = dict(kv.split("=", 1) for kv in
+                   Path(f"/proc/{pid}/environ").read_bytes().decode(errors="replace").split("\0") if "=" in kv)
+    except OSError:
+        env = {}
+    return {"name": f"pid {pid}", "repo": entry.get("repo_id", "?"), "profile": "-", "instance": "",
+            "chips": env.get("TT_VISIBLE_DEVICES", env.get("TT_METAL_VISIBLE_DEVICES", "")),
+            "port": ports[-1] if ports else "", "status": "running", "kind": "bundle"}
+
+
+def _running_servers() -> List[dict]:
+    """Every model server on this host: tt-model containers plus v5/v6 bundle servers."""
+    repo_of = {}
+    for e in localdb.all_entries():
+        if e.get("container") and e.get("manifest"):
+            try:
+                repo_of[Manifest.from_json(Path(e["manifest"]).read_text()).name] = e["repo_id"]
+            except (OSError, ValueError):
+                pass
+    rows = [{"name": r["name"], "repo": repo_of.get(r["model"], r["model"]), "profile": r["profile"],
+             "instance": r["instance"], "chips": r["devices"], "port": r["port"],
+             "status": r["status"], "kind": "container"} for r in container.labelled_containers()]
+    rows += [r for r in (_bundle_server(e) for e in localdb.all_entries()
+                         if e.get("self_contained")) if r]
+    for r in rows:
+        r["url"] = f"http://127.0.0.1:{r['port']}" if r["port"].isdigit() else ""
+    return sorted(rows, key=lambda r: (r["repo"], r["profile"], r["instance"]))
+
+
+@app.command(rich_help_panel="Run a model")
+def ps(
+    as_json: bool = typer.Option(False, "--json", help="Print the list as JSON."),
+) -> None:
+    """List the model servers running on this host, with their chips and endpoints."""
+    rows = _running_servers()
+    if as_json:
+        console.raw(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        console.note("nothing running", marker="○")
+        return
+    cols = [("repo", "MODEL"), ("profile", "PROFILE"), ("instance", "NAME"), ("chips", "CHIPS"),
+            ("url", "ENDPOINT"), ("status", "STATUS")]
+    cells = [[h for _, h in cols]] + [[r[k] or "-" for k, _ in cols] for r in rows]
+    widths = [max(len(c[i]) for c in cells) for i in range(len(cols))]
+    for c in cells:
+        console.raw("  " + "  ".join(v.ljust(w) for v, w in zip(c, widths)).rstrip())
+
+
 @app.command(rich_help_panel="Environment")
 def login(
     token: Optional[str] = typer.Option(None, help="HF token; omit for interactive login."),
@@ -1444,6 +1505,9 @@ def serve(
         "it moves BOTH the published mapping and the server's own --port (which is why "
         "it must be a flag, not a passthrough argument); for a v5/v6 bundle it is "
         "appended to the launch command, where argparse last-wins."
+    ),
+    name: Optional[str] = typer.Option(
+        None, "--name", help="For a container package: an instance name, so the same package and profile can run more than once (each needs its own chips and port). `stop`, `logs` and `check` take the same --name."
     ),
     device_id: Optional[str] = typer.Option(
         None, "--device-id", help="For a container package: pin specific chip indices "
@@ -1527,7 +1591,7 @@ def serve(
                 cmani, profile_name=profile, print_only=print_only, follow=follow,
                 extra_args=extra_args, source=src, port=port, target=repo_id,
                 local_only=local_only, no_weights=no_weights, detach=detach,
-                device_id=device_id,
+                device_id=device_id, instance=name,
             )
         except container_cli.ContainerCliError as e:
             if e.diagnosis is not None:
@@ -1565,7 +1629,7 @@ def serve(
 
     # Past the container branch, the container-only options have nothing to act on. Say so
     # rather than drop them silently.
-    ignored = [f for f, v in (("--profile", profile), ("--device-id", device_id)) if v]
+    ignored = [f for f, v in (("--profile", profile), ("--device-id", device_id), ("--name", name)) if v]
     if ignored:
         one = len(ignored) == 1
         console.note(f"{' and '.join(ignored)} {'applies' if one else 'apply'} only to container "
@@ -1615,7 +1679,7 @@ def serve(
         _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
 
 
-# ---------------------------------------------------------------------------- curl
+# ---------------------------------------------------------------------------- check
 def _discover_model(served: List[str]) -> "tuple[Optional[str], Optional[str]]":
     """Which model id to put in the request, and why — ``(model, source)``.
 
@@ -1634,85 +1698,136 @@ def _discover_model(served: List[str]) -> "tuple[Optional[str], Optional[str]]":
     return None, None
 
 
-# Container kinds that front an OpenAI chat endpoint, which is all `curl` knows how to
-# speak. Anything else (a diffusion or audio server) has routes of its own, and a chat
-# body posted at it just 404s.
-_CHAT_KINDS = frozenset({"vllm-plugin", "vllm-fork"})
+@dataclass(frozen=True)
+class _Pulled:
+    """A pulled package as `check` sees it: what it serves under, and what it can do."""
+
+    repo_id: str
+    name: str
+    weights: Optional[str]
+    kind: str
+    caps: probe.Capabilities
 
 
-def _non_chat_package_hint(base: str, served: List[str]) -> Optional[str]:
-    """The message to print instead of a chat request when the package `curl` would hit
-    is not a chat server — else None.
+def _pulled_packages() -> List[_Pulled]:
+    """Every pulled package whose manifest is readable, with the capabilities it declares.
 
-    A pulled ``kind: tt-dit-server`` package answers ``/v1/models`` like everyone else, so
-    model discovery "succeeds" and the chat body 404s with nothing to say about why. The
-    kind is in the pulled manifest; match it against what the server reports (its weights
-    id or its name), or — with nothing listening — take it when it is the only thing pulled.
+    The task is the card's ``pipeline_tag``, else what the serving kind implies; tool calling
+    is the (default profile's) ``tool_parser``.
     """
     from . import container_cli
+    from .launchers import LauncherError, launcher_for
 
-    hits, others = [], 0
+    pulled = []
     for e in localdb.all_entries():
-        m = container_cli.load_pulled(e["repo_id"]) if e.get("container") else None
-        if m is None or m.container.kind in _CHAT_KINDS:
-            others += 1
+        repo_id = e.get("repo_id", "")
+        if e.get("container"):
+            m = container_cli.load_pulled(repo_id)
+            if m is None:
+                continue
+            spec = m.container
+            kind = spec.kind
+            try:
+                task = launcher_for(kind).DEFAULT_PIPELINE_TAG
+            except LauncherError:
+                task = None
+            task = (spec.card.pipeline_tag if spec.card else None) or task
+            try:
+                capabilities = spec.resolve_profile().capabilities
+            except ValueError:
+                capabilities = None
+        elif e.get("self_contained") and e.get("install_dir"):
+            try:
+                m = Manifest.from_json((Path(e["install_dir"]) / MANIFEST_NAME).read_text())
+            except (OSError, ValueError):
+                continue
+            kind = m.deps.kind if m.deps else "vllm"
+            task = probe.TEXT_GENERATION if kind == "vllm" else None
+            capabilities = m.capabilities
+        else:
             continue
-        weights = m.weights.repo_id if m.weights else None
-        matched = any(s == weights or m.name in s for s in served)
-        hits.append((e["repo_id"], m.container.kind, matched))
-    if served:
-        chosen = next(((r, k) for r, k, matched in hits if matched), None)
-    else:
-        chosen = (hits[0][0], hits[0][1]) if len(hits) == 1 and not others else None
-    if not chosen:
-        return None
-    repo_id, kind = chosen
-    return (
-        f"{repo_id} serves {kind}, not chat completions, so `tt-model curl` cannot talk to it.\n"
-        f"  This package serves {kind}; try:  curl {base}/v1/health\n"
-        f"                                    curl {base}/v1/models\n"
-        f"  Its own routes (e.g. /v1/audio/speech, /v1/images/generations) are in its model "
-        f"card:  https://huggingface.co/{repo_id}"
-    )
+        caps = probe.Capabilities(task, bool(capabilities and capabilities.tool_parser),
+                                  source=f"{repo_id}'s manifest")
+        pulled.append(_Pulled(repo_id, m.name, m.weights.repo_id if m.weights else None,
+                              kind, caps))
+    return pulled
 
 
-@app.command(name="curl", context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+def _match_pulled(pulled: List[_Pulled], model_id: str) -> Optional[_Pulled]:
+    """The package serving ``model_id``: its weights id, or (a dit app) its name in the id."""
+    return next((p for p in pulled if model_id == p.weights or p.name in model_id), None)
+
+
+def _image_path(model_id: str, data: bytes) -> Path:
+    import re
+    from datetime import datetime
+
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", model_id.rsplit("/", 1)[-1])
+    return Path(f"{name}-{datetime.now():%Y%m%d-%H%M%S}{probe.image_suffix(data)}")
+
+
+@app.command(name="check", context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
              rich_help_panel="Run a model")
-def curl_cmd(
+def check_cmd(
     ctx: typer.Context,
-    prompt: str = typer.Argument(runtime.DEFAULT_PROMPT, help="The user message to send."),
+    prompt: Optional[str] = typer.Argument(None, help="The prompt to send (default: one "
+                                           "suited to the task)."),
     print_only: bool = typer.Option(False, "--print", help="Print the request instead of sending it."),
     model: Optional[str] = typer.Option(None, "--model", help="Model id to name in the "
                                         "request (default: ask the running server)."),
     base_url: Optional[str] = typer.Option(None, "--base-url", envvar=runtime.ENV_BASE_URL,
                                            help=f"Server root (default: {runtime.DEFAULT_BASE_URL})."),
+    name: Optional[str] = typer.Option(None, "--name", help="Send to the running instance with "
+                                       "this name (see `serve --name`) instead of --base-url."),
+    task: Optional[str] = typer.Option(
+        None, "--task", help="What the model does, as a Hugging Face pipeline tag (default: "
+        "from the pulled manifest, else text-generation). Requests are sent for: "
+        + ", ".join(probe.TASKS) + "; " + ", ".join(probe.HEALTH_ONLY_TASKS)
+        + " only get a health check."),
+    tools: Optional[bool] = typer.Option(
+        None, "--tools/--no-tools", help="Offer the model a tool to call (default: when the "
+        "pulled manifest declares a tool parser)."),
+    api_key: Optional[str] = typer.Option(None, "--api-key", envvar=runtime.ENV_API_KEY,
+                                          help="Sent as 'Authorization: Bearer <key>'."),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Where to save a "
+                                          "generated image (default: the current directory)."),
 ) -> None:
-    """Send a chat completion to the model you are serving.
+    """Send the model you are serving a request that suits what it does.
+
+    A chat model gets a chat completion, one with a tool parser a tool to call, a vision
+    model (image-text-to-text) a sample image, an image model a generation request whose
+    image is saved to a file, an embedding model some text. Tasks it cannot exercise yet
+    get a health check, and say so.
 
     Fills in the endpoint and the model id — which has to match what the server registered
     or the request 404s — so the last step of a bring-up is one line:
-    `tt-model curl "hello"`.
+    `tt-model check "hello"`.
 
     Any option this command does not reserve is passed straight into the request body, so
-    the whole vLLM sampling surface works without new flags:
-    `tt-model curl "write a haiku" --temperature 0.7 --max-tokens 200`.
+    the whole sampling surface works without new flags:
+    `tt-model check "write a haiku" --temperature 0.7 --max-tokens 200`.
 
     --print emits the equivalent curl instead of sending it, for a doc or a bug report.
     """
-    base = base_url or runtime.DEFAULT_BASE_URL
+    base = _instance_base_url(name) if name else (base_url or runtime.DEFAULT_BASE_URL)
     try:
         params = runtime.parse_extra_params(list(ctx.args))
     except ValueError as exc:
-        raise _err(f"{exc}\n  usage: tt-model curl \"your prompt\" [--key value ...]")
+        raise _err(f"{exc}\n  usage: tt-model check \"your prompt\" [--key value ...]")
+    if task is not None and task not in probe.TASKS + probe.HEALTH_ONLY_TASKS:
+        raise _err(f"unknown --task {task!r}; one of: "
+                   + ", ".join(probe.TASKS + probe.HEALTH_ONLY_TASKS))
 
     # One probe, used twice: it names the model AND tells us whether anything is listening,
     # so a down server is reported as such instead of as a bare curl exit code.
     served = runtime.list_models(base)
-    # --model is the escape hatch: name one and the request goes out as written.
-    hint = None if model else _non_chat_package_hint(base, served)
-    if hint:
-        raise _err(hint)
+    pulled = _pulled_packages()
     resolved, source = (model, "--model") if model else _discover_model(served)
+    package = _match_pulled(pulled, resolved) if resolved else None
+    if not resolved and not served and len(pulled) == 1:
+        # A container package records no weights in localdb; with only one pulled, it is the one.
+        package = pulled[0]
+        resolved, source = package.weights or package.name, "the pulled package"
     if not resolved:
         installed = [e for e in localdb.all_entries() if e.get("weights")]
         raise _err(
@@ -1721,13 +1836,27 @@ def curl_cmd(
             + "Start it with `tt-model serve <id>`, or pass --model <hf-id>."
         )
 
-    argv = runtime.curl_argv(base, runtime.chat_payload(resolved, prompt, params=params))
+    declared = package.caps if package else probe.Capabilities(probe.TEXT_GENERATION)
+    task_source = "--task" if task else declared.source
+    task = task or declared.task
+    if tools is None:
+        # A manifest's tool parser only means "offer a tool" for plain chat; --tools forces it.
+        tools = declared.tools and task == probe.TEXT_GENERATION
+    caps = probe.Capabilities(task, tools, source=task_source)
+    notes = [] if source == "--model" else [f"model id from {source}: {resolved}"]
+    if caps.task is None or caps.task in probe.HEALTH_ONLY_TASKS:
+        _check_health(base, served, resolved, caps, package, notes, print_only=print_only)
+        return
+
+    text = prompt if prompt is not None else probe.default_prompt(caps.task, tools=caps.tools)
+    request = probe.build(caps.task, resolved, text, tools=caps.tools, params=params)
+    argv = runtime.curl_argv(base, request.body, path=request.path, api_key=api_key,
+                             max_time=request.timeout)
+    notes.append(f"{caps.task}{' with a tool to call' if caps.tools else ''} (from {caps.source})")
+    # stderr, not stdout: --print must stay pipeable into a shell and copy-pasteable as a block.
+    for note in notes:
+        typer.secho(f"○ {note}", fg=typer.colors.CYAN, err=True)
     if print_only:
-        if source != "--model":
-            # stderr, not stdout: the command must stay pipeable into a shell and
-            # copy-pasteable as a whole block.
-            typer.secho(f"○ model id from {source}: {resolved}",
-                        fg=typer.colors.CYAN, err=True)
         console.raw(runtime.render_curl(argv))
         return
     if not served:
@@ -1736,7 +1865,60 @@ def curl_cmd(
     if shutil.which("curl") is None:
         raise _err("curl is not on PATH. Re-run with --print and paste the command, "
                    "or install curl.")
-    raise typer.Exit(code=subprocess.run(argv).returncode)
+    result = subprocess.run(argv, capture_output=True, text=True)
+    if result.returncode != 0:
+        typer.echo(result.stderr.rstrip(), err=True)
+        raise typer.Exit(code=result.returncode)
+    try:
+        reply = probe.read_reply(caps.task, result.stdout, tools=caps.tools)
+    except ValueError as exc:
+        raise _err(f"The {caps.task} request to {base}{request.path} failed: {exc}")
+    if reply.image is not None:
+        path = output or _image_path(resolved, reply.image)
+        path.write_bytes(reply.image)
+        typer.echo(f"Saved image to {path}")
+    else:
+        typer.echo(reply.text)
+    if not reply.ok:
+        typer.secho(f"warning: {resolved} answered without calling the tool it was offered.",
+                    fg=typer.colors.YELLOW, err=True)
+
+
+def _check_health(base: str, served: List[str], model_id: str, caps: probe.Capabilities,
+                       package: Optional[_Pulled], notes: List[str], *, print_only: bool) -> None:
+    """For a task `check` cannot exercise: confirm the server answers, and say that is all."""
+    if caps.task:
+        why = f"`tt-model check` cannot exercise {caps.task} models yet"
+    else:
+        what = f"{package.repo_id} ({package.kind})" if package else model_id
+        why = (f"{what} declares no task `tt-model check` can exercise; pass --task if it "
+               "speaks a standard API (e.g. --task text-to-image)")
+    card = f"\n  Its own routes are in its model card: https://huggingface.co/{package.repo_id}" \
+        if package else ""
+    message = f"{why}, so this is only a health check (GET /v1/models).{card}"
+    if print_only:
+        for note in notes:
+            typer.secho(f"○ {note}", fg=typer.colors.CYAN, err=True)
+        typer.secho(f"○ {message}", fg=typer.colors.CYAN, err=True)
+        console.raw(runtime.render_curl(runtime.curl_argv(base, path="/v1/models")))
+        return
+    if not served:
+        raise _err(f"Nothing is serving at {base}. Start it with `tt-model serve <id>`.")
+    typer.echo(f"{model_id} is up at {base}.")
+    typer.secho(f"warning: {message}", fg=typer.colors.YELLOW, err=True)
+
+
+def _instance_base_url(instance: str) -> str:
+    """``http://127.0.0.1:<port>`` of the running instance named ``instance``."""
+    rows = container.labelled_containers(instance=instance)
+    if not rows:
+        raise _err(f"No running instance named {instance!r}. Start one with "
+                   f"`tt-model serve <id> --name {instance}`.")
+    port = rows[0]["port"]
+    if not port.isdigit():
+        raise _err(f"Instance {instance!r} ({rows[0]['name']}) has no port label; "
+                   "pass --base-url instead.")
+    return f"http://127.0.0.1:{port}"
 
 
 # ---------------------------------------------------------------------------- info
@@ -2324,6 +2506,8 @@ def _require_container(target: str):
 def stop(
     target: str = typer.Argument(..., help="Package or bundle: org/name, or a manifest path."),
     profile: Optional[str] = typer.Option(None, "--profile", help="Stop only this profile."),
+    name: Optional[str] = typer.Option(None, "--name", help="Stop only this instance "
+                                       "(see `serve --name`); default: every instance."),
 ) -> None:
     """Stop a running container package or v5/v6 bundle server, SIGTERM first.
 
@@ -2339,7 +2523,8 @@ def stop(
         return
 
     try:
-        container_cli.stop_container(_require_container(target), profile_name=profile)
+        container_cli.stop_container(_require_container(target), profile_name=profile,
+                                     instance=name)
     except (container_cli.ContainerCliError, container.ContainerError) as e:
         raise _err(str(e))
 
@@ -2349,6 +2534,8 @@ def logs(
     target: str = typer.Argument(..., help="Container package: org/name, or a manifest path."),
     follow: bool = typer.Option(False, "--follow", "-f", help="Stream new output."),
     profile: Optional[str] = typer.Option(None, "--profile", help="Logs for this profile."),
+    name: Optional[str] = typer.Option(None, "--name", help="Logs for this instance "
+                                       "(see `serve --name`)."),
 ) -> None:
     """Show the server logs of a running container package."""
     from . import container_cli
@@ -2356,7 +2543,7 @@ def logs(
     try:
         code = container_cli.logs_container(_require_container(target),
                                             profile_name=profile, follow=follow,
-                                            target=target)
+                                            target=target, instance=name)
     except (container_cli.ContainerCliError, container.ContainerError) as e:
         raise _err(str(e))
     if code != 0:
@@ -2539,6 +2726,172 @@ def _split_revision(repo_id: str) -> "tuple[str, Optional[str]]":
 def version() -> None:
     """Print the tt-model version."""
     typer.echo(__version__)
+
+
+# -------------------------------------------------------------------------- deploy
+deploy_app = typer.Typer(help="Serve several container packages side by side, from one file.",
+                         no_args_is_help=True)
+app.add_typer(deploy_app, name="deploy", rich_help_panel="Run a model")
+
+
+def _deploy_plan(file: str):
+    from . import deploy
+
+    try:
+        dep = deploy.load(file)
+        manifests = {i.model: _require_container(i.model) for i in dep.instances}
+        inventory = container.all_device_ids()
+        claimed = container._claimed_devices(inventory)
+        if claimed is None:
+            raise _err("could not tell which chips are in use (docker ps/inspect failed); refusing to plan")
+        placements = deploy.plan(dep, manifests, inventory=inventory, claimed=claimed,
+                                 boards=container.chip_boards(), port_free=container.port_is_free,
+                                 free_hugepages=container.free_hugepages_1g())
+    except (deploy.DeployError, container.ContainerError) as e:
+        raise _err(str(e))
+    return dep, placements
+
+
+def _plan_table(placements) -> None:
+    cells = [["NAME", "MODEL", "PROFILE", "CHIPS", "ENDPOINT"]] + [
+        [p.instance.name, p.instance.model, p.profile, ",".join(map(str, p.chips)),
+         f"http://127.0.0.1:{p.port}"] for p in placements]
+    widths = [max(len(c[i]) for c in cells) for i in range(5)]
+    for c in cells:
+        console.raw("  " + "  ".join(v.ljust(w) for v, w in zip(c, widths)).rstrip())
+
+
+@deploy_app.command("up")
+def deploy_up(
+    file: str = typer.Argument(..., help="Deployment file (YAML)."),
+    print_only: bool = typer.Option(False, "--print", help="Show the placement and stop."),
+    keep_going: bool = typer.Option(False, "--keep-going", help="Keep the instances that came up "
+                                    "when another fails, stop the failed ones, exit 1 "
+                                    "(default: stop them all)."),
+) -> None:
+    """Start every instance of a deployment, each on its own chips and port, and wait for all."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from . import container_cli
+    from .launchers import launcher_for
+
+    dep, placements = _deploy_plan(file)
+    _plan_table(placements)
+    if print_only:
+        return
+    from .boot_progress import diagnose_boot, summarize
+
+    started, failed, not_ready = [], [], []
+    rolled_back = False
+    try:
+        for p in placements:
+            try:
+                container_cli.serve_container(
+                    p.manifest, profile_name=p.profile, port=p.port, device_id=",".join(map(str, p.chips)),
+                    instance=p.instance.name, detach=True, target=p.instance.model,
+                    extra_args=p.instance.args, source=Path(p.instance.model).parent
+                    if Path(p.instance.model).is_file() else container_cli.pull_dir(p.instance.model))
+            except Exception as e:  # noqa: BLE001 - whatever stopped it, the rest is rolled back or kept
+                if not keep_going:
+                    raise _err(f"{dep.name}: could not start {p.instance.name}: {e}") from e
+                failed.append((p, f"could not start: {e}"))
+                continue
+            started.append(p)
+        if started:
+            # All at once: one instance that crashes is seen (and, without --keep-going, rolls the
+            # deployment back) right away, not after another one's whole boot or timeout.
+            timeout = container.ready_timeout_s()
+            with console.step(f"waiting for {len(started)} instance(s) to be ready") as st, \
+                    ThreadPoolExecutor(len(started)) as pool:
+                try:
+                    waits = {pool.submit(container.wait_ready, p.container,
+                                         launcher_for(p.manifest.container.kind).ready_probe(p.manifest),
+                                         timeout_s=timeout): p for p in started}
+                    for fut in as_completed(waits):
+                        p, res = waits[fut], fut.result()
+                        if res.ready:
+                            continue
+                        diag = diagnose_boot(res.tail, exited=res.exited, target=p.instance.model)
+                        failed.append((p, summarize(diag, res.tail)))
+                        not_ready.append(p)
+                        if not keep_going:
+                            break
+                except BaseException:
+                    _deploy_rollback(started)   # before the pool joins: the waits end as the containers stop
+                    rolled_back = True
+                    raise
+                if not_ready and not keep_going:
+                    _deploy_rollback(started)
+                    rolled_back = True
+                if not_ready:
+                    st.fail()
+                    st.detail(f"{', '.join(p.instance.name for p in not_ready)} did not come up")
+    except BaseException:  # a start error, or Ctrl-C while waiting: never leave half a deployment running
+        if not rolled_back:
+            _deploy_rollback(started)
+        raise
+    for p, why in failed:
+        console.note(f"{p.instance.name}: {why}", marker="✗", style="error")
+    if failed and not keep_going:
+        if not rolled_back:
+            _deploy_rollback(started)
+        raise _err(f"{dep.name}: {', '.join(p.instance.name for p, _ in failed)} did not come up; "
+                   "stopped the deployment (pass --keep-going to keep the instances that did)")
+    _deploy_rollback(not_ready)   # --keep-going keeps what came up, not what is still booting or broken
+    ready = [p for p in started if p not in not_ready]
+    console.milestone(f"{dep.name}: {len(ready)} of {len(placements)} instance(s) ready")
+    _plan_table(ready)
+    if failed:
+        raise _err(f"{dep.name}: {', '.join(p.instance.name for p, _ in failed)} did not come up and "
+                   "were stopped; kept the rest (--keep-going)")
+
+
+def _deploy_rollback(started) -> None:
+    """Stop what this deploy started, and remove the containers that already exited."""
+    from . import container_cli
+
+    for p in reversed(started):
+        container_cli.stop_container(p.manifest, profile_name=p.profile, instance=p.instance.name)
+        if container.container_exists(p.container) and not container.is_running(p.container):
+            container.remove(p.container, force=True)
+
+
+@deploy_app.command("down")
+def deploy_down(file: str = typer.Argument(..., help="Deployment file (YAML).")) -> None:
+    """Stop every instance of a deployment."""
+    from . import container_cli, deploy
+
+    try:
+        dep = deploy.load(file)
+        for inst in dep.instances:
+            container_cli.stop_container(_require_container(inst.model), profile_name=inst.profile,
+                                         instance=inst.name)
+    except (deploy.DeployError, container_cli.ContainerCliError, container.ContainerError) as e:
+        raise _err(str(e))
+
+
+@deploy_app.command("status")
+def deploy_status(file: str = typer.Argument(..., help="Deployment file (YAML).")) -> None:
+    """Show which instances of a deployment are running, with their chips and endpoints."""
+    from . import container_cli, deploy
+
+    try:
+        dep = deploy.load(file)
+        # by container name (model, profile and instance), as `deploy down` stops them: an instance
+        # name alone could match another deployment's server, or one started by hand with --name
+        wanted = {}
+        for i in dep.instances:
+            m = _require_container(i.model)
+            assert m.container is not None
+            wanted[container.container_name(m, m.container.resolve_profile(i.profile), i.name)] = i.name
+    except (deploy.DeployError, container_cli.ContainerCliError, container.ContainerError, ValueError) as e:
+        raise _err(str(e))
+    rows = [r for r in _running_servers() if r["name"] in wanted]
+    running = {wanted[r["name"]] for r in rows}
+    for r in rows:
+        console.raw(f"  ✓ {r['instance']:<16} {r['repo']}  chips {r['chips'] or '-'}  {r['url'] or '-'}")
+    for n in sorted(set(wanted.values()) - running):
+        console.raw(f"  ○ {n:<16} not running")
 
 
 def main() -> None:
