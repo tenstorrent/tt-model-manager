@@ -413,12 +413,6 @@ def test_an_app_member_whose_server_thread_ends_takes_the_group_down(tmp_path, m
     assert rc == [1]
 
 
-def test_a_group_mixing_vllm_and_app_members_is_refused(tmp_path):
-    members = [{"name": "a", "kind": "vllm", "port": 1, "model": "m"}, {"name": "b", "kind": "app", "port": 2, "app": "x:y"}]
-    with pytest.raises(ValueError, match="mixed"):
-        cfgmod.load(_write(tmp_path, members=members))
-
-
 def test_a_late_compile_is_counted_for_the_member_that_compiled_it_on_the_device_thread(tmp_path, fake_vllm):
     host, vm = _member(tmp_path, {"execute_model": None, "sample_tokens": "out"})
     seen = []
@@ -459,3 +453,100 @@ def test_an_app_request_step_counts_its_late_compiles_on_the_device_thread(tmp_p
     assert host.step("tts", request) == "audio"
     assert host.compiles_after_capture == {"tts": 2}
     assert seen == [True, True]
+
+
+# ---------------------------------------------------------------------------- mixed groups
+
+def test_a_mixed_group_lists_vllm_members_before_app_members(tmp_path):
+    ok = [{"name": "llm", "kind": "vllm", "port": 1, "model": "m"},
+          {"name": "emb", "kind": "app", "port": 2, "app": "x:y"}]
+    cfg = cfgmod.load(_write(tmp_path, members=ok))
+    assert cfg.mixed
+    with pytest.raises(ValueError, match="before its app members"):
+        cfgmod.load(_write(tmp_path, members=ok[::-1]))
+
+
+def test_mixed_group_apps_load_before_vllm_weights_and_capture_after_vllm(tmp_path, monkeypatch):
+    """App weights are in DRAM before the vLLM member sizes its KV pool; both pass the same barriers; the
+    vLLM member captures first, then the apps (config order), then the cache baseline is taken."""
+    from tt_kernel.cohost import apps
+
+    events = []
+    lock = threading.Lock()
+
+    def ev(*e):
+        with lock:
+            events.append(e)
+
+    class Fake(apps.AppMember):
+        def __init__(self, host, member):
+            self.n = member.name
+
+        def load(self, mesh):
+            assert mesh == "MESH"
+            time.sleep(0.05)          # a slow load: the vLLM member must still wait for it
+            ev("load", self.n)
+
+        def warmup(self):
+            ev("warmup", self.n)
+
+        def release_traces(self):
+            ev("release", self.n)
+
+        def asgi_app(self):
+            return self.n
+
+    members = [{"name": "llm", "kind": "vllm", "port": 1, "model": "m"},
+               {"name": "emb", "kind": "app", "port": 2, "app": "x:y"},
+               {"name": "rr", "kind": "app", "port": 3, "app": "x:y"}]
+    host = hostmod.Host(cfgmod.load(_write(tmp_path, members=members)))
+    monkeypatch.setattr(host, "open_mesh", lambda: "MESH")
+    monkeypatch.setattr(host, "after_all_captured", lambda: ev("baseline"))
+    monkeypatch.setattr(apps, "load_factory", lambda spec: Fake)
+    monkeypatch.setattr(apps, "serve_asgi", lambda app, port, name: (app, port))
+    assert not host.apps_loaded.is_set()
+
+    def vllm_member():   # what VllmMember does: load_model (gated), phased warmup
+        assert host.apps_loaded.wait(5)
+        ev("load", "llm")
+        host.loaded.wait("llm")
+        ev("warmup", "llm")
+        host.compiled.wait("llm")
+        with host.capture_turn("llm"):
+            ev("capture", "llm")
+    t = threading.Thread(target=vllm_member)
+    t.start()
+    served = apps.boot_apps(host, [m for m in host.cfg.members if m.kind == "app"])
+    t.join(5)
+    order = [e for e in events]
+    assert order.index(("load", "emb")) < order.index(("load", "llm"))
+    assert order.index(("load", "rr")) < order.index(("load", "llm"))
+    first_app_warm = order.index(("warmup", "emb"))
+    assert order.index(("load", "llm")) < first_app_warm               # loaded barrier
+    cap = order.index(("capture", "llm"))
+    assert all(order.index(("release", n)) < cap for n in ("emb", "rr"))   # compiled barrier
+    assert [e for e in order[cap:] if e[0] != "release"] == [("capture", "llm"), ("warmup", "emb"),
+                                                             ("warmup", "rr"), ("baseline",)]
+    assert served == {"emb": ("emb", 2), "rr": ("rr", 3)}
+
+
+def test_a_failed_app_load_releases_the_vllm_member_with_the_failure(tmp_path, monkeypatch):
+    from tt_kernel.cohost import apps
+
+    class Broken(apps.AppMember):
+        def __init__(self, host, member):
+            pass
+
+        def load(self, mesh):
+            raise RuntimeError("out of DRAM")
+
+    members = [{"name": "llm", "kind": "vllm", "port": 1, "model": "m"},
+               {"name": "emb", "kind": "app", "port": 2, "app": "x:y"}]
+    host = hostmod.Host(cfgmod.load(_write(tmp_path, members=members)))
+    monkeypatch.setattr(host, "open_mesh", lambda: "MESH")
+    monkeypatch.setattr(apps, "load_factory", lambda spec: Broken)
+    with pytest.raises(RuntimeError, match="out of DRAM"):
+        apps.boot_apps(host, [host.cfg.members[1]])
+    assert host.apps_loaded.is_set()
+    with pytest.raises(RuntimeError, match="out of DRAM"):
+        host.loaded.wait("llm")

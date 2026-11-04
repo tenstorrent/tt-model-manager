@@ -71,13 +71,15 @@ def serve_asgi(app: Any, port: int, name: str) -> threading.Thread:
 
 def boot_apps(host, members: List[Member]) -> Dict[str, threading.Thread]:
     """Load, warm, release and re-warm every app member (see the module docstring), then serve.
-    Returns each member's server thread."""
+    Returns each member's server thread. In a group that also holds vLLM members, see ``_boot_mixed``."""
     apps = []
     for m in members:
         app = load_factory(m.app)(host, m)
         apps.append((m, app))
     from .host import _member_env
 
+    if host.cfg.mixed:
+        return _boot_mixed(host, apps)
     mesh = host.open_mesh_direct()
     for m, app in apps:
         before = host.device.run(m.name, host.dram_gb_per_chip)
@@ -96,4 +98,67 @@ def boot_apps(host, members: List[Member]) -> Dict[str, threading.Thread]:
             for m, app in apps:
                 host.device.run(m.name, app.release_traces)
     host.device.run("host", host.after_all_captured)
+    return {m.name: serve_asgi(app.asgi_app(), m.port, m.name) for m, app in apps}
+
+
+def _boot_mixed(host, apps) -> Dict[str, threading.Thread]:
+    """App members in a group with vLLM members, on the mesh the vLLM plugin opens (its fabric, trace region and
+    dispatch settings), through the same phases as the vLLM members:
+
+    1. load every app (before any vLLM member's ``load_model``: ``host.apps_loaded``), then the ``loaded`` barrier
+       (the vLLM members arrive once their weights and KV pool are allocated);
+    2. warm every app once (compiles every program; may capture traces), release the traces, ``compiled`` barrier;
+    3. capture, in config order: the vLLM members first (a mixed group lists them first), then each app re-warms
+       in its turn. Nothing long-lived is allocated after the first capture except the apps' per-slot trace
+       inputs and outputs, which each app rewrites and reads inside one owned step.
+    """
+    from .host import _member_env
+
+    names = [m.name for m, _ in apps]
+    try:
+        mesh = host.open_mesh()
+        for m, app in apps:
+            def load(m=m, app=app):
+                before = host.dram_gb_per_chip()
+                with _member_env(m):
+                    app.load(mesh)
+                host.account(m.name, "load", before)
+            host.device.run(m.name, load)
+            log.info("cohost: %s load_model: loaded", m.name)
+    except BaseException as e:
+        host.loaded.fail(f"app load: {e}")
+        host.compiled.fail(f"app load: {e}")
+        raise
+    finally:
+        host.apps_loaded.set()      # a waiting vLLM member proceeds (and the barrier reports any failure)
+    for n in names:
+        host.loaded.arrive(n)
+    host.loaded.wait(names[0])
+
+    def warm(m, app, phase):
+        def go():
+            before = host.dram_gb_per_chip()
+            with _member_env(m):
+                app.warmup()
+            host.account(m.name, phase, before)
+        host.device.run(m.name, go)
+
+    try:
+        for m, app in apps:
+            warm(m, app, "warmup-compile")
+            log.info("cohost: %s compiled", m.name)
+        for m, app in apps:
+            host.device.run(m.name, app.release_traces)
+    except BaseException as e:
+        host.compiled.fail(f"app compile: {e}")
+        raise
+    for n in names:
+        host.compiled.arrive(n)
+    host.compiled.wait(names[0])
+    for m, app in apps:
+        with host.capture_turn(m.name):
+            warm(m, app, "warmup-capture")
+            log.info("cohost: %s traces captured", m.name)
+    if host.capture_order[-1] in names:
+        host.device.run("host", host.after_all_captured)
     return {m.name: serve_asgi(app.asgi_app(), m.port, m.name) for m, app in apps}

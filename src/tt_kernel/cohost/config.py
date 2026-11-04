@@ -37,6 +37,9 @@ class Member:
 
 @dataclass
 class CohostConfig:
+    """``members`` may mix kinds: vLLM members and app members then share the mesh the vLLM plugin opens,
+    and the app members load before any vLLM member loads its weights (see ``apps.boot_apps``)."""
+
     #: MESH_DEVICE for the one mesh every member shares, e.g. ``P150x4``.
     mesh_device: str
     members: List[Member]
@@ -44,6 +47,10 @@ class CohostConfig:
     tt_config: Dict[str, object] = field(default_factory=dict)
     socket_dir: str = "/tmp/tt-cohost"
     status_port: Optional[int] = None
+
+    @property
+    def mixed(self) -> bool:
+        return len({m.kind for m in self.members}) > 1
 
     def socket_path(self, member: str) -> str:
         return str(Path(self.socket_dir) / f"{member}.sock")
@@ -70,8 +77,13 @@ def loads(text: str) -> CohostConfig:
             raise ValueError(f"member {m.name}: kind {m.kind!r} is not one of {KINDS}")
         if m.kind == "app" and ":" not in m.app:
             raise ValueError(f"member {m.name}: an app member needs app = 'module:factory'")
-    if len({m.kind for m in members}) > 1:
-        raise ValueError("a group is all vllm members or all app members (mixed groups are not supported yet)")
+    kinds = [m.kind for m in members]
+    if "app" in kinds and "vllm" in kinds and kinds.index("app") < len(kinds) - 1 - kinds[::-1].index("vllm"):
+        # Mixed group: the vLLM members capture their traces before the app members (config order). An app's
+        # per-slot trace inputs are allocated at its capture and rewritten inside every one of its steps, so a
+        # vLLM replay landing on them is harmless; the other way round, an app trace could overwrite persistent
+        # buffers a vLLM member allocates around its own captures.
+        raise ValueError("a mixed group lists its vllm members before its app members (apps capture last)")
     return CohostConfig(mesh_device=raw["mesh_device"], members=members,
                         tt_config=raw.get("tt_config") or {},
                         socket_dir=raw.get("socket_dir") or "/tmp/tt-cohost",

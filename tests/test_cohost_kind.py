@@ -89,8 +89,8 @@ def test_compose_run_publishes_every_member_port(manifest, tmp_path):
     ({"members": [{"name": "a", "kind": "vllm", "model": "m"}], "profiles": {"p": ["zz"]}}, "unknown member"),
     ({"members": [{"name": "a", "kind": "vllm", "model": "m"}], "profiles": {"p": []}}, "no members"),
     ({"members": [{"name": "a", "kind": "app"}]}, "needs app"),
-    ({"members": [{"name": "a", "kind": "vllm", "model": "m"},
-                  {"name": "b", "kind": "app", "app": "x:y", "port_offset": 1}]}, "all vllm or all app"),
+    ({"members": [{"name": "b", "kind": "app", "app": "x:y", "port_offset": 1},
+                  {"name": "a", "kind": "vllm", "model": "m"}]}, "vllm members before its app members"),
 ])
 def test_bad_member_lists_are_refused(runtime, match):
     with pytest.raises(LauncherError, match=match):

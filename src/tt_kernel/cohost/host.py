@@ -93,6 +93,11 @@ class Host:
         self.dram: Dict[str, Dict[str, float]] = {}
         self.l1: Dict[str, Optional[float]] = {}
         self.dram_total: Optional[float] = None
+        #: Mixed groups: set once every app member has loaded. A vLLM member's ``load_model`` waits for it, so
+        #: the apps' weights are in DRAM before any vLLM member sizes and allocates its KV pool.
+        self.apps_loaded = threading.Event()
+        if not any(m.kind == "app" for m in cfg.members) or not any(m.kind == "vllm" for m in cfg.members):
+            self.apps_loaded.set()
 
     # ------------------------------------------------------------------ mesh
     def open_mesh(self):
@@ -359,6 +364,11 @@ class VllmMember:
 
     def _call(self, method, args, kwargs):
         from vllm.v1.serial_utils import run_method
+
+        if method == "load_model" and not self.host.apps_loaded.is_set():
+            log.info("cohost: %s waits for the app members to load", self.name)
+            if not self.host.apps_loaded.wait(BARRIER_TIMEOUT_S):
+                raise TimeoutError(f"{self.name}: the app members did not load within {BARRIER_TIMEOUT_S:.0f} s")
 
         def go():
             if method in self.LOAD_TIME:

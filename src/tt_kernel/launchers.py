@@ -1221,8 +1221,9 @@ class CohostLauncher:
                 raise LauncherError(f"member {mem['name']}: a vllm member needs model")
             if mem["kind"] == "app" and ":" not in str(mem.get("app", "")):
                 raise LauncherError(f"member {mem['name']}: an app member needs app = 'module:factory'")
-        if len({mem["kind"] for mem in members}) > 1:
-            raise LauncherError("runtime.members are all vllm or all app (the runtime runs no mixed groups)")
+        kinds = [mem["kind"] for mem in members]
+        if "app" in kinds and "vllm" in kinds and kinds.index("app") < len(kinds) - 1 - kinds[::-1].index("vllm"):
+            raise LauncherError("a mixed group lists its vllm members before its app members (apps capture last)")
         names = [mem["name"] for mem in members]
         offsets = [int(mem.get("port_offset", 0)) for mem in members]
         if len(set(names)) != len(names) or len(set(offsets)) != len(offsets) or min(offsets) < 0:
