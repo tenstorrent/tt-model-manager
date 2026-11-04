@@ -122,8 +122,11 @@ carries whatever it was published with.
 plugin marketplace for TT-Metalium bring-up, review, and debugging work (`tt-model-bringup`,
 `tt-autodebug`, `tt-review-skills`, `tt-skills`). It does not overlap with or replace anything in
 this repo: `tt-model` packages, publishes, and serves already-built models, while that marketplace
-helps an agent bring a model up on TT-Metalium in the first place. This repo's own skills
-(`tt-model-yaml`, `tt-model-package-test`, `cli-design`, and `feature-branch-pr`, under
+helps an agent bring a model up on TT-Metalium in the first place. Its `tt-model-bringup` plugin
+includes a `fast-path` skill that makes a served model fast on Blackhole (fused decode, multi-user
+decode, prefill, opt-in speculative decoding); this repo's `tt-model-fast-path` skill picks up from
+there and ships those paths as package profiles. This repo's own skills (`tt-model-yaml`,
+`tt-model-package-test`, `tt-model-fast-path`, `cli-design`, and `feature-branch-pr`, under
 `.claude/skills/` and `.codex/skills/`) are specific to authoring and testing `tt-model` packages
 and to this repo's conventions, and are not published there. Install the marketplace with
 `/plugin marketplace add git@github.com:tenstorrent/skills.git` then `/plugin install
@@ -148,8 +151,10 @@ this file (draft PR, one concern, regression test, no pushes to `main`).
 For the **container (v5.1)** path this repo ships two skills (under `.claude/skills/`, mirrored
 for Codex under `.codex/skills/`): `tt-model-yaml` authors the manifest from a validated
 bring-up; `tt-model-package-test` builds it, serves it on hardware, proves the API works (tool
-calling included), and pushes. Prefer them over improvising the flow. The copy-paste recipe for
-this path is [docs/E2E_RECIPE_V5.1.md](docs/E2E_RECIPE_V5.1.md).
+calling included), and pushes. Prefer them over improvising the flow. When the model has fast
+paths to ship (fused decode per mesh, opt-in speculative decoding), `tt-model-fast-path` adds the
+profile, capacity and release-against-release rules on top of `tt-model-package-test`. The
+copy-paste recipe for this path is [docs/E2E_RECIPE_V5.1.md](docs/E2E_RECIPE_V5.1.md).
 
 There is one **venv-based authoring path**, also self-contained (a consumer needs only a card
 and firmware):
