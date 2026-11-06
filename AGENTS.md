@@ -207,9 +207,12 @@ above in a suggested workflow. In particular:
 
 - The only consumer prerequisite is a Tenstorrent card and firmware (plus SFPI). Do not introduce
   a step needing `tt-cli`, a host TT-Metalium, or host vLLM.
-- After `pull`, serving uses nothing outside the install directory except the Tenstorrent device
-  and system libc: interpreter (`.python/`), venv, engine, and caches all live inside. Do not
-  point the model at a shared or system cache to "fix" something.
+- After `pull`, serving uses nothing outside the install directory except the Tenstorrent device,
+  system libc and, for a v6 bundle, the HF weights: interpreter (`.python/`), venv, engine, and
+  the other caches all live inside. A v6 bundle's weights go in the shared HF cache
+  (`~/.cache/huggingface`, or `$HF_HOME`), as a container's do, so an update, which replaces the
+  install folder, keeps them. Do not point the model at any other shared or system cache to "fix"
+  something.
 - Weights are a pointer (`--weights <hf-id>`).
 - The engine is what the bundle builds: v6 builds it from the pinned deps, and that engine is
   **stock** `ttnn`. Never ship a forked `ttnn` to carry custom kernels; ship a `generic_op` wheel.

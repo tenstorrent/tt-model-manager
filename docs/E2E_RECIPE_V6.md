@@ -227,8 +227,10 @@ tt-model pull <org>/<model-name>                # add --with-weights to pre-down
 This materializes the folder, then runs its `install.sh`, which, **entirely inside the folder**,
 provisions the pinned Python interpreter (via `uv`, into `.python/`), builds the venv, installs
 the pinned deps and the bundled wheels, and runs the bundle's `--verify` guards. Weights are
-fetched from the HF pointer — with `--with-weights` now, otherwise on first serve — into
-`<install>/.hf` by default, or `$HF_HOME` (`$HF_HUB_CACHE`) if you set it for both commands.
+fetched from the HF pointer — with `--with-weights` now, otherwise on first serve — into the
+shared HF cache, `~/.cache/huggingface` by default, or `$HF_HOME` (`$HF_HUB_CACHE`) if you set it
+for both commands. Updating or removing the bundle keeps them; `tt-model rm --include-weights`
+deletes them too.
 
 If the bundle's `arch` does not match this host's card, `pull` stops here with a clear message.
 
@@ -246,9 +248,10 @@ tt-model serve <org>/<model-name> --no-update-check  # skip the "is there a newe
 See [cli.md](cli.md#run-a-model) for the pass-through rule.
 
 `serve` runs the bundle's `run.sh` in the bundle's **own venv**, pointing every cache and home
-(`HF_HOME`, `TT_CACHE_PATH`, and others) **inside the folder**. The first serve downloads weights
-(unless pre-fetched), builds the tensor cache, and JIT-compiles kernels — often 10 minutes or more
-on a cold cache — before it logs **`Application startup complete`**. Later starts are much faster.
+(`TT_CACHE_PATH` and others) **inside the folder**, except the HF weights, which it reads from the
+shared HF cache. The first serve downloads weights (unless pre-fetched), builds the tensor cache,
+and JIT-compiles kernels — often 10 minutes or more on a cold cache — before it logs
+**`Application startup complete`**. Later starts are much faster.
 
 `serve` also install-then-serves a not-yet-pulled bundle, so on a fresh host you can skip straight to
 `tt-model serve <org>/<model-name>`.

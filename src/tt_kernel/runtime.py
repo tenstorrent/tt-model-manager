@@ -38,15 +38,21 @@ def resolve_models_dir(models_dir: Optional[str], repo_id: str) -> Path:
     return base.joinpath(*repo_id.split("/"))
 
 
-def serve_hub_cache(install_dir: Path) -> Path:
+def serve_hub_cache(install_dir: Path, *, thin: bool) -> Path:
     """The HF hub cache a bundle's ``run.sh`` loads weights from, given this process's env.
 
-    Mirrors ``render_run_sh``: ``HF_HOME`` defaults to ``<install>/.hf``, and huggingface_hub
-    reads ``$HF_HUB_CACHE``, else ``$HF_HOME/hub``.
+    Mirrors ``render_run_sh``: ``HF_HOME`` defaults to the shared ``~/.cache/huggingface`` for a
+    v6 thin bundle and ``<install>/.hf`` for v5, and huggingface_hub reads ``$HF_HUB_CACHE``, else
+    ``$HF_HOME/hub``.
     """
     if os.environ.get("HF_HUB_CACHE"):
         return Path(os.environ["HF_HUB_CACHE"])
-    return Path(os.environ.get("HF_HOME") or install_dir / ".hf") / "hub"
+    if os.environ.get("HF_HOME"):
+        return Path(os.environ["HF_HOME"]) / "hub"
+    if thin:
+        xdg = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+        return Path(xdg) / "huggingface" / "hub"
+    return install_dir / ".hf" / "hub"
 
 
 def download_weights(weights: WeightsRef, cache_dir: Path) -> Path:

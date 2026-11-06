@@ -1132,7 +1132,8 @@ def _materialize_and_record(
             # A user who pre-staged weights keeps them across a reinstall (resumable from the HF
             # cache) instead of silently dropping them and refetching at load time.
             typer.echo(f"Downloading weights {manifest.weights.repo_id} ...")
-            weights_path = runtime.download_weights(manifest.weights, runtime.serve_hub_cache(dest))
+            weights_path = runtime.download_weights(
+                manifest.weights, runtime.serve_hub_cache(dest, thin=manifest.is_thin))
 
         run_script = dest / ((manifest.bundled.run_script if manifest.bundled else None) or "run.sh")
         localdb.record(repo_id, {
@@ -2311,8 +2312,8 @@ def rm(
         "the size of the weights themselves (105 GB for FLUX.2), so this can keep a lot."
     ),
     include_weights: bool = typer.Option(
-        False, "--include-weights", help="For a container package: ALSO delete the model "
-        "weights from the HF cache. They are shared with anything else that uses them and "
+        False, "--include-weights", help="For a container or v6 package: ALSO delete the "
+        "model weights from the HF cache. They are shared with anything else that uses them and "
         "can be tens of gigabytes to re-download, so this is off by default."
     ),
 ) -> None:
@@ -2321,7 +2322,7 @@ def rm(
     For a container (v5.1) package this removes the containers, the docker image, the
     pulled manifest, both host caches (JIT kernels and converted weights) and the
     package's own snapshot in the HF cache. For a v5/v6 bundle it removes the per-model
-    venv and files.
+    venv and files; a v6 bundle's weights are in the shared HF cache, as a container's are.
 
     Weights are kept unless ``--include-weights``: they are shared with everything else on
     the host and are a pointer rather than part of the package.
@@ -2395,8 +2396,14 @@ def _rm_one(repo_id: str, entry: dict, *, keep_cache: bool, include_weights: boo
 
     install_dir = entry.get("install_dir") or entry.get("bundle_path")
     removed = False
+    weight_refs = []
     if install_dir:
         p = Path(install_dir)
+        try:  # a v6 bundle's weights live in the shared HF cache, outside the folder
+            m = Manifest.from_json((p / MANIFEST_NAME).read_text())
+            weight_refs = m.weight_refs if m.is_thin else []
+        except (OSError, ValueError):
+            pass
         if p.is_dir():
             shutil.rmtree(p)
             removed = True
@@ -2406,6 +2413,15 @@ def _rm_one(repo_id: str, entry: dict, *, keep_cache: bool, include_weights: boo
     else:
         typer.secho("Index entry removed; install folder was already gone.",
                     fg=typer.colors.YELLOW)
+    if weight_refs and include_weights:
+        from . import container_cli
+
+        for ref in weight_refs:
+            container_cli._purge_hf(ref.repo_id, f"weights {ref.repo_id}")
+    elif weight_refs:
+        repos = ", ".join(ref.repo_id for ref in weight_refs)
+        console.note(f"weights kept ({repos}) — shared with other models. "
+                     "--include-weights removes them too", marker="○")
 
 
 def _require_container(target: str):
