@@ -3,8 +3,9 @@
 
 """`pull --with-weights` must put the weights where the bundle's run.sh will look for them.
 
-run.sh defaults HF_HOME to <install>/.hf and the server loads weights by repo id, so weights
-downloaded anywhere else are never read and the first serve downloads them all again.
+A v6 run.sh defaults HF_HOME to the shared ~/.cache/huggingface and the server loads weights by
+repo id, so weights downloaded anywhere else are never read and the first serve downloads them all
+again.
 """
 
 import os
@@ -76,3 +77,5 @@ def test_pull_with_weights_fills_the_cache_run_sh_reads(monkeypatch, tmp_path, u
     assert "local_dir" not in seen
     assert seen["revision"] == "abc123"
     assert Path(seen["cache_dir"]) == _serve_time_hub_cache(install / "run.sh", dict(os.environ))
+    if not user_hf_home:  # shared cache, so an update (which replaces the folder) keeps them
+        assert Path(seen["cache_dir"]) == tmp_path / "cache" / "huggingface" / "hub"

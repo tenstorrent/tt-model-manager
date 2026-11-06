@@ -116,8 +116,8 @@ this order. The order matters:
    does not re-resolve or clobber the empty-target build.
 
 `run.sh` wires the engine env (`LD_PRELOAD` of `_ttnncpp.so`, `TT_METAL_HOME` at the installed
-`ttnn`, `EXTRA_MODELS_DIR`, hermetic caches under the folder) and launches vLLM with
-`PYTHONPATH=$HERE` so `model.py` imports. `tt-model pull` and `serve` route a thin bundle through
+`ttnn`, `EXTRA_MODELS_DIR`, caches under the folder, HF weights in the shared HF cache) and
+launches vLLM with `PYTHONPATH=$HERE` so `model.py` imports. `tt-model pull` and `serve` route a thin bundle through
 the generated `install.sh` and `run.sh`.
 
 > **Why vLLM is built at install rather than pinned:** the plugin runs against a vLLM compiled for an *empty* device

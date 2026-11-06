@@ -796,6 +796,12 @@ def render_run_sh(manifest: Manifest) -> str:
     absent — ``tt-model serve`` is the managed path, this is the raw one.
     """
     is_dit_kind = manifest.deps is not None and manifest.deps.kind != "vllm"
+    # v6 weights go in the shared HF cache so an update or a second bundle reuses them.
+    hf_home_line = (
+        'export HF_HOME="${HF_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/huggingface}"  # shared HF cache'
+        if manifest.is_thin else
+        'export HF_HOME="${HF_HOME:-$HERE/.hf}"                  # HF weights + hub cache'
+    )
     weights = manifest.weights.repo_id if manifest.weights else ""
     mesh_device = (manifest.mesh.topology if manifest.mesh and manifest.mesh.topology else "") or ""
     author_env = dict(manifest.env or {})
@@ -999,10 +1005,11 @@ export TT_VLLM_BUILTIN_MODELS=0
 # + model registry load via entry points without it.
 export PYTHONPATH="{pythonpath_entry}:${{PYTHONPATH:-}}"   # resolves the adapter/model imports
 export MESH_DEVICE="${{MESH_DEVICE:-{mesh_device}}}"
-{chips_block}# HERMETIC RUNTIME: keep every cache/home INSIDE the folder wall, so serving writes and reads
-# nothing outside it (the ttnn tensor cache even DEFAULTS to a hard-coded /mnt/... path upstream —
-# a classic other-machine leak we must override). Each is overridable if the operator sets it.
-export HF_HOME="${{HF_HOME:-$HERE/.hf}}"                  # HF weights + hub cache
+{chips_block}# HERMETIC RUNTIME: keep every cache/home INSIDE the folder wall (a v6 bundle's HF weights excepted),
+# so serving writes and reads nothing else outside it (the ttnn tensor cache even DEFAULTS to a
+# hard-coded /mnt/... path upstream — a classic other-machine leak we must override). Each is
+# overridable if the operator sets it.
+{hf_home_line}
 export TT_CACHE_PATH="${{TT_CACHE_PATH:-$HERE/.tt_cache}}"    # ttnn weight/tensor cache
 export TT_CACHE_HOME="${{TT_CACHE_HOME:-$HERE/.tt_cache}}"    # override upstream's /mnt/... default
 export XDG_CACHE_HOME="${{XDG_CACHE_HOME:-$HERE/.cache}}"     # generic catch-all (triton, etc.)
