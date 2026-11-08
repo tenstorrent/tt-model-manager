@@ -790,8 +790,8 @@ def compose_run(
         cmd += ["--label", f"{k}={v}"]
     if device_ids is not None:
         cmd += ["--label", f"{DEVICES_LABEL}={','.join(str(d) for d in device_ids)}"]
-        for d in device_ids:
-            cmd += ["--device", f"{TT_DEVICE}/{d}:{TT_DEVICE}/{d}"]
+        for i, d in enumerate(device_ids):
+            cmd += ["--device", f"{TT_DEVICE}/{d}:{TT_DEVICE}/{i}"]
     else:
         cmd += ["--device", TT_DEVICE]
     cmd += [

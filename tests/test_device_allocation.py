@@ -328,8 +328,8 @@ def _device_flags(argv):
 def test_scoped_ids_become_one_device_flag_per_chip():
     argv = _run_argv(_wire(), device_ids=[1, 2])
     assert _device_flags(argv) == [
-        "/dev/tenstorrent/1:/dev/tenstorrent/1",
-        "/dev/tenstorrent/2:/dev/tenstorrent/2",
+        "/dev/tenstorrent/1:/dev/tenstorrent/0",
+        "/dev/tenstorrent/2:/dev/tenstorrent/1",
     ]
     assert "/dev/tenstorrent" not in argv  # never the whole directory alongside them
 
