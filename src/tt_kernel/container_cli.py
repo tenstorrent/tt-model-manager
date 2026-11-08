@@ -1362,10 +1362,10 @@ def _ready_card(name: str, endpoint: str, target: str):
         [
             ("endpoint", endpoint),
             ("models", f"curl {endpoint}/v1/models"),
-            # `curl` takes a prompt, not a package id: it asks the running server which
+            # `check` takes a prompt, not a package id: it asks the running server which
             # model it serves. A target here would be parsed as the prompt and "hello"
             # rejected as an unexpected argument.
-            ("try", 'tt-model curl "hello"'),
+            ("try", 'tt-model check "hello"'),
         ],
         footer_lines=[f"[muted]tt-model logs {target} -f   ·   tt-model stop {target}[/muted]"],
     )
