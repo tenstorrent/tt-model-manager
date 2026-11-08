@@ -3321,3 +3321,27 @@ def test_serve_prefers_a_later_v6_install_over_a_stale_pulled_container(tmp_path
     assert res.exit_code == 0, res.output
     assert served == ["org/x"]
     assert container_cli.resolve_target("org/x") is None
+
+
+
+def test_rm_include_weights_fails_nonzero_when_weights_deletion_fails(
+    tmp_path, hf_cache, monkeypatch, capfd
+):
+    """#187: if HF weights removal fails (repo directory survives), the step marks ✗
+    without a freed size, suppresses the huggingface_hub traceback, and `rm --include-weights`
+    exits non-zero."""
+    from huggingface_hub import DeleteCacheStrategy
+
+    m, _, _ = _pulled(tmp_path, monkeypatch, repo="org/x")
+    _cached_repo(hf_cache, "org/Weights-7B")
+    monkeypatch.setattr(container, "container_exists", lambda n: False)
+    monkeypatch.setattr(container, "image_present", lambda ref: False)
+    monkeypatch.setattr(DeleteCacheStrategy, "execute", lambda self: None)
+
+    res = runner.invoke(cli.app, ["rm", "org/x", "--include-weights"])
+    assert res.exit_code != 0
+    fd_out = capfd.readouterr().out
+    combined = " ".join((res.output + " " + fd_out).split())
+    assert "✗ removing the cached weights org/Weights-7B" in combined
+    assert "100 B" not in fd_out
+    assert "✓ removed org/x" not in combined
