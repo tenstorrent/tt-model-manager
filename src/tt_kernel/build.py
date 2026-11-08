@@ -1258,8 +1258,11 @@ def _capability_notes(m: ContainerManifest) -> List[str]:
     under a table inviting the reader to pick a different one.
     """
     # vLLM 0.11.1 renamed `reasoning_content` to `reasoning`; 0.16.0 dropped the old name.
+    # The tenstorrent/vllm fork only ever exposes `reasoning`.
     ver = re.match(r"(\d+)\.(\d+)\.(\d+)", str((m.runtime.get("vllm") or {}).get("version") or ""))
-    if not ver:  # a wheel, a source tree or the fork: the version is unknown here
+    if m.kind == "vllm-fork":
+        field = "`reasoning`"
+    elif not ver:  # a wheel or a source tree: the version is unknown here
         field = "`reasoning` (`reasoning_content` on vLLM before 0.11.1)"
     elif tuple(map(int, ver.groups())) >= (0, 11, 1):
         field = "`reasoning`"

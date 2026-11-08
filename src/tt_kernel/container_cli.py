@@ -212,6 +212,10 @@ _QUICKSTART_CMD = re.compile(
 _QUICKSTART_INLINE = re.compile(
     r"(?m)^(Without tt-cli: `tt-model serve )[^\s`]+/[^\s`]+(`\.)$"
 )
+# The generated Feedback discussions link; anchored on the generated prefix and /discussions suffix.
+_FEEDBACK_DISCUSSIONS = re.compile(
+    r"(open a discussion at https://huggingface\.co/)[^\s/]+/[^\s/]+(/discussions\b)"
+)
 
 
 def _repoint_card_quickstart(readme: Path, new_repo: str) -> bool:
@@ -231,6 +235,7 @@ def _repoint_card_quickstart(readme: Path, new_repo: str) -> bool:
     text = readme.read_text()
     swapped = _QUICKSTART_CMD.sub(lambda mo: mo.group(1) + new_repo, text)
     swapped = _QUICKSTART_INLINE.sub(lambda mo: mo.group(1) + new_repo + mo.group(2), swapped)
+    swapped = _FEEDBACK_DISCUSSIONS.sub(lambda mo: mo.group(1) + new_repo + mo.group(2), swapped)
     if swapped == text:
         return False
     readme.write_text(swapped)
