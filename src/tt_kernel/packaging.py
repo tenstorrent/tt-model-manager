@@ -445,6 +445,16 @@ def imported_top_level(py_path: Path) -> set:
     return names
 
 
+def _sfpi_strict_default(env: Optional[Dict[str, str]]) -> str:
+    """Default the SFPI gate's strictness from the bundle's ``env``; the operator's env still wins."""
+    value = (env or {}).get("TT_MODEL_STRICT_SFPI")
+    if value is None:
+        return ""
+    if value not in ("0", "1"):
+        raise ValueError(f"env TT_MODEL_STRICT_SFPI must be 0 or 1, got {value!r}")
+    return f'TT_MODEL_STRICT_SFPI="${{TT_MODEL_STRICT_SFPI:-{value}}}"\n'
+
+
 def _render_sfpi_validation(*, discover_ttnn: bool) -> str:
     """Render the SFPI gate for an installed TTNN wheel: missing or older SFPI fails, newer warns.
 
@@ -452,7 +462,8 @@ def _render_sfpi_validation(*, discover_ttnn: bool) -> str:
     selector accepts any compiler found under ``ttnn/runtime/sfpi`` or ``/opt/tenstorrent/sfpi``
     without checking its version, so validate the same winning path before a JIT compile can fail
     with opaque missing-API errors. ``TT_MODEL_STRICT_SFPI=1`` makes a mismatch fatal (except under
-    ``TT_MODEL_PRINT=1``); a wheel without ``tt_metal/sfpi-version`` skips the version check.
+    ``TT_MODEL_PRINT=1``), and a bundle can make that its default with ``--env``
+    (``_sfpi_strict_default``); a wheel without ``tt_metal/sfpi-version`` skips the version check.
     ``PYBIN`` must name the bundle interpreter; ``TTNN_DIR`` may already be
     available in run.sh.
     """
@@ -630,7 +641,7 @@ def render_install_sh(manifest: Manifest) -> str:
             f'-r "$HERE/{d.requirements}" {model_wheels}'.rstrip()
         )
         # Check the external SFPI against the just-installed TTNN wheel before the expensive vLLM build.
-        steps.append(_render_sfpi_validation(discover_ttnn=True))
+        steps.append(_sfpi_strict_default(manifest.env) + _render_sfpi_validation(discover_ttnn=True))
         # (2) vLLM core for the plugin: STOCK upstream vLLM built with VLLM_TARGET_DEVICE=empty (NOT
         # the CUDA `vllm` on PyPI). Mirrors tenstorrent/vllm-tt-plugin docs/install-vllm-tt.sh: install
         # vLLM's common deps under the TT override set (so ttnn's numpy<2 is not bumped by opencv),
@@ -977,7 +988,7 @@ PYBIN="$VENV/bin/python"
 # LD_PRELOAD below (chicken-and-egg). find_spec resolves the path without executing the module.
 TTNN_DIR="$("$PYBIN" -c 'import importlib.util,os;print(os.path.dirname(importlib.util.find_spec("ttnn").origin))')"
 export TT_METAL_RUNTIME_ROOT="$TTNN_DIR"
-{_render_sfpi_validation(discover_ttnn=False)}
+{_sfpi_strict_default(manifest.env)}{_render_sfpi_validation(discover_ttnn=False)}
 # _ttnncpp.so lives in ttnn.libs/ for an auditwheel-repaired (portable) wheel, or build/lib/ for a
 # raw one; preload it to avoid the glibc "static TLS block" error on late dlopen.
 # Prefer the auditwheel-vendored copy in *.libs/ (that's the one _ttnn.so actually loads via

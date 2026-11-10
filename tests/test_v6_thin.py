@@ -14,6 +14,7 @@ import shlex
 import subprocess
 import sys
 
+import pytest
 from typer.testing import CliRunner
 
 from tt_kernel import cli, metal, packaging
@@ -24,7 +25,7 @@ _runner = CliRunner()
 
 def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=None,
                 models_wheels=None, vllm_wheel=None, with_vllm=True, constraints=None,
-                vllm_common_requirements=None):
+                vllm_common_requirements=None, env=None):
     model_py = tmp_path / "model.py"
     model_py.write_text("class QwenForCausalLM:  # the runner\n    pass\n")
     staged = tmp_path / "thin"
@@ -38,7 +39,7 @@ def _stage_thin(tmp_path, requirements=None, plugin_wheel=None, extra_wheels=Non
         vllm_wheel=vllm_wheel, vllm_common_requirements=vllm_common_requirements,
         with_vllm=with_vllm,
         weights=WeightsRef(repo="Qwen/Qwen3-4B"), mesh=Mesh(devices=1, topology="P150"),
-        resources=Resources(max_num_seqs=32, block_size=64),
+        resources=Resources(max_num_seqs=32, block_size=64), env=env,
     )
     return staged, m
 
@@ -210,7 +211,7 @@ def test_thin_run_pins_runtime_root_and_revalidates_sfpi(tmp_path):
     assert 'export TT_METAL_CACHE="${TT_METAL_CACHE:-$HERE/.cache}"' in run
 
 
-def _sfpi_gate(tmp_path, declared="7.78.0[935]", found="7.78.0[935]"):
+def _sfpi_gate(tmp_path, declared="7.78.0[935]", found="7.78.0[935]", prefix=""):
     """A runnable SFPI gate over a fake TTNN dir whose local compiler reports ``found``."""
     from tt_kernel.packaging import _render_sfpi_validation
 
@@ -230,6 +231,7 @@ def _sfpi_gate(tmp_path, declared="7.78.0[935]", found="7.78.0[935]"):
     script.write_text(
         "#!/bin/bash\nset -euo pipefail\n"
         f"PYBIN={shlex.quote(sys.executable)}\nTTNN_DIR={shlex.quote(str(ttnn_dir))}\n"
+        + prefix
         + _render_sfpi_validation(discover_ttnn=False)
         + "echo gate-passed\n"
     )
@@ -290,6 +292,38 @@ def test_thin_install_and_run_share_the_lenient_sfpi_gate(tmp_path):
         text = (staged / script).read_text()
         assert 'TT_MODEL_STRICT_SFPI:-0' in text, script
         assert "warning: SFPI" in text, script
+        assert 'TT_MODEL_STRICT_SFPI="${TT_MODEL_STRICT_SFPI:-' not in text, script
+
+
+def test_bundle_env_sets_the_sfpi_gate_default_before_the_gate(tmp_path):
+    """run.sh exports manifest.env only after the gate, and install.sh never does, so the gate
+    must read the bundle's value itself for ``--env TT_MODEL_STRICT_SFPI=1`` to take effect."""
+    staged, _ = _stage_thin(tmp_path, env={"TT_MODEL_STRICT_SFPI": "1"})
+    for script in ("install.sh", "run.sh"):
+        text = (staged / script).read_text()
+        default = text.index('TT_MODEL_STRICT_SFPI="${TT_MODEL_STRICT_SFPI:-1}"')
+        assert default < text.index("sfpi-version"), script
+
+
+def test_bundle_strict_sfpi_refuses_a_newer_sfpi_unless_the_operator_overrides(tmp_path, monkeypatch):
+    """A newer SFPI can fail a bundle's kernel build (7.95 vs a 7.78.0 ttnn: deprecated-macro
+    -Werror), so a bundle that says so refuses it at install instead of failing the first boot."""
+    from tt_kernel.packaging import _sfpi_strict_default
+
+    monkeypatch.delenv("TT_MODEL_STRICT_SFPI", raising=False)
+    monkeypatch.delenv("TT_MODEL_PRINT", raising=False)
+    prefix = _sfpi_strict_default({"TT_MODEL_STRICT_SFPI": "1"})
+    script, _ = _sfpi_gate(tmp_path, declared="7.78.0[935]", found="7.95.0[1100]", prefix=prefix)
+    r = _run_gate(script)
+    assert r.returncode != 0 and "gate-passed" not in r.stdout
+    assert "need 7.78.0[935]" in r.stderr
+    assert _run_gate(script, TT_MODEL_STRICT_SFPI="0").returncode == 0
+
+
+@pytest.mark.parametrize("value", ["yes", "true", "", "1; rm -rf /"])
+def test_bundle_strict_sfpi_accepts_only_0_or_1(tmp_path, value):
+    with pytest.raises(ValueError, match="TT_MODEL_STRICT_SFPI"):
+        _stage_thin(tmp_path, env={"TT_MODEL_STRICT_SFPI": value})
 
 
 def test_thin_ships_plugin_and_ops_as_wheels_by_path(tmp_path):
