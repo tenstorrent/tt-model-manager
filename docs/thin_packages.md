@@ -181,6 +181,11 @@ interface compiler). SFPI is a separate, externally managed host dependency, pro
 `tt-cli` or installed by the user on a bare host. It is **not** in `ttnn` and **not** in the venv.
 No separate TT-Metalium™ install is needed; the TT-Metalium runtime rides inside `ttnn`.
 
+`install.sh` and `run.sh` check SFPI against the version `ttnn` declares: an older SFPI fails, and a
+newer one only warns unless `TT_MODEL_STRICT_SFPI=1`. If your kernels do not build with a newer SFPI,
+package with `--env TT_MODEL_STRICT_SFPI=1` so the install refuses it. The user can still set
+`TT_MODEL_STRICT_SFPI=0`.
+
 ## Author a thin bundle from a model that works on your host
 
 A thin package is not the engine. It is your model's code plus the recipe to rebuild its venv
