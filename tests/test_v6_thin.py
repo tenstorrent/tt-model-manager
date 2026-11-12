@@ -10,6 +10,7 @@ wheel are published so requirements can pin real versions.
 """
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -156,6 +157,36 @@ def test_thin_install_sh_builds_venv_from_pins(tmp_path):
     assert "-r \"$HERE/requirements.txt\"" in inst   # installs from the pins
     assert "--no-index" not in inst                  # thin pulls ttnn/TTTv2 from the index
     assert "wheels/" not in inst                     # no embedded platform wheels
+
+
+def test_thin_install_sh_rerun_keeps_existing_venv(tmp_path):
+    """Re-running install.sh (the SFPI-mismatch recovery path) must reuse the venv, not die or wipe it."""
+    staged, _ = _stage_thin(tmp_path)
+    venv_line = next(line for line in (staged / "install.sh").read_text().splitlines()
+                     if line.startswith("uv venv "))
+    # Stand-in for uv >= 0.10: an existing venv is an error unless --allow-existing (or --clear).
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "uv").write_text(
+        '#!/bin/bash\nfor dest; do :; done\n'
+        'if [ -e "$dest" ]; then\n'
+        '  [[ " $* " == *" --clear "* ]] && rm -rf "$dest"\n'
+        '  [[ " $* " == *" --allow-existing "* || " $* " == *" --clear "* ]] || '
+        '{ echo "A virtual environment already exists at: $dest" >&2; exit 2; }\n'
+        'fi\nmkdir -p "$dest/bin"\n'
+    )
+    (fake_bin / "uv").chmod(0o700)
+    venv = tmp_path / "venv"
+    sfpi = venv / "lib/python3.12/site-packages/ttnn/runtime/sfpi/sfpi.version"
+    script = f'set -euo pipefail\nPYVER=3.12\nVENV={shlex.quote(str(venv))}\n{venv_line}\n'
+    env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+    first = subprocess.run(["bash", "-c", script], text=True, capture_output=True, env=env)
+    assert first.returncode == 0, first.stderr
+    sfpi.parent.mkdir(parents=True)
+    sfpi.write_text("7.78.0\n")
+    again = subprocess.run(["bash", "-c", script], text=True, capture_output=True, env=env)
+    assert again.returncode == 0, again.stderr
+    assert sfpi.read_text() == "7.78.0\n"
 
 
 def test_thin_installer_can_pin_uv_without_new_schema_field(tmp_path):
