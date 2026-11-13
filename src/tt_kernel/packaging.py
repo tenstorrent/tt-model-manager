@@ -769,7 +769,8 @@ export UV_PYTHON_INSTALL_DIR="$HERE/.python"
 export UV_PYTHON_BIN_DIR="$HERE/.python/bin"
 export UV_CACHE_DIR="$HERE/.uv-cache"
 uv python install "$PYVER"
-uv venv --relocatable --python "$PYVER" "$VENV"
+# --allow-existing: a re-run (e.g. after unpacking SFPI into ttnn/runtime/sfpi) keeps the venv.
+uv venv --relocatable --allow-existing --python "$PYVER" "$VENV"
 PYBIN="$VENV/bin/python"
 TT_MODEL_CONSTRAINTS_ARGS=()
 if [ -f "$HERE/{CONSTRAINTS}" ]; then
