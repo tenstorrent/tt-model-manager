@@ -423,11 +423,13 @@ def test_the_picked_devices_reach_the_docker_run(tmp_path, monkeypatch):
     monkeypatch.setattr(container, "pick_free_devices", lambda count, dev_root=None: [2, 3, 4, 5])
     container_cli.serve_container(_manifest(tmp_path), target="org/m")
     argv = ran[0]
+    # Host chips 2..5 are granted as container-visible 0..3: tt-metal's Cluster bring-up
+    # enumerates from 0, so a scoped run has to look like a full mesh to the runtime.
     assert [argv[i + 1] for i, a in enumerate(argv) if a == "--device"] == [
-        "/dev/tenstorrent/2:/dev/tenstorrent/2",
-        "/dev/tenstorrent/3:/dev/tenstorrent/3",
-        "/dev/tenstorrent/4:/dev/tenstorrent/4",
-        "/dev/tenstorrent/5:/dev/tenstorrent/5",
+        "/dev/tenstorrent/2:/dev/tenstorrent/0",
+        "/dev/tenstorrent/3:/dev/tenstorrent/1",
+        "/dev/tenstorrent/4:/dev/tenstorrent/2",
+        "/dev/tenstorrent/5:/dev/tenstorrent/3",
     ]
     assert f"{container.DEVICES_LABEL}=2,3,4,5" in argv
 
