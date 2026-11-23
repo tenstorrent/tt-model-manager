@@ -189,6 +189,18 @@ def test_no_fallback_for_a_group_that_does_not_fit_starts_nothing(up, group):
     assert "llama8b failed in compile" in out and "gptoss" in out and "--placement shared" in out
 
 
+def test_chips_that_do_not_open_stop_the_deploy_instead_of_falling_back(up):
+    """Seen on hardware: a dirty board fails the fit check in `open`; separate chips would hide it."""
+    run, calls = up
+    error = "Device 2: Timed out while waiting for active ethernet core 29-25 to become active again."
+    calls["verdict"] = {"verdict": "separate", "fits": False, "reason": f"llama8b failed in open: error: {error}",
+                        "failure": {"member": "llama8b", "phase": "open", "kind": "error", "error": error}}
+    res = run()
+    out = " ".join(res.output.split())
+    assert res.exit_code != 0 and calls["served"] == []
+    assert "could not open chips 0,1,2,3" in out and "tt-smi -r" in out
+
+
 def test_an_unknown_placement_is_refused(up):
     run, _ = up
     res = run(GROUP_ONLY, "--placement", "maybe")

@@ -2789,6 +2789,12 @@ def _place_groups(dep, placements, placement: str):
                           + (" (kept from an earlier check)" if verdict.get("cached") else ""))
             if fits:
                 continue
+            failure = verdict.get("failure") or {}
+            if isinstance(failure, dict) and failure.get("phase") == "open":
+                # the chips did not open: a device problem, which separate chips would only hide
+                raise _err(f"{p.instance.name}: the fit check could not open chips "
+                           f"{','.join(map(str, p.chips))} ({failure.get('error')}). That is the device, not "
+                           "the fit: reset the chips (tt-smi -r) and run deploy up again")
             console.note(deploy.fit_summary(p.instance.name, verdict), marker="!", style="warning")
             if verdict.get("log"):
                 console.note(f"fit check log: {verdict['log']}", marker="•")
