@@ -2746,7 +2746,8 @@ def _deploy_plan(file: str):
             raise _err("could not tell which chips are in use (docker ps/inspect failed); refusing to plan")
         placements = deploy.plan(dep, manifests, inventory=inventory, claimed=claimed,
                                  boards=container.chip_boards(), port_free=container.port_is_free,
-                                 free_hugepages=container.free_hugepages_1g())
+                                 free_hugepages=container.free_hugepages_1g(),
+                                 ports_needed=container.port_span)
     except (deploy.DeployError, container.ContainerError) as e:
         raise _err(str(e))
     return dep, placements

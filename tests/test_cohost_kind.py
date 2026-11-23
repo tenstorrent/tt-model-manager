@@ -288,3 +288,24 @@ def test_a_short_tt_cohost_sha_is_refused_before_the_build(tmp_path, monkeypatch
     path = _authored(tmp_path, tt_cohost={"repo": "https://github.com/example/tt-cohost", "ref": "cd9feea"})
     with pytest.raises(build.BuildError, match="full 40-character commit sha"):
         build.stage(path, tmp_path / "out")
+
+
+def test_deploy_reserves_a_cohost_instance_whole_port_range(manifest, tmp_path, monkeypatch):
+    """gptoss-qwen publishes members at base and base+2 and the status port at base+3."""
+    from tt_kernel import cli
+
+    small = manifest.model_copy(deep=True)
+    small.container.serve_profiles = [small.container.serve_profiles[0].model_copy(
+        update={"name": "one", "hardware": "p150", "mesh_device": "P150", "port": None})]
+    small.container.default_profile = "one"
+    (tmp_path / "d.yaml").write_text("instances:\n  - {name: group, model: org/group, profile: gptoss-qwen}\n"
+                                     "  - {name: next, model: org/next}\n")
+    monkeypatch.setattr(cli, "_require_container", lambda model: manifest if model == "org/group" else small)
+    monkeypatch.setattr(container, "all_device_ids", lambda: [0, 1, 2, 3, 4])
+    monkeypatch.setattr(container, "_claimed_devices", lambda inventory: set())
+    monkeypatch.setattr(container, "chip_boards", lambda: {0: "A", 1: "A", 2: "B", 3: "B", 4: "C"})
+    monkeypatch.setattr(container, "port_is_free", lambda port: True)
+    monkeypatch.setattr(container, "free_hugepages_1g", lambda: 16)
+    _, plan = cli._deploy_plan(str(tmp_path / "d.yaml"))
+    group, nxt = plan
+    assert group.port == 20000 and nxt.port == 20004  # members at 20000 and 20002, status port 20003
