@@ -26,6 +26,7 @@ CLI owns rendering, and everything else is pure enough to test without a docker 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shlex
 import re
@@ -43,12 +44,15 @@ from . import MANIFEST_NAME, __version__, compat
 from .container_manifest import (
     ContainerManifest,
     ContainerManifestError,
+    ExtraCode,
     GitSource,
     load_container_manifest,
 )
 from .manifest import DEFAULT_PORT
 
 BASE_IMAGE_DEFAULT = "ghcr.io/tenstorrent/tt-metal/tt-metalium/ubuntu-{ubuntu}-dev-amd64:latest"
+#: Mounted (not copied) into a FROM-image build to install into the base image's venv.
+UV_IMAGE = "ghcr.io/astral-sh/uv:0.9.26"
 
 # tt-metal's own top-level CMakeLists.txt refuses to configure without this file, and it
 # is the first thing build_metal.sh does. Checking it here turns a failure that costs a
@@ -348,6 +352,20 @@ def stage_code(m: ContainerManifest, metal: Path, dest: Path,
     came from: the image has a single code overlay, and a file's origin stops being
     observable the moment it is copied.
     """
+    if len(extra_roots) != len(m.source.extra_code):
+        raise BuildError(
+            f"stage_code got {len(extra_roots)} resolved extra root(s) for "
+            f"{len(m.source.extra_code)} source.extra_code entries; a root that was "
+            "never resolved would silently ship nothing"
+        )
+    groups = [(metal, m.source.code, "source.code")]
+    groups += [(root, extra.paths, "source.extra_code")
+               for extra, root in zip(m.source.extra_code, extra_roots)]
+    return _copy_allowlist(groups, dest)
+
+
+def _copy_allowlist(groups: "Sequence[tuple]", dest: Path) -> "StagedCode":
+    """Copy each ``(root, paths, field)`` group into ``dest``; a missing path raises."""
     skipped: List[str] = []
 
     def _ignore_for(root: Path):
@@ -385,20 +403,21 @@ def stage_code(m: ContainerManifest, metal: Path, dest: Path,
             shutil.copy2(src, target)
         entries.append(rel + ("/" if src.is_dir() else ""))
 
-    for rel in m.source.code:
-        _copy(metal, rel, "source.code")
-
-    if len(extra_roots) != len(m.source.extra_code):
-        raise BuildError(
-            f"stage_code got {len(extra_roots)} resolved extra root(s) for "
-            f"{len(m.source.extra_code)} source.extra_code entries; a root that was "
-            "never resolved would silently ship nothing"
-        )
-    for extra, root in zip(m.source.extra_code, extra_roots):
-        for rel in extra.paths:
-            _copy(root, rel, "source.extra_code")
+    for root, paths, field_name in groups:
+        for rel in paths:
+            _copy(root, rel, field_name)
 
     return StagedCode(tree=entries, skipped=skipped)
+
+
+def _clone_for_code(repo: str, ref: str, into: Path) -> Path:
+    """Partial-clone (blobless) a tree only to stage code/ from it (the image build
+    re-clones)."""
+    subprocess.run(
+        ["git", "clone", "--filter=blob:none", repo, str(into)], check=True
+    )
+    subprocess.run(["git", "-C", str(into), "checkout", ref], check=True)
+    return into
 
 
 def _sha256_tree(root: Path) -> str:
@@ -444,6 +463,8 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
         shutil.rmtree(out)
     ctx = out / "ctx"
     ctx.mkdir(parents=True)
+    if getattr(launcher, "BUILDS_FROM_IMAGE", False):
+        return stage_from_image(m, launcher, ctx, out)
 
     metal = resolve_metal_source(m, scratch=ctx)
 
@@ -528,15 +549,6 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
 
     # -- code/ ----------------------------------------------------------------------
     code_dir = ctx / "code"
-
-    def _clone_for_code(repo: str, ref: str, into: Path) -> Path:
-        """Partial-clone (blobless) a tree only to stage code/ from it (the image build
-        re-clones)."""
-        subprocess.run(
-            ["git", "clone", "--filter=blob:none", repo, str(into)], check=True
-        )
-        subprocess.run(["git", "-C", str(into), "checkout", ref], check=True)
-        return into
 
     # Every extra root is resolved to a local tree BEFORE staging, so stage_code never
     # decides when to touch the network and a clone failure is reported here, next to the
@@ -681,6 +693,143 @@ def stage(manifest_path: Path, out_root: Optional[Path] = None) -> Staged:
                   code_skipped=staged_code.skipped)
 
 
+def _local_image(ref: str) -> Dict[str, object]:
+    """Id, user and labels of an image on this machine; raises when it is not here."""
+    r = subprocess.run(["docker", "image", "inspect", ref, "--format", "{{json .}}"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise BuildError(
+            f"runtime.base_image {ref} is not on this machine. Pull it first (for a "
+            "published package: tt-model pull <org/name>) or build it with tt-model package"
+        )
+    data = json.loads(r.stdout)
+    config = data.get("Config") or {}
+    return {"id": data.get("Id", ""), "user": config.get("User") or "",
+            "labels": config.get("Labels") or {}}
+
+
+def stage_from_image(m: ContainerManifest, launcher, ctx: Path, out: Path) -> Staged:
+    """Stage a kind built FROM an existing package image (``kind: cohost``): no tt-metal
+    build, just tt-cohost pinned to a commit, extra packages and code on top of the base."""
+    rt = m.runtime
+    base = _local_image(rt["base_image"])
+    cohost = rt["tt_cohost"]
+    cohost["sha"] = resolve_git_ref(cohost["repo"], cohost["ref"])
+    if not re.fullmatch(r"[0-9a-f]{40}", cohost["sha"]):
+        raise BuildError(
+            f"runtime.tt_cohost.ref {cohost['ref']!r}: use a branch, a tag or a full "
+            "40-character commit sha; the image build cannot fetch a short sha"
+        )
+
+    temporary: List[Path] = []
+    groups = []
+    try:
+        for i, entry in enumerate(rt.get("code") or []):
+            extra = ExtraCode.model_validate(entry)
+            if isinstance(extra.root, GitSource):
+                sha = resolve_git_ref(extra.root.repo, extra.root.ref)
+                root = _clone_for_code(extra.root.repo, sha, ctx / f"code-src-{i}")
+                temporary.append(root)
+            else:
+                root = Path(extra.root).expanduser()
+            groups.append((root, extra.paths, "runtime.code"))
+        staged_code = _copy_allowlist(groups, ctx / "code")
+    finally:
+        for d in temporary:
+            shutil.rmtree(d, ignore_errors=True)
+    (ctx / "code").mkdir(exist_ok=True)
+    # code/ ships in the repo itself; the roots are the author's paths and are not published.
+    rt.pop("code", None)
+
+    header = "#!/bin/bash\nset -euxo pipefail\n"
+    (ctx / "verify.sh").write_text(header + "\n".join(launcher.verify_lines(m)) + "\n")
+    (ctx / "serve-default.sh").write_text(render_default_serve(m, launcher))
+    shutil.copy2(Path(__file__).parent / "docker" / "entrypoint.sh", ctx / "entrypoint.sh")
+    (ctx / "Dockerfile").write_text(
+        render_cohost_dockerfile(m, user=str(base["user"]), code=staged_code.tree))
+
+    labels = base["labels"]
+    image = f"tt-model/{m.name}:build-{cohost['sha'][:9]}"
+    built: Dict[str, object] = {
+        "image": image,
+        "repo": m.repo,
+        "tt_model_version": __version__,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "base_image": {"ref": rt["base_image"], "id": base["id"]},
+        "tt_cohost": {"repo": cohost["repo"], "sha": cohost["sha"]},
+        "code_sha256": _sha256_tree(ctx / "code"),
+    }
+    metal_sha = labels.get("org.tenstorrent.tt-model.tt-metal") or labels.get(
+        "org.opencontainers.image.revision")
+    if metal_sha:
+        built["tt_metal"] = {"sha": metal_sha}
+    if labels.get("org.tenstorrent.tt-model.plugin"):
+        built["plugin"] = {"sha": labels["org.tenstorrent.tt-model.plugin"]}
+    return Staged(manifest=m, ctx=ctx, out=out, image=image, built=built,
+                  code_tree=staged_code.tree, code_skipped=staged_code.skipped)
+
+
+def _git_url(repo: str) -> str:
+    """``repo`` as a URL BuildKit's ``ADD`` fetches as git (it needs the ``.git`` suffix)."""
+    return repo if repo.endswith(".git") or repo.startswith("git@") else repo.rstrip("/") + ".git"
+
+
+def render_cohost_dockerfile(m: ContainerManifest, *, user: str, code: Sequence[str]) -> str:
+    """The Dockerfile of a co-host image: ``runtime.base_image`` + tt-cohost at its pinned sha.
+
+    ``--no-deps`` everywhere: the members share the base image's ttnn, vLLM and plugin, and
+    nothing installed on top may move them.
+    """
+    rt = m.runtime
+    cohost = rt["tt_cohost"]
+    packages = " ".join(shlex.quote(p) for p in rt.get("packages") or [])
+    # Only the shipped paths and their parents (COPY gives an existing parent the context's
+    # mode): touching the base's own files would copy them into a new layer.
+    shipped = sorted(f"/opt/tt-metal/{c.rstrip('/')}" for c in code)
+    parents = sorted({"/opt/tt-metal/" + "/".join(c.rstrip("/").split("/")[:i])
+                      for c in code for i in range(1, c.rstrip("/").count("/") + 1)})
+    lines = [
+        "# syntax=docker/dockerfile:1.7-labs",
+        f"# Generated by tt-model {__version__} for {m.name} (kind {m.kind}).",
+        "FROM scratch AS tt-cohost-src",
+        f"ADD {_git_url(cohost['repo'])}#{cohost['sha']} /",
+        "",
+        f"FROM {rt['base_image']}",
+        "USER root",
+        f"RUN --mount=from={UV_IMAGE},source=/uv,target=/bin/uv \\",
+        "    --mount=from=tt-cohost-src,target=/tmp/tt-cohost,rw \\",
+        '    UV_NO_CACHE=1 uv pip install --python "$VENV/bin/python" --no-deps \\',
+        f"    /tmp/tt-cohost{(' ' + packages) if packages else ''}",
+    ]
+    if shipped:
+        lines += [
+            "COPY code/ /opt/tt-metal/",
+            # the context carries the author's umask; the serve uid owns nothing in the image
+            f"RUN chmod -R a+rX {' '.join(shipped)} \\",
+            *([f"    && chmod a+rX {' '.join(parents)} \\"] if parents else []),
+            f'    && "$VENV/bin/python" -m compileall -q {" ".join(shipped)}',
+        ]
+    lines += [
+        "COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh",
+        "COPY --chmod=0755 serve-default.sh /usr/local/bin/serve-default.sh",
+        f"ENV TT_MODEL_KIND={m.kind}",
+    ]
+    if user:
+        lines.append(f"USER {user}")
+    lines += [
+        "COPY --chmod=0755 verify.sh /ctx/verify.sh",
+        "RUN bash /ctx/verify.sh",
+        f'LABEL org.tenstorrent.tt-model="{m.name}" \\',
+        f'      org.tenstorrent.tt-model.repo="{m.repo}" \\',
+        f'      org.tenstorrent.tt-model.kind="{m.kind}" \\',
+        f'      org.tenstorrent.tt-model.base-image="{rt["base_image"]}" \\',
+        f'      org.tenstorrent.tt-model.tt-cohost="{cohost["sha"]}"',
+        'ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]',
+        'CMD ["/usr/local/bin/serve-default.sh"]',
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def render_default_serve(m: ContainerManifest, launcher) -> str:
     """The image's default CMD: serve the default profile, correctly configured.
 
@@ -747,8 +896,9 @@ exec {command}
 
 
 def build_argv(staged: Staged) -> List[str]:
-    argv = ["docker", "build", "--progress=plain", "--tag", staged.image,
-            "--build-context", f"metalsrc={staged.metal.context}"]
+    argv = ["docker", "build", "--progress=plain", "--tag", staged.image]
+    if staged.metal is not None:
+        argv += ["--build-context", f"metalsrc={staged.metal.context}"]
     for k, v in staged.build_args.items():
         argv += ["--build-arg", f"{k}={v}"]
     argv += [str(staged.ctx)]
@@ -1506,6 +1656,13 @@ def render_model_card(m: ContainerManifest, built: Dict[str, object]) -> str:
         lines.append(
             f"| vllm-tt-plugin | [`v{v}`](https://pypi.org/project/vllm-tt-plugin/{v}/) |"
         )
+
+    base_built = built.get("base_image")
+    if isinstance(base_built, dict) and base_built.get("ref"):
+        lines.append(f"| base image | `{base_built['ref']}` (`{str(base_built.get('id', ''))[:19]}`) |")
+    cohost_built = built.get("tt_cohost")
+    if isinstance(cohost_built, dict) and cohost_built.get("sha"):
+        lines.append(f"| tt-cohost | {_pinned_sha(str(cohost_built['sha']), cohost_built.get('repo'))} |")
 
     lines += [
         f"| `code/` digest | `{str(built.get('code_sha256', ''))[:16]}` (sha256, "

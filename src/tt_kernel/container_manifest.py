@@ -474,7 +474,9 @@ class ContainerManifest(BaseModel):
     kind: str = "vllm-plugin"  # launcher flavour; see tt_kernel.launchers.KINDS
     arch: str  # blackhole | wormhole_b0 — fixed by the build
 
-    source: Source
+    # Required by every kind that builds tt-metal; a kind built FROM an existing image
+    # (``BUILDS_FROM_IMAGE``, e.g. cohost) takes none.
+    source: Optional[Source] = None
     image: ImageSettings = Field(default_factory=ImageSettings)
     runtime: Dict[str, Any] = Field(default_factory=dict)  # shape is kind-specific
     serve: ServeSettings = Field(default_factory=ServeSettings)
@@ -594,6 +596,11 @@ class ContainerManifest(BaseModel):
             raise ContainerManifestError(
                 f"kind must be one of {tuple(sorted(KINDS))}, got {self.kind!r}"
             ) from None
+        if self.source is None and not getattr(launcher, "BUILDS_FROM_IMAGE", False):
+            raise ContainerManifestError(
+                f"kind {self.kind} builds tt-metal and needs a source: block "
+                "(tt_metal, code, ubuntu, python)"
+            )
         if "/" not in self.repo:
             raise ContainerManifestError(
                 f"repo must be a namespaced HF id (org/name), got {self.repo!r}"
@@ -689,6 +696,8 @@ class ContainerManifest(BaseModel):
         checkable, on a machine that does not have the author's tt-metal tree — a
         consumer reading a published package, or the test suite.
         """
+        if self.source is None:
+            return
         if not isinstance(self.source.tt_metal, GitSource):
             base = Path(root) if root is not None else Path(self.source.tt_metal).expanduser()
             missing = [c for c in self.source.code if not (base / c).exists()]

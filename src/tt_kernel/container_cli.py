@@ -118,14 +118,19 @@ def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> 
         raise ContainerCliError(str(e)) from None
 
     metal = staged.metal
-    console.note(
-        f"tt-metal {(metal.sha or '?')[:9]}"
-        + (f" ({metal.branch})" if metal.branch else "")
-        + (" (dirty tree — packaged as-is)" if metal.dirty else "")
-        + f" · {metal.mode} source",
-        marker="•",
-    )
-    if metal.mode == "local" and metal.pushed is False:
+    base = staged.built.get("base_image")
+    if metal is None and isinstance(base, dict):
+        cohost = staged.built.get("tt_cohost") or {}
+        console.note(f"FROM {base['ref']} · tt-cohost {str(cohost.get('sha', '?'))[:9]}", marker="•")
+    else:
+        console.note(
+            f"tt-metal {(metal.sha or '?')[:9]}"
+            + (f" ({metal.branch})" if metal.branch else "")
+            + (" (dirty tree — packaged as-is)" if metal.dirty else "")
+            + f" · {metal.mode} source",
+            marker="•",
+        )
+    if metal is not None and metal.mode == "local" and metal.pushed is False:
         # Informational, NOT a warning. The target user is a community developer on a
         # local branch or fork; the image carries the whole tree, so nothing ever has
         # to resolve this sha. Saying "push the branch to make provenance verifiable"
@@ -1124,7 +1129,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         # port that collides on a shared box. Under tt-model the host port is tt-model's
         # call. --print must stay pure and deterministic, so it skips the walk but still
         # prints the 20000 a real run starts from — not the manifest's 8000.
-        chosen = DEFAULT_PORT if print_only else container.pick_free_port(DEFAULT_PORT)
+        span = container.port_span(manifest, profile)
+        chosen = DEFAULT_PORT if print_only else container.pick_free_port(DEFAULT_PORT, span=span)
         if chosen != DEFAULT_PORT:
             console.note(f"port {DEFAULT_PORT} is in use; serving on {chosen} instead",
                          marker="•")
