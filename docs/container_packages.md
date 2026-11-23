@@ -173,6 +173,19 @@ publishing `device_count: 1` with nothing said. Box names (`QB2`, `T3K`, `TG`) b
   `tt-dit-server`, it needs only `hardware` and `mesh_device`; the validated serving
   knobs go in `serve.args`, which merge per profile.
 
+- **`cohost`** — several models served from ONE process that owns the chips, each member
+  on its own port (`serve.port` + the member's `port_offset`). Only one process can open a
+  chip, so models that must share chips have to share a process; the runtime that does
+  this is the separate [tt-cohost](https://github.com/jashansinghTT/tt-cohost) package. Its
+  `runtime:` wants `members` (each: `name`, `kind: vllm|app`, `model`, `port_offset`,
+  optional `args`, `env`, `kv_tokens`, `app`, and `preload`, a `module:function` the host
+  calls before that member's model is built), `base_image` (the package image every member
+  runs in) and `tt_cohost` (`{repo, ref}`, pinned to a sha at package time). Optional:
+  `profiles` (profile name -> the members it serves), `tt_config` (the device settings the
+  one mesh opens with), `packages` and `code` (`[{root, paths}]`). `tt-model package` builds
+  it FROM `base_image` with no tt-metal build, so this kind takes no `source:` block. See
+  [cohost.md](cohost.md).
+
 ### Example
 
 ```yaml

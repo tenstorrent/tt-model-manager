@@ -160,6 +160,22 @@ TT_DIT_PHASES: Tuple[Phase, ...] = (
           start=_rx(r"[Ww]arm(?:ing)? ?up", r"Capturing trace", r"Compiling")),
 )
 
+#: a co-host group (kind: cohost): one device host, then every member's phased boot, logged
+#: by the host as "cohost: <member> <step>" lines.
+COHOST_PHASES: Tuple[Phase, ...] = (
+    Phase("device", "opening Tenstorrent device", "Tenstorrent device opened",
+          start=_rx(r"cohost: started ", r"frontend connected"),
+          done=_rx(r"cohost mesh \S+ open")),
+    Phase("weights", "loading every member", "members loaded",
+          start=_rx(r"cohost: \S+ load_model:")),
+    Phase("warmup", "compiling every member", "members compiled",
+          start=_rx(r"cohost: \S+ compiled")),
+    Phase("capture", "capturing traces in turn", "traces captured",
+          start=_rx(r"cohost: \S+ traces captured")),
+    Phase("server", "starting the members' servers", "members ready",
+          start=_rx(r"cohost: \S+ ready on port")),
+)
+
 #: a model's own HTTP server (kind: http-server): the boot is the runtime admission
 #: contract, then the device chain + warmup, then the server's own ready event. The
 #: model servers log structured JSON ("{"event": ...}") so the anchors are the event
