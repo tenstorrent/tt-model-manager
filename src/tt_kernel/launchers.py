@@ -1189,11 +1189,13 @@ class CohostLauncher:
     REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device")
     RUNTIME_KEYS = ("members", "profiles", "tt_config", "base_image", "tt_cohost", "packages",
                     "code", "lock")
-    MEMBER_KEYS = ("name", "kind", "model", "port_offset", "args", "env", "kv_tokens", "app", "preload")
+    MEMBER_KEYS = ("name", "kind", "model", "port_offset", "args", "env", "kv_tokens", "app", "preload",
+                   "standalone")
     BUILDS_FROM_IMAGE = True
     LOCK_EXCLUDES: Tuple[str, ...] = ()
     READY_LINE = "cohost: all members ready"
     LAUNCH_MODULE = "tt_cohost.launch"
+    FIT_MODULE = "tt_cohost.fit"
     SERVER_DESC = "one OpenAI-compatible vLLM server per member"
     OPENAI_COMPATIBLE = True
     DEFAULT_PIPELINE_TAG: Optional[str] = "text-generation"
@@ -1253,6 +1255,11 @@ class CohostLauncher:
                 raise LauncherError(f"member {mem['name']}: a vllm member needs model")
             if mem["kind"] == "app" and ":" not in str(mem.get("app", "")):
                 raise LauncherError(f"member {mem['name']}: an app member needs app = 'module:factory'")
+            alone = mem.get("standalone")
+            if alone is not None and not (isinstance(alone, dict) and isinstance(alone.get("model"), str)
+                                          and set(alone) <= {"model", "profile"}):
+                raise LauncherError(f"member {mem['name']}: standalone is {{model, profile}}, the package "
+                                    "that serves it on its own chips")
         kinds = [mem["kind"] for mem in members]
         if "app" in kinds and "vllm" in kinds and kinds.index("app") < len(kinds) - 1 - kinds[::-1].index("vllm"):
             raise LauncherError("a mixed group lists its vllm members before its app members (apps capture last)")
@@ -1312,6 +1319,10 @@ class CohostLauncher:
 
     def serve_argv(self, m: Manifest, profile: ServeProfile) -> List[str]:
         return ["python", "-m", self.LAUNCH_MODULE]
+
+    def fit_argv(self, config: str, out: str, workdir: str) -> List[str]:
+        """tt-cohost's fit check: boot the group, write the verdict JSON to ``out``."""
+        return ["python", "-m", self.FIT_MODULE, "--config", config, "--json", out, "--workdir", workdir]
 
     def serve_env(self, m: Manifest, profile: ServeProfile) -> Dict[str, str]:
         # Inline, so serve needs no extra mount; tt-cohost reads TT_COHOST_CONFIG when no --config is given.

@@ -16,13 +16,15 @@ looks like the rest of the tool. The modules underneath (``build``, ``container`
 from __future__ import annotations
 
 import errno
+import json
 import re
 import shlex
 import shutil
 import stat
+import subprocess
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from . import MANIFEST_NAME, compat, console, container, hub, localdb, oci
 from .boot_progress import BootTracker, diagnose_boot, summarize
@@ -1337,6 +1339,65 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
 
     console.milestone(f"{what} ready  {console.fmt_duration(view.elapsed)}")
     console.console.print(_ready_card(name, endpoint, what))
+
+
+def fit_check(manifest: Manifest, *, profile_name: Optional[str], port: int, chips: Sequence[int],
+              instance: str, target: Optional[str] = None) -> Dict[str, object]:
+    """Boot a co-host group on ``chips`` with tt-cohost's fit check and return its verdict.
+
+    A ``shared`` verdict is kept per image and profile, so the next deploy of the same image
+    skips the trial boot; any other verdict is checked again the next time.
+    """
+    spec = manifest.container
+    assert spec is not None
+    launcher = launcher_for(spec.kind)
+    profile = spec.resolve_profile(profile_name).model_copy(update={"port": port})
+    ref = container.image_ref(manifest)
+    digest = container.loaded_digest(ref)
+    if digest is None:
+        raise ContainerCliError(f"{instance}: image {ref} is not loaded. Pull the package first:  "
+                                f"tt-model pull {target or manifest.name}")
+    fit_dir = container.model_cache_dir(manifest) / "fit"
+    key = f"{profile.name}.{digest.split(':')[-1][:12]}"
+    kept = fit_dir / f"{key}.shared.json"
+    if kept.is_file():
+        return {**json.loads(kept.read_text()), "cached": True}
+
+    ensure_weights(manifest, target, profile=profile)
+    container.ensure_mount_sources(manifest)
+    fit_dir.mkdir(parents=True, exist_ok=True)
+    (fit_dir / f"{key}.group.json").write_text(json.dumps(launcher.group_config(manifest, profile)))
+    out, log = fit_dir / f"{key}.verdict.json", fit_dir / f"{key}.log"
+    out.unlink(missing_ok=True)
+    # /cache is the model's cache dir, mounted by compose_run: the config goes in, the verdict out
+    argv = launcher.fit_argv(f"/cache/fit/{key}.group.json", f"/cache/fit/{key}.verdict.json",
+                             f"/cache/fit/{key}.work")
+    name = container.container_name(manifest, profile, f"{instance}-fit")
+    if container.container_exists(name):
+        container.remove(name, force=True)
+    run = container.compose_run(manifest, profile, argv, launcher.serve_env(manifest, profile),
+                                detach=False, device_ids=list(chips), instance=f"{instance}-fit",
+                                rootless=container.docker_is_rootless())
+    rc: object
+    with open(log, "w") as f:
+        try:
+            rc = subprocess.run(run, stdout=f, stderr=subprocess.STDOUT,
+                                timeout=container.ready_timeout_s()).returncode
+        except subprocess.TimeoutExpired:
+            container.stop(name, image=ref)
+            rc = "timeout"
+    if container.container_exists(name):
+        container.remove(name, force=True)
+    if out.is_file():
+        verdict = json.loads(out.read_text())
+    else:
+        tail = [l for l in log.read_text(errors="replace").splitlines() if l.strip()][-1:]
+        verdict = {"verdict": "separate", "fits": False, "members": {},
+                   "reason": f"the fit check ended ({rc}) without a verdict: {tail[0] if tail else 'no output'}"}
+    verdict["log"] = str(log)   # the group's own log is in {key}.work next to it
+    if verdict.get("verdict") == "shared":
+        kept.write_text(json.dumps(verdict))
+    return verdict
 
 
 def _host_summary(reqs) -> Optional[str]:

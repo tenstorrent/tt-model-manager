@@ -1,0 +1,10 @@
+# Two LLMs on the same four chips when they fit (one co-host process), each on its own board
+# when they do not: `tt-model deploy up` runs the group's fit check first and falls back.
+deployment: llm-pair
+instances:
+  - name: llm
+    model: jashansinghTT/cohost-llm-blackhole
+    profile: gptoss-llama
+    separate:
+      - {name: gptoss, model: jashansinghTT/gpt-oss-20b-blackhole-fast, profile: p150x2-throughput}
+      - {name: llama8b, model: you/llama-3.1-8b-instruct-blackhole, profile: p150x2}   # any package that serves it alone

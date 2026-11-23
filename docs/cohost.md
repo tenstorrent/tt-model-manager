@@ -20,6 +20,8 @@ contract, the boot phases, the status endpoint and the limits.
   `python -m tt_cohost.launch`. The boot is done when the log says
   `cohost: all members ready`.
 - **`stop`, `logs`, `pull`, `push`** work as for any container package.
+- **`deploy up`** runs tt-cohost's fit check before serving a group and serves its members on
+  separate chips when it does not fit ([multi_model.md](multi_model.md#models-that-share-chips)).
 
 ## The manifest
 
@@ -56,7 +58,7 @@ serve_profiles:
 | `runtime.tt_cohost` | `{repo, ref}`; `package` pins `ref` to a sha and records it in the manifest, the card and an image label |
 | `runtime.packages` | extra requirements the members need on top of the base, installed with `--no-deps` |
 | `runtime.code` | extra code (`root` is a local path or `{repo, ref}`), staged into `code/` like `source.extra_code` |
-| `runtime.members` | `name`, `kind` (`vllm` or `app`; a mixed group lists its vLLM members first), `model`, `port_offset`, and optional `args`, `env`, `kv_tokens`, `app`, `preload` |
+| `runtime.members` | `name`, `kind` (`vllm` or `app`; a mixed group lists its vLLM members first), `model`, `port_offset`, and optional `args`, `env`, `kv_tokens`, `app`, `preload`, and `standalone` (`{model, profile}`: the package `deploy` serves it with on its own chips when the group does not fit) |
 | `runtime.profiles` | which members each serve profile runs; a profile not listed runs them all |
 | `runtime.tt_config` | the device settings the one mesh opens with |
 
