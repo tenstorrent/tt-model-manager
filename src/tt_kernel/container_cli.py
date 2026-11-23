@@ -1341,6 +1341,16 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
     console.console.print(_ready_card(name, endpoint, what))
 
 
+def fit_files(manifest: Manifest, profile: str, *, target: Optional[str] = None):
+    """``(dir, key)`` of a group's fit check files: one set per profile and image."""
+    ref = container.image_ref(manifest)
+    digest = container.loaded_digest(ref)
+    if digest is None:
+        raise ContainerCliError(f"image {ref} is not loaded. Pull the package first:  "
+                                f"tt-model pull {target or manifest.name}")
+    return container.model_cache_dir(manifest) / "fit", f"{profile}.{digest.split(':')[-1][:12]}"
+
+
 def fit_check(manifest: Manifest, *, profile_name: Optional[str], port: int, chips: Sequence[int],
               instance: str, target: Optional[str] = None) -> Dict[str, object]:
     """Boot a co-host group on ``chips`` with tt-cohost's fit check and return its verdict.
@@ -1353,17 +1363,11 @@ def fit_check(manifest: Manifest, *, profile_name: Optional[str], port: int, chi
     launcher = launcher_for(spec.kind)
     profile = spec.resolve_profile(profile_name).model_copy(update={"port": port})
     ref = container.image_ref(manifest)
-    digest = container.loaded_digest(ref)
-    if digest is None:
-        raise ContainerCliError(f"{instance}: image {ref} is not loaded. Pull the package first:  "
-                                f"tt-model pull {target or manifest.name}")
-    fit_dir = container.model_cache_dir(manifest) / "fit"
-    key = f"{profile.name}.{digest.split(':')[-1][:12]}"
+    fit_dir, key = fit_files(manifest, profile.name, target=target)
     kept = fit_dir / f"{key}.shared.json"
     if kept.is_file():
         return {**json.loads(kept.read_text()), "cached": True}
 
-    ensure_weights(manifest, target, profile=profile)
     container.ensure_mount_sources(manifest)
     fit_dir.mkdir(parents=True, exist_ok=True)
     (fit_dir / f"{key}.group.json").write_text(json.dumps(launcher.group_config(manifest, profile)))

@@ -2774,6 +2774,12 @@ def _place_groups(dep, placements, placement: str):
         if not hasattr(launcher, "fit_argv") or placement == "shared":
             continue
         if placement == "auto":
+            fit_dir, key = container_cli.fit_files(p.manifest, p.profile, target=p.instance.model)
+            if not (fit_dir / f"{key}.shared.json").is_file():
+                # the trial boot needs every member's weights, and step() must not run inside step()
+                container_cli.ensure_weights(p.manifest, p.instance.model,
+                                             profile=p.manifest.container.resolve_profile(p.profile))
+                console.note(f"watch from another terminal:  tail -f {fit_dir / key}.log", marker="→")
             with console.step(f"fit check: {p.instance.name} on chips {','.join(map(str, p.chips))}") as st:
                 verdict = container_cli.fit_check(
                     p.manifest, profile_name=p.profile, port=p.port, chips=p.chips,

@@ -129,6 +129,8 @@ def up(tmp_path, group, single, monkeypatch):
         calls["fits"].append((kw["instance"], kw["chips"]))
         return calls["verdict"]
     monkeypatch.setattr(container_cli, "fit_check", fit)
+    monkeypatch.setattr(container_cli, "fit_files", lambda m, prof, target=None: (tmp_path / "fit", prof))
+    monkeypatch.setattr(container_cli, "ensure_weights", lambda *a, **k: calls.setdefault("weights", []).append(a[1]))
     monkeypatch.setattr(container_cli, "serve_container",
                         lambda m, **kw: calls["served"].append((kw["instance"], kw["device_id"])))
     monkeypatch.setattr(container_cli, "pull_dir", lambda repo: tmp_path)
@@ -144,6 +146,8 @@ def test_a_group_that_fits_is_served_on_shared_chips(up):
     run, calls = up
     res = run()
     assert res.exit_code == 0, res.output
+    assert calls["weights"] == ["org/group"], "the trial boot needs the weights before it starts"
+    assert "tail -f" in res.output
     assert calls["fits"] == [("llm", [0, 1, 2, 3])]
     assert calls["served"] == [("llm", "0,1,2,3")]
 
@@ -213,7 +217,6 @@ def fit_env(tmp_path, group, monkeypatch):
     monkeypatch.setattr(container, "ensure_mount_sources", lambda m: None)
     monkeypatch.setattr(container, "docker_is_rootless", lambda: False)
     monkeypatch.setattr(container, "container_exists", lambda name: False)
-    monkeypatch.setattr(container_cli, "ensure_weights", lambda *a, **k: None)
 
     class _Done:
         returncode = 0
