@@ -1284,9 +1284,15 @@ class CohostLauncher:
                             "see build.render_cohost_dockerfile")
 
     def verify_lines(self, m: "ContainerManifest") -> List[str]:
+        # One interpreter, after the launcher, resolved the way tt-cohost resolves them: a
+        # preload hook or app factory that cannot load fails the build, not the serve.
+        members = m.runtime.get("members") or []
         checks = [f"import {self.LAUNCH_MODULE}"]
-        checks += [f"import {str(mem['preload']).split(':')[0]}"
-                   for mem in m.runtime.get("members") or [] if mem.get("preload")]
+        checks += [f"import {str(mem['preload']).split(':')[0]}" for mem in members if mem.get("preload")]
+        apps = [str(mem["app"]).split(":", 1) for mem in members if mem.get("kind") == "app"]
+        if apps:
+            checks.append("import importlib")
+            checks += [f"getattr(importlib.import_module({module!r}), {attr!r})" for module, attr in apps]
         lines = [f'"$VENV/bin/python" -c {shlex.quote("; ".join(checks))}']
         lines += [f'"$VENV/bin/python" -c {shlex.quote(v)}' for v in m.verify]
         return lines
