@@ -11,7 +11,8 @@ import sys
 import pytest
 import yaml
 
-from tt_kernel import build, container
+from tt_kernel import build, console, container, container_cli
+from tt_kernel.boot_progress import BootTracker
 from tt_kernel.container_manifest import ContainerManifestError, load_container_manifest
 from tt_kernel.launchers import CohostLauncher, LauncherError, launcher_for
 from tt_kernel.manifest import Manifest
@@ -168,6 +169,82 @@ def test_a_runtime_profile_that_names_no_serve_profile_is_refused(manifest):
     manifest.container.runtime["profiles"]["gptoss-qwem"] = manifest.container.runtime["profiles"].pop("gptoss-qwen")
     with pytest.raises(ContainerManifestError, match="name no serve profile"):
         CohostLauncher().validate(manifest.container)
+
+
+# Lines from real boots on one Blackhole chip / four: an app-only group (Whisper + S2 Pro +
+# Music 3) and a vLLM group (GPT-OSS-20B + Llama-3.1-8B), as tt-cohost and tt-metal log them.
+APP_BOOT = [
+    "2026-11-24 02:01:41.564 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:224)",
+    "2026-11-24 02:01:50,236 tt_cohost INFO cohost mesh P150 open: 1 devices",
+    "2026-11-24 02:01:57,792 tt_cohost INFO cohost: whisper load: +3.89 GiB/chip DRAM (total 3.89); L1 held 0.0 KiB/core",
+    "2026-11-24 02:01:57,792 tt_cohost INFO cohost: whisper load_model: loaded",
+    "Decode inference iterations (temp=0.0):   0%|          | 0/444 [00:00<?, ?it/s]",
+    "2026-11-24 02:04:22,499 tt_cohost INFO cohost: whisper compiled",
+    "Decode inference iterations (temp=0.0):   0%|          | 0/444 [00:06<?, ?it/s]",
+    "2026-11-24 02:06:35,658 tt_cohost INFO cohost: whisper traces captured",
+    "2026-11-24 02:07:03,093 tt_cohost INFO cohost: whisper ready on port 34000",
+    "2026-11-24 02:07:03,100 tt_cohost INFO cohost: all members ready",
+]
+VLLM_BOOT = [
+    "2026-11-23 22:25:30,650 tt_cohost INFO cohost: started gptoss (pid 50) on port 20000",
+    "2026-11-23 22:25:30,651 tt_cohost INFO cohost: started llama8b (pid 52) on port 20001",
+    "2026-11-23 22:25:48,394 tt_cohost INFO cohost: llama8b frontend connected",
+    "2026-11-23 22:25:49,100 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:224)",
+    "2026-11-23 22:26:07,500 tt_cohost INFO cohost mesh P150x4 open: 4 devices",
+    "Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:01<00:01,  1.9it/s]",
+    "2026-11-23 22:27:40,000 tt_cohost INFO cohost: llama8b load_model: +1.85 GiB/chip DRAM (total 1.85)",
+    " 75%|███████▌  | 24/32 [00:30<00:10,  1.2s/it]",
+    "2026-11-23 22:28:01,000 tt_cohost INFO cohost: gptoss compiled",
+    "2026-11-23 22:28:03,000 tt_cohost INFO cohost: gptoss traces captured",
+    "2026-11-23 22:28:05,000 tt_cohost INFO cohost: llama8b ready on port 20001",
+    "2026-11-23 22:28:05,100 tt_cohost INFO cohost: all members ready",
+]
+
+
+@pytest.mark.parametrize("lines", [APP_BOOT, VLLM_BOOT], ids=["apps", "vllm"])
+def test_the_boot_checklist_names_every_step_and_no_members_progress_bar(lines):
+    tracker = BootTracker(CohostLauncher().boot_phases(None), CohostLauncher.READY_LINE)
+    events = [ev for line in lines for ev in tracker.feed(line)]
+    done = [ev[2] for ev in events if ev[0] == "done"]
+    assert done == ["Tenstorrent device opened", "members loaded", "members compiled",
+                    "traces captured", "members ready"]
+    # one member's decode loop or shard bar is not the group's progress
+    assert not [ev for ev in events if ev[0] == "progress"]
+    assert all(ev[3] is None for ev in events if ev[0] == "done")
+    assert tracker.ready
+
+
+def test_the_ready_card_lists_every_member_and_the_status_endpoint(manifest, capsys):
+    profile = manifest.container.resolve_profile("gptoss-llama")
+    rows = CohostLauncher().card_rows(manifest, profile)
+    assert rows == [("gptoss", "http://127.0.0.1:21000", "vllm"),
+                    ("llama8b", "http://127.0.0.1:21001", "vllm"),
+                    ("status", "http://127.0.0.1:21002")]
+    console.console.print(container_cli._ready_card("cohost", "http://127.0.0.1:21000", "org/x", rows))
+    out = capsys.readouterr().out
+    assert "llama8b" in out and "http://127.0.0.1:21001" in out and "http://127.0.0.1:21002" in out
+    assert "/v1/models" not in out and "tt-model stop org/x" in out
+
+
+def test_serve_ends_on_the_group_card(manifest, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
+    for attr, fake in {"preflight": lambda **k: [], "image_present": lambda ref: True,
+                       "loaded_digest": lambda ref: "sha256:" + "a" * 64, "running": lambda name=None: [],
+                       "run_checked": lambda argv, **kw: None, "ensure_mount_sources": lambda m: None,
+                       "port_is_free": lambda p: True}.items():
+        monkeypatch.setattr(container, attr, fake)
+
+    def fake_wait(name, probe, timeout_s=1800, on_line=None):
+        for line in APP_BOOT:
+            on_line(line)
+        return container.ReadyResult(True, False, APP_BOOT[-3:], 42.0)
+
+    monkeypatch.setattr(container, "wait_ready", fake_wait)
+    container_cli.serve_container(manifest, profile_name="gptoss-qwen", target="org/x", port=21000, no_weights=True)
+    out = capsys.readouterr().out
+    assert "Tenstorrent device opened" in out and "members ready" in out and "0/444" not in out
+    assert "qwen32b" in out and "http://127.0.0.1:21002" in out and "http://127.0.0.1:21003" in out
 
 
 # ----------------------------------------------------------------------- authoring

@@ -1310,6 +1310,14 @@ class CohostLauncher:
         ports = sorted(self._ports(m, profile).values())
         return ports + [ports[-1] + 1]
 
+    def card_rows(self, m: Manifest, profile: ServeProfile) -> List[Tuple[str, ...]]:
+        """The ready card: every member's endpoint and kind, then the host's status endpoint."""
+        assert m.container is not None
+        ports = self._ports(m, profile)
+        rows = [(str(mem["name"]), f"http://127.0.0.1:{ports[mem['name']]}", str(mem["kind"]))
+                for mem in self.members(m.container.runtime, profile.name)]
+        return rows + [("status", f"http://127.0.0.1:{self.published_ports(m, profile)[-1]}")]
+
     def group_config(self, m: Manifest, profile: ServeProfile) -> Dict[str, object]:
         """The tt-cohost group config (``cohost_config_version: 1``) one profile serves."""
         assert m.container is not None

@@ -1338,7 +1338,9 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         raise ContainerCliError(summarize(diag, result.tail), diagnosis=diag)
 
     console.milestone(f"{what} ready  {console.fmt_duration(view.elapsed)}")
-    console.console.print(_ready_card(name, endpoint, what))
+    card_rows = getattr(launcher, "card_rows", None)
+    console.console.print(_ready_card(name, endpoint, what,
+                                      card_rows(manifest, profile) if card_rows else None))
 
 
 def fit_files(manifest: Manifest, profile: str, *, target: Optional[str] = None):
@@ -1432,11 +1434,14 @@ def _feed(tracker: BootTracker, view):
     return on_line
 
 
-def _ready_card(name: str, endpoint: str, target: str):
-    """The end-of-boot card: where the server is and what to do next."""
+def _ready_card(name: str, endpoint: str, target: str, rows=None):
+    """The end-of-boot card: where the server is and what to do next.
+
+    ``rows`` replaces the one-server rows for a package that serves several (a co-host
+    group: one row per member, then its status endpoint)."""
     return console.ready_panel(
         name,
-        [
+        rows or [
             ("endpoint", endpoint),
             ("models", f"curl {endpoint}/v1/models"),
             # `check` takes a prompt, not a package id: it asks the running server which
