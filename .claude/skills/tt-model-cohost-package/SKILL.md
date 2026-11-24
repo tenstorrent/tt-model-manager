@@ -47,7 +47,8 @@ tt-model -v package --container tt-model.yaml --out build
 No tt-metal build: the image is the base image plus tt-cohost (and `packages`, `code`), all
 installed with `--no-deps`. It takes minutes. The base image must be on the machine. The build
 runs `verify.sh` as the image's user: it imports `tt_cohost.launch`, every member's `preload`
-module and your `verify:` statements. Check `docker history` (a few MB on top of the base) and the
+module, every app member's factory and your `verify:` statements, so a member that cannot load
+fails the build with its own traceback. Check `docker history` (a few MB on top of the base) and the
 card's provenance rows (base image, tt-cohost commit).
 
 ## Step 4 — Fit, then validate

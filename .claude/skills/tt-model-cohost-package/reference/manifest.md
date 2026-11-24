@@ -50,7 +50,7 @@ default_profile: gptoss-llama
 | `env` | set while this member loads, and in its vLLM frontend |
 | `kv_tokens` | vllm: cap on this member's KV pool, so the members' DRAM adds up |
 | `preload` | `module:function` called before the member's model is built: an image-side fit hook. `verify.sh` imports its module |
-| `app` | app: `module:factory` |
+| `app` | app: `module:factory` returning a `tt_cohost.apps.AppMember`. `verify.sh` resolves it. Code written for tt-model's earlier runtime (`from tt_kernel.cohost.apps import AppMember`) still imports: tt-cohost maps that name to its own module |
 
 - `runtime.profiles` maps a serve profile to its members; a profile not listed serves them all,
   and a key that names no serve profile is refused.
