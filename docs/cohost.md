@@ -64,6 +64,8 @@ serve_profiles:
 
 An app member (`kind: app`) is a model with its own HTTP API: `app: module:factory` names a
 factory that returns a `tt_cohost.apps.AppMember` (the contract is in the tt-cohost README).
+Members written for tt-model's earlier built-in runtime import `tt_kernel.cohost.apps`;
+tt-cohost resolves that name to its own module, so they build and serve unchanged.
 `package` imports every preload hook and app factory inside the image, right after the
 launcher, so a member that cannot load fails the build with its own error instead of the serve.
 
