@@ -27,8 +27,8 @@ It refuses a plan that cannot run before anything starts:
 - a duplicate name;
 - fewer free 1G hugepages than chips.
 
-Models that must share chips have to share a process. That is a co-host package, not two
-instances.
+Models that must share chips have to share a process. That is a co-host package
+([cohost.md](cohost.md)), one instance in the file; see [below](#models-that-share-chips).
 
 ## The file
 
@@ -47,6 +47,7 @@ instances:
 | `chips` | list of chip ids, or `auto` (default) |
 | `port` | host port, or `auto` (default, from 20000 up) |
 | `args` | extra server arguments, as for `tt-model serve` |
+| `separate` | co-host group only: the instances that serve its members on their own chips when the group does not fit |
 
 More examples: [examples/deploy/](../examples/deploy).
 
@@ -71,6 +72,34 @@ Two other layouts were tried and do not work today:
 - **Two 4-chip instances on the same chips** (in one co-host process, since two processes
   cannot share a chip). Each GPT-OSS-20B instance keeps about 366 KiB of L1 per core resident,
   so two hold about 732 KiB per core and the second one's programs no longer fit in L1.
+
+## Models that share chips
+
+A co-host package (`kind: cohost`) is one instance whose models share the instance's chips.
+Before it starts it, `up` runs tt-cohost's fit check: it boots the group on the planned chips
+and reports, per model, whether it loaded, compiled and captured its traces next to the others.
+
+- **It fits:** the group is served as planned. The verdict is kept per image and profile, so
+  the next `up` of the same image skips the trial boot.
+- **It does not fit:** `up` says which model failed, in which phase, and the error, then serves
+  each model on its own chips instead: the instances listed under `separate:`, or else the
+  package each member names as `standalone` in the co-host manifest. With neither, `up` stops
+  before starting anything.
+
+```yaml
+deployment: llm-pair
+instances:
+  - name: llm
+    model: jashansinghTT/cohost-llm-blackhole
+    profile: gptoss-llama
+    separate:                   # served instead when the two do not fit on the same chips
+      - {name: gptoss, model: jashansinghTT/gpt-oss-20b-blackhole-fast, profile: p150x2-throughput}
+      - {name: llama8b, model: you/llama-3.1-8b-instruct-blackhole, profile: p150x2}   # any package that serves it alone
+```
+
+`--placement shared` serves the group without the check, and `--placement separate` serves its
+members on separate chips without trying the group. `deploy down` and `deploy status` cover the
+members a fallback started.
 
 ## Commands
 

@@ -30,6 +30,7 @@ tt-model stop you/mymodel --name b                 # stop only instance b (witho
 tt-model logs you/mymodel                          # container packages: show the server logs
 tt-model ps                                        # every model server on this host: chips, endpoint, status (--json too)
 tt-model deploy up my-deployment.yaml               # several models side by side, each on its own chips + port
+tt-model deploy up my-deployment.yaml --placement separate  # co-host groups: skip the fit check, own chips each
 ```
 
 `tt-model serve <id>` is the one-command path. For an already-installed bundle it runs the

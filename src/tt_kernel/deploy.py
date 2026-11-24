@@ -6,6 +6,11 @@
 Each instance is its own server process, so instances never share a chip: only one process
 can open a chip. The planner gives every instance its own chips (whole boards for a
 multi-chip profile) and its own port, and refuses a plan that collides before anything starts.
+
+Models that must share chips are one instance: a co-host package (``kind: cohost``). Before it
+is served, tt-cohost's fit check boots the group on its chips; when the group does not fit, its
+members are served on separate chips instead (``separate:`` in the file, or each member's
+``standalone`` package in the manifest).
 """
 
 from __future__ import annotations
@@ -36,6 +41,12 @@ class Instance:
     chips: Optional[List[int]] = None     # None = pick automatically
     port: Optional[int] = None            # None = pick automatically
     args: List[str] = field(default_factory=list)
+    #: co-host group only: what serves its members on their own chips when the group does not fit
+    separate: List["Instance"] = field(default_factory=list)
+
+
+#: How a co-host group is placed: run the fit check (auto), or force shared or separate chips.
+PLACEMENTS = ("auto", "shared", "separate")
 
 
 @dataclass
@@ -60,37 +71,98 @@ class Placement:
                                         self.instance.name)
 
 
+_KEYS = {"name", "model", "profile", "chips", "port", "args"}
+
+
+def _instance(path: str, item, where: str) -> Instance:
+    if not isinstance(item, dict) or not item.get("name") or not item.get("model"):
+        raise DeployError(f"{path}: {where} needs `name` and `model`")
+    unknown = set(item) - _KEYS - ({"separate"} if where.startswith("instance") else set())
+    if unknown:
+        raise DeployError(f"{path}: instance {item['name']}: unknown key(s) {', '.join(sorted(unknown))}")
+    chips, port, args = item.get("chips", "auto"), item.get("port", "auto"), item.get("args") or []
+    if chips != "auto" and not (isinstance(chips, list) and all(isinstance(c, int) for c in chips)):
+        raise DeployError(f"{path}: instance {item['name']}: `chips` is `auto` or a list of chip ids, "
+                          f"e.g. [2, 3] (got {chips!r})")
+    if port != "auto" and not isinstance(port, int):
+        raise DeployError(f"{path}: instance {item['name']}: `port` is `auto` or a number (got {port!r})")
+    if not isinstance(args, list):   # a string would become one argument per character
+        raise DeployError(f"{path}: instance {item['name']}: `args` is a list, e.g. "
+                          f"[--max-model-len, \"8192\"] (got {args!r})")
+    separate = item.get("separate") or []
+    if not isinstance(separate, list):
+        raise DeployError(f"{path}: instance {item['name']}: `separate` is a list of instances")
+    return Instance(
+        name=str(item["name"]), model=str(item["model"]), profile=item.get("profile"),
+        chips=None if chips == "auto" else chips,
+        port=None if port == "auto" else port, args=[str(a) for a in args],
+        separate=[_instance(path, s, f"separate entry {j + 1} of {item['name']}")
+                  for j, s in enumerate(separate)],
+    )
+
+
 def load(path: str) -> Deployment:
     raw = yaml.safe_load(Path(path).read_text()) or {}
     if not isinstance(raw, dict) or not isinstance(raw.get("instances"), list) or not raw["instances"]:
         raise DeployError(f"{path}: expected a mapping with a non-empty `instances:` list")
-    known = {"name", "model", "profile", "chips", "port", "args"}
-    out = []
-    for i, item in enumerate(raw["instances"]):
-        if not isinstance(item, dict) or not item.get("name") or not item.get("model"):
-            raise DeployError(f"{path}: instance {i + 1} needs `name` and `model`")
-        unknown = set(item) - known
-        if unknown:
-            raise DeployError(f"{path}: instance {item['name']}: unknown key(s) {', '.join(sorted(unknown))}")
-        chips, port, args = item.get("chips", "auto"), item.get("port", "auto"), item.get("args") or []
-        if chips != "auto" and not (isinstance(chips, list) and all(isinstance(c, int) for c in chips)):
-            raise DeployError(f"{path}: instance {item['name']}: `chips` is `auto` or a list of chip ids, "
-                              f"e.g. [2, 3] (got {chips!r})")
-        if port != "auto" and not isinstance(port, int):
-            raise DeployError(f"{path}: instance {item['name']}: `port` is `auto` or a number (got {port!r})")
-        if not isinstance(args, list):   # a string would become one argument per character
-            raise DeployError(f"{path}: instance {item['name']}: `args` is a list, e.g. "
-                              f"[--max-model-len, \"8192\"] (got {args!r})")
-        out.append(Instance(
-            name=str(item["name"]), model=str(item["model"]), profile=item.get("profile"),
-            chips=None if chips == "auto" else chips,
-            port=None if port == "auto" else port, args=[str(a) for a in args],
-        ))
-    names = [i.name for i in out]
+    out = [_instance(path, item, f"instance {i + 1}") for i, item in enumerate(raw["instances"])]
+    names = [n for i in out for n in [i.name] + [s.name for s in i.separate]]
     dup = sorted({n for n in names if names.count(n) > 1})
     if dup:
         raise DeployError(f"{path}: instance name(s) used twice: {', '.join(dup)}")
     return Deployment(name=str(raw.get("deployment") or Path(path).stem), instances=out)
+
+
+def separate_instances(inst: Instance, m: Manifest, profile: str) -> List[Instance]:
+    """What serves a co-host group's members on their own chips: the file's ``separate:`` list,
+    else each member's ``standalone`` package from the manifest."""
+    if inst.separate:
+        return inst.separate
+    from .launchers import launcher_for
+
+    spec = m.container
+    assert spec is not None
+    members = launcher_for(spec.kind).members(spec.runtime, profile)
+    missing = [str(mem["name"]) for mem in members if not mem.get("standalone")]
+    if missing:
+        raise DeployError(
+            f"{inst.name}: no package to serve member(s) {', '.join(missing)} on their own chips. "
+            f"List them under `separate:` for {inst.name} in the deploy file")
+    return [Instance(name=f"{inst.name}-{mem['name']}", model=str(mem["standalone"]["model"]),
+                     profile=mem["standalone"].get("profile")) for mem in members]
+
+
+def possible_instances(dep: Deployment, manifests: Dict[str, Manifest]) -> List[Instance]:
+    """Every instance ``up`` may have started: each one, and a group's separate-chip fallback."""
+    out = []
+    for inst in dep.instances:
+        out.append(inst)
+        m = manifests.get(inst.model)
+        if inst.separate or m is None or m.container is None or m.container.kind != "cohost":
+            out += inst.separate
+            continue
+        try:
+            out += separate_instances(inst, m, m.container.resolve_profile(inst.profile).name)
+        except DeployError:
+            pass
+    return out
+
+
+def replace_instance(dep: Deployment, name: str, instances: List[Instance]) -> Deployment:
+    """``dep`` with instance ``name`` swapped for ``instances``, in its place."""
+    out = []
+    for inst in dep.instances:
+        out += instances if inst.name == name else [inst]
+    return Deployment(name=dep.name, instances=out)
+
+
+def fit_summary(name: str, verdict: Dict[str, object]) -> str:
+    """Why a group does not fit: tt-cohost's reason (member, phase, error), else its failure record."""
+    why = verdict.get("reason")
+    failure = verdict.get("failure") or {}
+    if not why and isinstance(failure, dict) and failure.get("member"):
+        why = f"{failure['member']} failed in {failure.get('phase') or 'its boot'}: {failure.get('error')}"
+    return f"{name}: the models do not fit on shared chips ({why or 'the fit check gave no reason'})"
 
 
 def plan(dep: Deployment, manifests: Dict[str, Manifest], *, inventory: Sequence[int],

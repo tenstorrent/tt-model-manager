@@ -16,13 +16,15 @@ looks like the rest of the tool. The modules underneath (``build``, ``container`
 from __future__ import annotations
 
 import errno
+import json
 import re
 import shlex
 import shutil
 import stat
+import subprocess
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from . import MANIFEST_NAME, compat, console, container, hub, localdb, oci
 from .boot_progress import BootTracker, diagnose_boot, summarize
@@ -118,14 +120,19 @@ def package_container(manifest_path: str, *, out_root: Optional[str] = None) -> 
         raise ContainerCliError(str(e)) from None
 
     metal = staged.metal
-    console.note(
-        f"tt-metal {(metal.sha or '?')[:9]}"
-        + (f" ({metal.branch})" if metal.branch else "")
-        + (" (dirty tree — packaged as-is)" if metal.dirty else "")
-        + f" · {metal.mode} source",
-        marker="•",
-    )
-    if metal.mode == "local" and metal.pushed is False:
+    base = staged.built.get("base_image")
+    if metal is None and isinstance(base, dict):
+        cohost = staged.built.get("tt_cohost") or {}
+        console.note(f"FROM {base['ref']} · tt-cohost {str(cohost.get('sha', '?'))[:9]}", marker="•")
+    else:
+        console.note(
+            f"tt-metal {(metal.sha or '?')[:9]}"
+            + (f" ({metal.branch})" if metal.branch else "")
+            + (" (dirty tree — packaged as-is)" if metal.dirty else "")
+            + f" · {metal.mode} source",
+            marker="•",
+        )
+    if metal is not None and metal.mode == "local" and metal.pushed is False:
         # Informational, NOT a warning. The target user is a community developer on a
         # local branch or fork; the image carries the whole tree, so nothing ever has
         # to resolve this sha. Saying "push the branch to make provenance verifiable"
@@ -1124,7 +1131,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         # port that collides on a shared box. Under tt-model the host port is tt-model's
         # call. --print must stay pure and deterministic, so it skips the walk but still
         # prints the 20000 a real run starts from — not the manifest's 8000.
-        chosen = DEFAULT_PORT if print_only else container.pick_free_port(DEFAULT_PORT)
+        span = container.port_span(manifest, profile)
+        chosen = DEFAULT_PORT if print_only else container.pick_free_port(DEFAULT_PORT, span=span)
         if chosen != DEFAULT_PORT:
             console.note(f"port {DEFAULT_PORT} is in use; serving on {chosen} instead",
                          marker="•")
@@ -1330,7 +1338,72 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
         raise ContainerCliError(summarize(diag, result.tail), diagnosis=diag)
 
     console.milestone(f"{what} ready  {console.fmt_duration(view.elapsed)}")
-    console.console.print(_ready_card(name, endpoint, what))
+    card_rows = getattr(launcher, "card_rows", None)
+    console.console.print(_ready_card(name, endpoint, what,
+                                      card_rows(manifest, profile) if card_rows else None))
+
+
+def fit_files(manifest: Manifest, profile: str, *, target: Optional[str] = None):
+    """``(dir, key)`` of a group's fit check files: one set per profile and image."""
+    ref = container.image_ref(manifest)
+    digest = container.loaded_digest(ref)
+    if digest is None:
+        raise ContainerCliError(f"image {ref} is not loaded. Pull the package first:  "
+                                f"tt-model pull {target or manifest.name}")
+    return container.model_cache_dir(manifest) / "fit", f"{profile}.{digest.split(':')[-1][:12]}"
+
+
+def fit_check(manifest: Manifest, *, profile_name: Optional[str], port: int, chips: Sequence[int],
+              instance: str, target: Optional[str] = None) -> Dict[str, object]:
+    """Boot a co-host group on ``chips`` with tt-cohost's fit check and return its verdict.
+
+    A ``shared`` verdict is kept per image and profile, so the next deploy of the same image
+    skips the trial boot; any other verdict is checked again the next time.
+    """
+    spec = manifest.container
+    assert spec is not None
+    launcher = launcher_for(spec.kind)
+    profile = spec.resolve_profile(profile_name).model_copy(update={"port": port})
+    ref = container.image_ref(manifest)
+    fit_dir, key = fit_files(manifest, profile.name, target=target)
+    kept = fit_dir / f"{key}.shared.json"
+    if kept.is_file():
+        return {**json.loads(kept.read_text()), "cached": True}
+
+    container.ensure_mount_sources(manifest)
+    fit_dir.mkdir(parents=True, exist_ok=True)
+    (fit_dir / f"{key}.group.json").write_text(json.dumps(launcher.group_config(manifest, profile)))
+    out, log = fit_dir / f"{key}.verdict.json", fit_dir / f"{key}.log"
+    out.unlink(missing_ok=True)
+    # /cache is the model's cache dir, mounted by compose_run: the config goes in, the verdict out
+    argv = launcher.fit_argv(f"/cache/fit/{key}.group.json", f"/cache/fit/{key}.verdict.json",
+                             f"/cache/fit/{key}.work")
+    name = container.container_name(manifest, profile, f"{instance}-fit")
+    if container.container_exists(name):
+        container.remove(name, force=True)
+    run = container.compose_run(manifest, profile, argv, launcher.serve_env(manifest, profile),
+                                detach=False, device_ids=list(chips), instance=f"{instance}-fit",
+                                rootless=container.docker_is_rootless())
+    rc: object
+    with open(log, "w") as f:
+        try:
+            rc = subprocess.run(run, stdout=f, stderr=subprocess.STDOUT,
+                                timeout=container.ready_timeout_s()).returncode
+        except subprocess.TimeoutExpired:
+            container.stop(name, image=ref)
+            rc = "timeout"
+    if container.container_exists(name):
+        container.remove(name, force=True)
+    if out.is_file():
+        verdict = json.loads(out.read_text())
+    else:
+        tail = [l for l in log.read_text(errors="replace").splitlines() if l.strip()][-1:]
+        verdict = {"verdict": "separate", "fits": False, "members": {},
+                   "reason": f"the fit check ended ({rc}) without a verdict: {tail[0] if tail else 'no output'}"}
+    verdict["log"] = str(log)   # the group's own log is in {key}.work next to it
+    if verdict.get("verdict") == "shared":
+        kept.write_text(json.dumps(verdict))
+    return verdict
 
 
 def _host_summary(reqs) -> Optional[str]:
@@ -1361,11 +1434,14 @@ def _feed(tracker: BootTracker, view):
     return on_line
 
 
-def _ready_card(name: str, endpoint: str, target: str):
-    """The end-of-boot card: where the server is and what to do next."""
+def _ready_card(name: str, endpoint: str, target: str, rows=None):
+    """The end-of-boot card: where the server is and what to do next.
+
+    ``rows`` replaces the one-server rows for a package that serves several (a co-host
+    group: one row per member, then its status endpoint)."""
     return console.ready_panel(
         name,
-        [
+        rows or [
             ("endpoint", endpoint),
             ("models", f"curl {endpoint}/v1/models"),
             # `check` takes a prompt, not a package id: it asks the running server which

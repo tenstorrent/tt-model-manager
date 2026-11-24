@@ -2739,6 +2739,15 @@ def _deploy_plan(file: str):
 
     try:
         dep = deploy.load(file)
+    except deploy.DeployError as e:
+        raise _err(str(e))
+    return dep, _plan_deployment(dep)
+
+
+def _plan_deployment(dep):
+    from . import deploy
+
+    try:
         manifests = {i.model: _require_container(i.model) for i in dep.instances}
         inventory = container.all_device_ids()
         claimed = container._claimed_devices(inventory)
@@ -2746,16 +2755,76 @@ def _deploy_plan(file: str):
             raise _err("could not tell which chips are in use (docker ps/inspect failed); refusing to plan")
         placements = deploy.plan(dep, manifests, inventory=inventory, claimed=claimed,
                                  boards=container.chip_boards(), port_free=container.port_is_free,
-                                 free_hugepages=container.free_hugepages_1g())
+                                 free_hugepages=container.free_hugepages_1g(),
+                                 ports_needed=container.port_span)
     except (deploy.DeployError, container.ContainerError) as e:
         raise _err(str(e))
-    return dep, placements
+    return placements
+
+
+def _place_groups(dep, placements, placement: str):
+    """Run the fit check for each co-host group (``auto``), and serve the members of a group that
+    does not fit, or every group under ``separate``, on their own chips. Returns the plan to start."""
+    from . import container_cli, deploy
+    from .launchers import launcher_for
+
+    replaced = False
+    for p in placements:
+        launcher = launcher_for(p.manifest.container.kind)
+        if not hasattr(launcher, "fit_argv") or placement == "shared":
+            continue
+        if placement == "auto":
+            fit_dir, key = container_cli.fit_files(p.manifest, p.profile, target=p.instance.model)
+            if not (fit_dir / f"{key}.shared.json").is_file():
+                # the trial boot needs every member's weights, and step() must not run inside step()
+                container_cli.ensure_weights(p.manifest, p.instance.model,
+                                             profile=p.manifest.container.resolve_profile(p.profile))
+                console.note(f"watch from another terminal:  tail -f {fit_dir / key}.log", marker="→")
+            with console.step(f"fit check: {p.instance.name} on chips {','.join(map(str, p.chips))}") as st:
+                verdict = container_cli.fit_check(
+                    p.manifest, profile_name=p.profile, port=p.port, chips=p.chips,
+                    instance=p.instance.name, target=p.instance.model)
+                fits = verdict.get("verdict") == "shared"
+                st.detail(("fits" if fits else "does not fit")
+                          + (" (kept from an earlier check)" if verdict.get("cached") else ""))
+            if fits:
+                continue
+            failure = verdict.get("failure") or {}
+            if isinstance(failure, dict) and failure.get("phase") == "open":
+                # the chips did not open: a device problem, which separate chips would only hide
+                raise _err(f"{p.instance.name}: the fit check could not open chips "
+                           f"{','.join(map(str, p.chips))} ({failure.get('error')}). That is the device, not "
+                           "the fit: reset the chips (tt-smi -r) and run deploy up again")
+            console.note(deploy.fit_summary(p.instance.name, verdict), marker="!", style="warning")
+            if verdict.get("log"):
+                console.note(f"fit check log: {verdict['log']}", marker="•")
+        try:
+            members = deploy.separate_instances(p.instance, p.manifest, p.profile)
+        except deploy.DeployError as e:
+            raise _err(f"{e}, or serve the group anyway with --placement shared") from None
+        console.note(f"{p.instance.name}: serving {', '.join(i.name for i in members)} on separate chips",
+                     marker="→")
+        dep = deploy.replace_instance(dep, p.instance.name, members)
+        replaced = True
+    return dep, (_plan_deployment(dep) if replaced else placements)
+
+
+def _endpoint(m: Manifest, profile: str, port: int) -> str:
+    """Where an instance answers: its port, or each member's for a co-host group."""
+    from .launchers import launcher_for
+
+    assert m.container is not None
+    rows = getattr(launcher_for(m.container.kind), "card_rows", None)
+    if rows is None:
+        return f"http://127.0.0.1:{port}"
+    prof = m.container.resolve_profile(profile).model_copy(update={"port": port})
+    return " · ".join(f"{r[0]} {r[1]}" for r in rows(m, prof)[:-1])   # the last row is the status port
 
 
 def _plan_table(placements) -> None:
     cells = [["NAME", "MODEL", "PROFILE", "CHIPS", "ENDPOINT"]] + [
         [p.instance.name, p.instance.model, p.profile, ",".join(map(str, p.chips)),
-         f"http://127.0.0.1:{p.port}"] for p in placements]
+         _endpoint(p.manifest, p.profile, p.port)] for p in placements]
     widths = [max(len(c[i]) for c in cells) for i in range(5)]
     for c in cells:
         console.raw("  " + "  ".join(v.ljust(w) for v, w in zip(c, widths)).rstrip())
@@ -2768,14 +2837,21 @@ def deploy_up(
     keep_going: bool = typer.Option(False, "--keep-going", help="Keep the instances that came up "
                                     "when another fails, stop the failed ones, exit 1 "
                                     "(default: stop them all)."),
+    placement: str = typer.Option("auto", "--placement", help="Co-host groups: auto (boot-time fit "
+                                  "check decides), shared (serve the group without the check) or "
+                                  "separate (serve each member on its own chips)."),
 ) -> None:
     """Start every instance of a deployment, each on its own chips and port, and wait for all."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from . import container_cli
+    from . import container_cli, deploy
     from .launchers import launcher_for
 
+    if placement not in deploy.PLACEMENTS:
+        raise _err(f"--placement is one of {', '.join(deploy.PLACEMENTS)} (got {placement!r})")
     dep, placements = _deploy_plan(file)
+    if not print_only:
+        dep, placements = _place_groups(dep, placements, placement)
     _plan_table(placements)
     if print_only:
         return
@@ -2863,9 +2939,20 @@ def deploy_down(file: str = typer.Argument(..., help="Deployment file (YAML)."))
 
     try:
         dep = deploy.load(file)
+        manifests = {i.model: _require_container(i.model) for i in dep.instances}
         for inst in dep.instances:
-            container_cli.stop_container(_require_container(inst.model), profile_name=inst.profile,
+            container_cli.stop_container(manifests[inst.model], profile_name=inst.profile,
                                          instance=inst.name)
+        # a co-host group's members, if `up` served them on separate chips
+        listed = {i.name for i in dep.instances}
+        for inst in deploy.possible_instances(dep, manifests):
+            if inst.name in listed:
+                continue
+            m = _require_container(inst.model)
+            assert m.container is not None
+            if container.is_running(container.container_name(
+                    m, m.container.resolve_profile(inst.profile), inst.name)):
+                container_cli.stop_container(m, profile_name=inst.profile, instance=inst.name)
     except (deploy.DeployError, container_cli.ContainerCliError, container.ContainerError) as e:
         raise _err(str(e))
 
@@ -2879,19 +2966,26 @@ def deploy_status(file: str = typer.Argument(..., help="Deployment file (YAML)."
         dep = deploy.load(file)
         # by container name (model, profile and instance), as `deploy down` stops them: an instance
         # name alone could match another deployment's server, or one started by hand with --name
-        wanted = {}
-        for i in dep.instances:
+        wanted, served_by = {}, {}
+        manifests = {i.model: _require_container(i.model) for i in dep.instances}
+        for i in deploy.possible_instances(dep, manifests):
             m = _require_container(i.model)
             assert m.container is not None
-            wanted[container.container_name(m, m.container.resolve_profile(i.profile), i.name)] = i.name
+            profile = m.container.resolve_profile(i.profile)
+            wanted[container.container_name(m, profile, i.name)] = i.name
+            served_by[i.name] = (m, profile.name)
     except (deploy.DeployError, container_cli.ContainerCliError, container.ContainerError, ValueError) as e:
         raise _err(str(e))
     rows = [r for r in _running_servers() if r["name"] in wanted]
     running = {wanted[r["name"]] for r in rows}
     for r in rows:
-        console.raw(f"  ✓ {r['instance']:<16} {r['repo']}  chips {r['chips'] or '-'}  {r['url'] or '-'}")
-    for n in sorted(set(wanted.values()) - running):
-        console.raw(f"  ○ {n:<16} not running")
+        port = r.get("port", "")
+        url = _endpoint(*served_by[wanted[r["name"]]], int(port)) if port.isdigit() else r["url"]
+        console.raw(f"  ✓ {r['instance']:<16} {r['repo']}  chips {r['chips'] or '-'}  {url or '-'}")
+    for inst in dep.instances:   # a group that fell back runs as its members
+        served = {i.name for i in deploy.possible_instances(deploy.Deployment(dep.name, [inst]), manifests)}
+        if not served & running:
+            console.raw(f"  ○ {inst.name:<16} not running")
 
 
 def main() -> None:
