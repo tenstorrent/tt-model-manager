@@ -150,6 +150,8 @@ def test_a_group_that_fits_is_served_on_shared_chips(up):
     assert "tail -f" in res.output
     assert calls["fits"] == [("llm", [0, 1, 2, 3])]
     assert calls["served"] == [("llm", "0,1,2,3")]
+    # the plan names every member's endpoint, as the separate-chip fallback does
+    assert "gptoss http://127.0.0.1:20000 · llama8b http://127.0.0.1:20001" in res.output
 
 
 def test_a_group_that_does_not_fit_falls_back_to_separate_chips_and_says_why(up):
@@ -205,6 +207,17 @@ def test_an_unknown_placement_is_refused(up):
     run, _ = up
     res = run(GROUP_ONLY, "--placement", "maybe")
     assert res.exit_code != 0 and "auto, shared, separate" in res.output
+
+
+def test_status_names_every_member_of_a_shared_group(up, group, tmp_path, monkeypatch):
+    _file(tmp_path, GROUP_ONLY)
+    name = container.container_name(group, group.container.resolve_profile(None), "llm")
+    monkeypatch.setattr(cli, "_running_servers", lambda: [
+        {"name": name, "instance": "llm", "repo": "org/group", "chips": "0,1,2,3", "port": "20100",
+         "url": "http://127.0.0.1:20100"}])
+    res = CliRunner().invoke(cli.app, ["deploy", "status", "d.yaml"])
+    assert res.exit_code == 0, res.output
+    assert "gptoss http://127.0.0.1:20100 · llama8b http://127.0.0.1:20101" in res.output
 
 
 def test_down_also_stops_the_members_a_fallback_started(up, tmp_path, monkeypatch):

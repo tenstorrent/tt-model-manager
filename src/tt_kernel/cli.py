@@ -2809,10 +2809,22 @@ def _place_groups(dep, placements, placement: str):
     return dep, (_plan_deployment(dep) if replaced else placements)
 
 
+def _endpoint(m: Manifest, profile: str, port: int) -> str:
+    """Where an instance answers: its port, or each member's for a co-host group."""
+    from .launchers import launcher_for
+
+    assert m.container is not None
+    rows = getattr(launcher_for(m.container.kind), "card_rows", None)
+    if rows is None:
+        return f"http://127.0.0.1:{port}"
+    prof = m.container.resolve_profile(profile).model_copy(update={"port": port})
+    return " · ".join(f"{r[0]} {r[1]}" for r in rows(m, prof)[:-1])   # the last row is the status port
+
+
 def _plan_table(placements) -> None:
     cells = [["NAME", "MODEL", "PROFILE", "CHIPS", "ENDPOINT"]] + [
         [p.instance.name, p.instance.model, p.profile, ",".join(map(str, p.chips)),
-         f"http://127.0.0.1:{p.port}"] for p in placements]
+         _endpoint(p.manifest, p.profile, p.port)] for p in placements]
     widths = [max(len(c[i]) for c in cells) for i in range(5)]
     for c in cells:
         console.raw("  " + "  ".join(v.ljust(w) for v, w in zip(c, widths)).rstrip())
@@ -2954,18 +2966,22 @@ def deploy_status(file: str = typer.Argument(..., help="Deployment file (YAML)."
         dep = deploy.load(file)
         # by container name (model, profile and instance), as `deploy down` stops them: an instance
         # name alone could match another deployment's server, or one started by hand with --name
-        wanted = {}
+        wanted, served_by = {}, {}
         manifests = {i.model: _require_container(i.model) for i in dep.instances}
         for i in deploy.possible_instances(dep, manifests):
             m = _require_container(i.model)
             assert m.container is not None
-            wanted[container.container_name(m, m.container.resolve_profile(i.profile), i.name)] = i.name
+            profile = m.container.resolve_profile(i.profile)
+            wanted[container.container_name(m, profile, i.name)] = i.name
+            served_by[i.name] = (m, profile.name)
     except (deploy.DeployError, container_cli.ContainerCliError, container.ContainerError, ValueError) as e:
         raise _err(str(e))
     rows = [r for r in _running_servers() if r["name"] in wanted]
     running = {wanted[r["name"]] for r in rows}
     for r in rows:
-        console.raw(f"  ✓ {r['instance']:<16} {r['repo']}  chips {r['chips'] or '-'}  {r['url'] or '-'}")
+        port = r.get("port", "")
+        url = _endpoint(*served_by[wanted[r["name"]]], int(port)) if port.isdigit() else r["url"]
+        console.raw(f"  ✓ {r['instance']:<16} {r['repo']}  chips {r['chips'] or '-'}  {url or '-'}")
     for inst in dep.instances:   # a group that fell back runs as its members
         served = {i.name for i in deploy.possible_instances(deploy.Deployment(dep.name, [inst]), manifests)}
         if not served & running:
