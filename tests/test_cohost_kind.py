@@ -5,6 +5,8 @@
 
 import json
 import shlex
+import subprocess
+import sys
 
 import pytest
 import yaml
@@ -255,6 +257,47 @@ def test_the_image_verifies_the_launcher_and_every_preload_hook(staged):
     verify = (staged.ctx / "verify.sh").read_text().splitlines()
     checks = [shlex.split(line)[-1] for line in verify if "python" in line]
     assert checks == ["import tt_cohost.launch; import models.cohost_llm.fit", "import models.cohost_llm"]
+
+
+APP_MEMBERS = [
+    {"name": "whisper", "kind": "app", "model": "openai/whisper-large-v3", "port_offset": 0,
+     "app": "models.cohost_speech.whisper:member"},
+    {"name": "s2pro", "kind": "app", "model": "fishaudio/s2-pro", "port_offset": 1,
+     "app": "models.cohost_speech.s2pro:member"},
+]
+
+
+def _first_check(m):
+    return shlex.split(CohostLauncher().verify_lines(m)[0])[-1]
+
+
+def test_the_image_resolves_every_app_factory_after_the_launcher(tmp_path):
+    m = load_container_manifest(_authored(tmp_path, members=APP_MEMBERS))
+    assert _first_check(m) == (
+        "import tt_cohost.launch; import importlib; "
+        "getattr(importlib.import_module('models.cohost_speech.whisper'), 'member'); "
+        "getattr(importlib.import_module('models.cohost_speech.s2pro'), 'member')")
+
+
+@pytest.mark.parametrize("whisper, ok", [
+    ("from tt_cohost.apps import AppMember\ndef member(host, m):\n    pass\n", True),
+    # an import the image cannot satisfy, e.g. a runtime it no longer ships: refused at build
+    ("from old_runtime.apps import AppMember\ndef member(host, m):\n    pass\n", False),
+    ("from tt_cohost.apps import AppMember\n", False),   # no factory
+])
+def test_the_app_check_fails_a_member_that_cannot_load(tmp_path, whisper, ok):
+    files = {"tt_cohost/__init__.py": "", "tt_cohost/launch.py": "",
+             "tt_cohost/apps.py": "class AppMember:\n    pass\n",
+             "models/__init__.py": "", "models/cohost_speech/__init__.py": "",
+             "models/cohost_speech/whisper.py": whisper,
+             "models/cohost_speech/s2pro.py": "def member(host, m):\n    pass\n"}
+    for rel, text in files.items():
+        (tmp_path / "tree" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "tree" / rel).write_text(text)
+    check = _first_check(load_container_manifest(_authored(tmp_path, members=APP_MEMBERS)))
+    run = subprocess.run([sys.executable, "-c", check], env={"PYTHONPATH": str(tmp_path / "tree")},
+                         capture_output=True, text=True)
+    assert (run.returncode == 0) is ok, run.stderr
 
 
 def test_the_image_default_command_serves_the_default_profile(staged):

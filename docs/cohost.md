@@ -60,5 +60,10 @@ serve_profiles:
 | `runtime.profiles` | which members each serve profile runs; a profile not listed runs them all |
 | `runtime.tt_config` | the device settings the one mesh opens with |
 
+An app member (`kind: app`) is a model with its own HTTP API: `app: module:factory` names a
+factory that returns a `tt_cohost.apps.AppMember` (the contract is in the tt-cohost README).
+`package` imports every preload hook and app factory inside the image, right after the
+launcher, so a member that cannot load fails the build with its own error instead of the serve.
+
 A member's port is the serve port plus its `port_offset`; the status port is the one after
 the highest member port. `serve` looks for a free run of ports wide enough for all of them.
