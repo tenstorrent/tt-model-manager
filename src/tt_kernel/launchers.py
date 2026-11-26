@@ -9,7 +9,7 @@ everything that varies arrives through the hooks below, so adding a kind is a ne
 here plus a registration in :data:`KINDS` — no change to the manifest schema, the image
 build, or any command.
 
-Four kinds, named for what they ARE rather than for their age:
+Five kinds, named for what they ARE rather than for their age:
 
 ``vllm-plugin``
     Stock ``vllm==X.Y.Z`` from PyPI (built from sdist with ``VLLM_TARGET_DEVICE=empty``)
@@ -32,6 +32,13 @@ Four kinds, named for what they ARE rather than for their age:
     The model's own HTTP server, launched by the argv recorded in ``runtime.command``
     (``{host}``/``{port}`` substituted at serve). For stacks that are neither a vLLM
     arrangement nor a diffusion ASGI app. Installs no engine and no default HTTP stack.
+
+``cohost``
+    Several models served from ONE process that owns the chips (only one process can open a
+    chip): the image's device host boots every member in phases and serializes their device
+    work, and each vLLM member keeps its own stock OpenAI server on its own port. The
+    runtime is the separate ``tt-cohost`` package; the image is an existing package image
+    plus tt-cohost pinned to a commit.
 
 Neither vLLM kind is called plain ``vllm``: a v4 manifest's ``runtime.kind = "vllm"``
 already means the fork, so reusing the bare word here would give one field two meanings
@@ -60,7 +67,7 @@ import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-from .boot_progress import HTTP_SERVER_PHASES, TT_DIT_PHASES, VLLM_PHASES, Phase
+from .boot_progress import COHOST_PHASES, HTTP_SERVER_PHASES, TT_DIT_PHASES, VLLM_PHASES, Phase
 from .manifest import (
     AUXILIARY_WEIGHTS_ENV, DEFAULT_PORT, WEIGHTS_REVISION_ENV, Manifest, ServeProfile,
 )
@@ -1163,11 +1170,183 @@ def _container_app(m: Manifest) -> str:
     return str(app)
 
 
+class CohostLauncher:
+    """``kind: cohost`` — several models served from ONE process that owns the chips.
+
+    Only one process can open a chip, so models that share chips share a process. The
+    runtime that does this is the separate ``tt-cohost`` package: its device host opens one
+    mesh, boots every member in phases and serializes their device work, and each vLLM
+    member keeps its own stock OpenAI server on its own port (``profile.port +
+    port_offset``); the host's status endpoint is the port after the last.
+
+    The image is built FROM an existing package image (``runtime.base_image``, whose
+    tt-metal, vLLM and plugin every member shares) plus tt-cohost pinned to a commit
+    (``runtime.tt_cohost``), optional extra ``packages`` and ``code`` — see
+    ``build.render_cohost_dockerfile``. No tt-metal build, so ``source:`` is not used.
+    """
+
+    name = "cohost"
+    REQUIRED_SERVE_FIELDS = ("hardware", "mesh_device")
+    RUNTIME_KEYS = ("members", "profiles", "tt_config", "base_image", "tt_cohost", "packages",
+                    "code", "lock")
+    MEMBER_KEYS = ("name", "kind", "model", "port_offset", "args", "env", "kv_tokens", "app", "preload")
+    BUILDS_FROM_IMAGE = True
+    LOCK_EXCLUDES: Tuple[str, ...] = ()
+    READY_LINE = "cohost: all members ready"
+    LAUNCH_MODULE = "tt_cohost.launch"
+    SERVER_DESC = "one OpenAI-compatible vLLM server per member"
+    OPENAI_COMPATIBLE = True
+    DEFAULT_PIPELINE_TAG: Optional[str] = "text-generation"
+
+    def validate(self, m) -> None:
+        from .container_manifest import ContainerManifestError, ExtraCode, GitSource
+
+        try:
+            self.members(m.runtime, None)
+            unknown = set(m.runtime.get("profiles") or {}) - set(m.profile_names())
+            if unknown:   # a typo would quietly serve every member under the intended profile
+                raise LauncherError(f"runtime.profiles {sorted(unknown)} name no serve profile")
+            for name in m.runtime.get("profiles") or {}:
+                self.members(m.runtime, name)
+        except LauncherError as e:
+            raise ContainerManifestError(str(e)) from None
+        if not hasattr(m, "source"):   # a published manifest: the build inputs are history
+            return
+        rt = m.runtime
+        if m.source is not None:
+            raise ContainerManifestError(
+                "kind cohost builds FROM runtime.base_image and takes no source: block; "
+                "ship extra code with runtime.code")
+        if not isinstance(rt.get("base_image"), str) or not rt["base_image"].strip():
+            raise ContainerManifestError(
+                "kind cohost requires runtime.base_image: the package image every member runs in "
+                "(e.g. tt-model/gpt-oss-20b-fast:<tag>)")
+        try:
+            GitSource.model_validate(rt.get("tt_cohost"))
+        except Exception:
+            raise ContainerManifestError(
+                "kind cohost requires runtime.tt_cohost: {repo, ref}, the tt-cohost commit the "
+                "image installs (ref is pinned to a sha at package time)") from None
+        packages = rt.get("packages") or []
+        if not isinstance(packages, list) or not all(isinstance(p, str) and p for p in packages):
+            raise ContainerManifestError("runtime.packages must be a list of pip requirement strings")
+        try:
+            for entry in rt.get("code") or []:
+                ExtraCode.model_validate(entry)
+        except Exception as e:
+            raise ContainerManifestError(f"runtime.code entries need root and paths: {e}") from None
+
+    def members(self, runtime: Dict[str, object], profile: Optional[str]) -> List[Dict[str, object]]:
+        """The members a profile serves, validated: unique names and port offsets."""
+        unknown = set(runtime) - set(self.RUNTIME_KEYS)
+        if unknown:
+            raise LauncherError(f"runtime key(s) {sorted(unknown)} are not valid for kind cohost")
+        members = runtime.get("members")
+        if not isinstance(members, list) or not members:
+            raise LauncherError("kind cohost requires runtime.members, a non-empty list")
+        for mem in members:
+            bad = set(mem) - set(self.MEMBER_KEYS) if isinstance(mem, dict) else {"<not a mapping>"}
+            if bad or not mem.get("name") or mem.get("kind") not in ("vllm", "app"):
+                raise LauncherError(f"runtime.members entry {mem!r}: needs name, kind vllm|app; "
+                                    f"unknown keys {sorted(bad)}")
+            if mem["kind"] == "vllm" and not mem.get("model"):
+                raise LauncherError(f"member {mem['name']}: a vllm member needs model")
+            if mem["kind"] == "app" and ":" not in str(mem.get("app", "")):
+                raise LauncherError(f"member {mem['name']}: an app member needs app = 'module:factory'")
+        kinds = [mem["kind"] for mem in members]
+        if "app" in kinds and "vllm" in kinds and kinds.index("app") < len(kinds) - 1 - kinds[::-1].index("vllm"):
+            raise LauncherError("a mixed group lists its vllm members before its app members (apps capture last)")
+        names = [mem["name"] for mem in members]
+        offsets = [int(mem.get("port_offset", 0)) for mem in members]
+        if len(set(names)) != len(names) or len(set(offsets)) != len(offsets) or min(offsets) < 0:
+            raise LauncherError("runtime.members need distinct names and distinct port_offset values >= 0")
+        chosen = (runtime.get("profiles") or {}).get(profile) if profile else None
+        if chosen is None:
+            return members
+        if not chosen:
+            raise LauncherError(f"runtime.profiles.{profile} lists no members")
+        missing = sorted(set(chosen) - set(names))
+        if missing:
+            raise LauncherError(f"runtime.profiles.{profile} names unknown member(s) {missing}")
+        return [mem for mem in members if mem["name"] in chosen]
+
+    # ---- build: FROM runtime.base_image (build.render_cohost_dockerfile) -----------------
+
+    def install_lines(self, m) -> List[str]:
+        raise LauncherError("kind cohost images are built FROM runtime.base_image; "
+                            "see build.render_cohost_dockerfile")
+
+    def verify_lines(self, m: "ContainerManifest") -> List[str]:
+        # One interpreter, after the launcher, resolved the way tt-cohost resolves them: a
+        # preload hook or app factory that cannot load fails the build, not the serve.
+        members = m.runtime.get("members") or []
+        checks = [f"import {self.LAUNCH_MODULE}"]
+        checks += [f"import {str(mem['preload']).split(':')[0]}" for mem in members if mem.get("preload")]
+        apps = [str(mem["app"]).split(":", 1) for mem in members if mem.get("kind") == "app"]
+        if apps:
+            checks.append("import importlib")
+            checks += [f"getattr(importlib.import_module({module!r}), {attr!r})" for module, attr in apps]
+        lines = [f'"$VENV/bin/python" -c {shlex.quote("; ".join(checks))}']
+        lines += [f'"$VENV/bin/python" -c {shlex.quote(v)}' for v in m.verify]
+        return lines
+
+    # ---- serve -------------------------------------------------------------------------
+
+    def _ports(self, m: Manifest, profile: ServeProfile) -> Dict[str, int]:
+        base = profile.port or DEFAULT_PORT
+        assert m.container is not None
+        return {mem["name"]: base + int(mem.get("port_offset", 0))
+                for mem in self.members(m.container.runtime, profile.name)}
+
+    def published_ports(self, m: Manifest, profile: ServeProfile) -> List[int]:
+        """Every port the container listens on: one per member, then the status port."""
+        ports = sorted(self._ports(m, profile).values())
+        return ports + [ports[-1] + 1]
+
+    def card_rows(self, m: Manifest, profile: ServeProfile) -> List[Tuple[str, ...]]:
+        """The ready card: every member's endpoint and kind, then the host's status endpoint."""
+        assert m.container is not None
+        ports = self._ports(m, profile)
+        rows = [(str(mem["name"]), f"http://127.0.0.1:{ports[mem['name']]}", str(mem["kind"]))
+                for mem in self.members(m.container.runtime, profile.name)]
+        return rows + [("status", f"http://127.0.0.1:{self.published_ports(m, profile)[-1]}")]
+
+    def group_config(self, m: Manifest, profile: ServeProfile) -> Dict[str, object]:
+        """The tt-cohost group config (``cohost_config_version: 1``) one profile serves."""
+        assert m.container is not None
+        ports = self._ports(m, profile)
+        members = [{"name": mem["name"], "kind": mem["kind"], "port": ports[mem["name"]],
+                    "model": mem.get("model", ""), "args": list(mem.get("args") or []),
+                    "env": dict(mem.get("env") or {}), "kv_tokens": int(mem.get("kv_tokens", 0)),
+                    "app": mem.get("app", ""), "preload": mem.get("preload", "")}
+                   for mem in self.members(m.container.runtime, profile.name)]
+        return {"cohost_config_version": 1, "mesh_device": profile.mesh_device, "members": members,
+                "tt_config": dict(m.container.runtime.get("tt_config") or {}),
+                "status_port": self.published_ports(m, profile)[-1]}
+
+    def serve_argv(self, m: Manifest, profile: ServeProfile) -> List[str]:
+        return ["python", "-m", self.LAUNCH_MODULE]
+
+    def serve_env(self, m: Manifest, profile: ServeProfile) -> Dict[str, str]:
+        # Inline, so serve needs no extra mount; tt-cohost reads TT_COHOST_CONFIG when no --config is given.
+        env = {"TT_COHOST_CONFIG": json.dumps(self.group_config(m, profile)),
+               "MESH_DEVICE": profile.mesh_device or ""}
+        env.update(profile.env)
+        return env
+
+    def ready_probe(self, m: Manifest) -> str:
+        return self.READY_LINE
+
+    def boot_phases(self, m: Manifest) -> Tuple[Phase, ...]:
+        return COHOST_PHASES
+
+
 KINDS: Dict[str, object] = {
     VllmPluginLauncher.name: VllmPluginLauncher(),
     VllmForkLauncher.name: VllmForkLauncher(),
     TtDitServerLauncher.name: TtDitServerLauncher(),
     HttpServerLauncher.name: HttpServerLauncher(),
+    CohostLauncher.name: CohostLauncher(),
 }
 
 # Used when a kind is unknown or predates ``REQUIRED_SERVE_FIELDS``.

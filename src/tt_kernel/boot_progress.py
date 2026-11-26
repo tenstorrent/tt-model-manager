@@ -47,6 +47,8 @@ class Phase:
     done: Tuple["re.Pattern[str]", ...] = ()
     #: line -> a short detail for the row ("2 chips · mesh (1, 2)"), or None
     detail: Optional[Callable[[str], Optional[str]]] = None
+    #: a tqdm bar in this phase counts the phase itself (False when it may be one member's)
+    counts: bool = True
 
 
 #: tqdm's textual bar: ` 12%|█▎        | 4/32 [00:12<01:22,  2.96s/it]`. Only the counts
@@ -160,6 +162,24 @@ TT_DIT_PHASES: Tuple[Phase, ...] = (
           start=_rx(r"[Ww]arm(?:ing)? ?up", r"Capturing trace", r"Compiling")),
 )
 
+#: a co-host group (kind: cohost): one device host, then every member's phased boot, logged
+#: by the host as "cohost: <member> <step>" lines. An app-only group starts no frontends, so
+#: the device row also starts on tt-metal's own open. A progress bar there is one member's
+#: (a decode loop during warmup, one model's shards), never the group's, so none is shown.
+COHOST_PHASES: Tuple[Phase, ...] = (
+    Phase("device", "opening Tenstorrent device", "Tenstorrent device opened",
+          start=_rx(r"cohost: started ", r"frontend connected", r"Opening user mode device driver"),
+          done=_rx(r"cohost mesh \S+ open"), counts=False),
+    Phase("weights", "loading every member", "members loaded",
+          start=_rx(r"cohost: \S+ load_model:"), counts=False),
+    Phase("warmup", "compiling every member", "members compiled",
+          start=_rx(r"cohost: \S+ compiled"), counts=False),
+    Phase("capture", "capturing traces in turn", "traces captured",
+          start=_rx(r"cohost: \S+ traces captured"), counts=False),
+    Phase("server", "starting the members' servers", "members ready",
+          start=_rx(r"cohost: \S+ ready on port"), counts=False),
+)
+
 #: a model's own HTTP server (kind: http-server): the boot is the runtime admission
 #: contract, then the device chain + warmup, then the server's own ready event. The
 #: model servers log structured JSON ("{"event": ...}") so the anchors are the event
@@ -251,7 +271,7 @@ class BootTracker:
 
     def _extract(self, phase: Phase, line: str) -> List[Event]:
         events: List[Event] = []
-        m = TQDM_RE.search(line)
+        m = TQDM_RE.search(line) if phase.counts else None
         if m:
             done, total = int(m.group(2)), int(m.group(3))
             if total > 0:
