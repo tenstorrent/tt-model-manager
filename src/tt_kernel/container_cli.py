@@ -1053,7 +1053,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                     local_only: bool = False,
                     no_weights: bool = False,
                     detach: bool = False,
-                    device_id: Optional[str] = None) -> None:
+                    device_id: Optional[str] = None,
+                    instance: Optional[str] = None) -> None:
     """Run one serve profile, and (unless ``detach``) watch it boot.
 
     The boot is shown as a checklist of its landmarks -- device opened, weights loaded, KV
@@ -1135,8 +1136,12 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
             marker="•",
         )
 
-    name = container.container_name(manifest, profile)
+    if instance:
+        container.check_instance_name(instance)
+    name = container.container_name(manifest, profile, instance)
     what = target or manifest.name
+    if instance:
+        what = f"{what} --name {instance}"
     if not print_only:
         # Both checks sit ahead of every expensive step below (the image self-heal can
         # re-pull a multi-GB image; ensure_weights can fetch hundreds of GB). is_running
@@ -1286,7 +1291,8 @@ def serve_container(manifest: Manifest, *, profile_name: Optional[str] = None,
                 container.remove(name, force=True)
             run_argv = container.compose_run(manifest, profile, argv, env, detach=True,
                                              device_ids=ids,
-                                             rootless=container.docker_is_rootless())
+                                             rootless=container.docker_is_rootless(),
+                                             instance=instance)
             try:
                 container.run_checked(run_argv)
             except container.ContainerError:
@@ -1374,12 +1380,14 @@ def _ready_card(name: str, endpoint: str, target: str):
 # ------------------------------------------------------------------------ stop / logs
 
 
-def _live_containers(manifest: Manifest, profile_name: Optional[str] = None) -> List[str]:
+def _live_containers(manifest: Manifest, profile_name: Optional[str] = None,
+                     instance: Optional[str] = None) -> List[str]:
     """Names of this package's containers that are actually RUNNING, default profile first.
 
     ``container.running()`` lists ``docker ps --all`` — an exited container of another
     profile matched it too, so `logs`/`stop` without --profile could pick a dead container
     over the live default. Only ``is_running`` (the inspect state field) answers "is it up".
+    Named instances (``serve --name``) follow the unnamed ones unless ``instance`` picks one.
     """
     spec = manifest.container
     assert spec is not None
@@ -1388,8 +1396,13 @@ def _live_containers(manifest: Manifest, profile_name: Optional[str] = None) -> 
     else:
         default = spec.resolved_default()
         order = [default] + [n for n in spec.profile_names() if n != default]
-    names = [container.container_name(manifest, spec.resolve_profile(n)) for n in order]
-    return [n for n in names if container.is_running(n)]
+    names = [container.container_name(manifest, spec.resolve_profile(n), instance) for n in order]
+    live = [n for n in names if container.is_running(n)]
+    if instance is None:
+        named = [r for r in container.labelled_containers(model=manifest.name)
+                 if r["instance"] and r["profile"] in order]
+        live += [r["name"] for r in sorted(named, key=lambda r: (order.index(r["profile"]), r["instance"]))]
+    return live
 
 
 # The one-line step detail per StopOutcome.reset (see container.StopOutcome).
@@ -1435,9 +1448,10 @@ def _warn_dirty_stop(reset: str) -> None:
                  marker="⚠", style="warning")
 
 
-def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) -> None:
+def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None,
+                   instance: Optional[str] = None) -> None:
     stopped = 0
-    for name in _live_containers(manifest, profile_name):
+    for name in _live_containers(manifest, profile_name, instance):
         stopped += 1
         with console.step(f"stopping {name}") as st:
             outcome = container.stop(name, image=container.image_ref(manifest))
@@ -1451,10 +1465,11 @@ def stop_container(manifest: Manifest, *, profile_name: Optional[str] = None) ->
 
 
 def logs_container(manifest: Manifest, *, profile_name: Optional[str] = None,
-                   follow: bool = False, target: Optional[str] = None) -> int:
-    for name in _live_containers(manifest, profile_name):
+                   follow: bool = False, target: Optional[str] = None,
+                   instance: Optional[str] = None) -> int:
+    for name in _live_containers(manifest, profile_name, instance):
         return container.logs(name, follow=follow)
-    what = target or manifest.name
+    what = (target or manifest.name) + (f" --name {instance}" if instance else "")
     raise ContainerCliError(
         f"no running container for {manifest.name}. Start it:  tt-model serve {what}"
     )
@@ -1564,8 +1579,9 @@ def remove_container(repo_id: str, manifest: Manifest, *, keep_cache: bool = Fal
 
     # 1. any containers, running or not
     stopped = 0
-    for n in spec.profile_names():
-        cname = container.container_name(manifest, spec.resolve_profile(n))
+    names = {container.container_name(manifest, spec.resolve_profile(n)) for n in spec.profile_names()}
+    names |= {r["name"] for r in container.labelled_containers(model=manifest.name, all_states=True)}
+    for cname in sorted(names):
         if container.container_exists(cname):
             container.remove(cname, force=True)
             stopped += 1

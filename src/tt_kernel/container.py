@@ -55,6 +55,9 @@ LABEL = "org.tenstorrent.tt-model"
 #: directory). Read back by ``stop`` to scope a dirty-mesh reset, and by ``pick_free_devices``
 #: to know exactly what one of our own containers holds without re-parsing its device mounts.
 DEVICES_LABEL = f"{LABEL}.devices"
+#: Instance name of a serve started with ``--name``, so one model+profile can run more than once.
+INSTANCE_LABEL = f"{LABEL}.instance"
+_INSTANCE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 #: Namespace for DESCRIPTIVE labels a UI (e.g. TT Studio) reads so it does not have to
 #: reverse-engineer a served package from its repo name, image name, or routes (issue #140).
@@ -140,6 +143,8 @@ MIN_DOCKER_MAJOR = 25
 HUGEPAGES_MOUNT = "/dev/hugepages-1G"
 
 TT_DEVICE = "/dev/tenstorrent"
+#: sysfs class of the KMD; each ``tenstorrent!N`` entry has the chip's board ``tt_serial``.
+TT_SYS_CLASS = "/sys/class/tenstorrent"
 
 
 @dataclass(frozen=True)
@@ -547,8 +552,59 @@ def all_device_ids(dev_root: Optional[Path] = None) -> List[int]:
         raise DeviceScanUnavailable(f"could not list {root}: {e}") from e
 
 
-def pick_free_devices(count: int, *, dev_root: Optional[Path] = None) -> List[int]:
-    """The lowest ``count`` chip indices not already claimed by any running container.
+def chip_boards(sys_root: Optional[Path] = None) -> Dict[int, str]:
+    """Chip id -> board serial from sysfs (both chips of a P300 share one); {} when unreadable."""
+    root = sys_root or Path(TT_SYS_CLASS)
+    boards: Dict[int, str] = {}
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return boards
+    for entry in entries:
+        m = re.fullmatch(r"tenstorrent!(\d+)", entry.name)
+        if not m:
+            continue
+        try:
+            serial = (entry / "tt_serial").read_text().strip()
+        except OSError:
+            continue
+        if serial:
+            boards[int(m.group(1))] = serial
+    return boards
+
+
+def _choose_chips(free: Sequence[int], count: int, boards: Dict[int, str]) -> Optional[List[int]]:
+    """Pick ``count`` of the ``free`` chips: whole boards for a multi-chip mesh, and a chip
+    from an already part-used board for a smaller one. None when no whole boards are left."""
+    members: Dict[str, List[int]] = {}
+    for chip, serial in boards.items():
+        members.setdefault(serial, []).append(chip)
+    sizes = {len(m) for m in members.values()}
+    if not boards or not set(free) <= set(boards) or len(sizes) != 1:
+        return sorted(free)[:count]
+    size = sizes.pop()
+    if count >= size > 1 and count % size == 0:
+        whole = sorted((sorted(m) for m in members.values() if set(m) <= set(free)), key=min)
+        if len(whole) < count // size:
+            return None
+        return sorted(c for m in whole[:count // size] for c in m)
+    # Fewer chips than a board: fill boards that are already partly in use first.
+    free_on_board = {s: sum(c in free for c in m) for s, m in members.items()}
+    return sorted(sorted(free), key=lambda c: (free_on_board[boards[c]], c))[:count]
+
+
+def free_hugepages_1g(sys_root: Path = Path("/sys/kernel/mm/hugepages/hugepages-1048576kB")) -> Optional[int]:
+    """Free 1G hugepages (UMD maps one per opened chip), or None when the pool cannot be read."""
+    try:
+        return int((sys_root / "free_hugepages").read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def pick_free_devices(count: int, *, dev_root: Optional[Path] = None,
+                      sys_root: Optional[Path] = None) -> List[int]:
+    """``count`` chip indices not already claimed by any running container, chosen by
+    ``_choose_chips``: whole boards for a multi-chip mesh, else the lowest free ids.
 
     Ascending and deterministic: the common, uncontended case always lands on the same low
     indices, which matches what a model's own hardcoded env (if any) is likely to assume --
@@ -580,7 +636,14 @@ def pick_free_devices(count: int, *, dev_root: Optional[Path] = None) -> List[in
             f"(chip(s) {', '.join(map(str, sorted(claimed))) or 'none'} in use); "
             f"this profile needs {count}"
         )
-    return free[:count]
+    chosen = _choose_chips(free, count, chip_boards(sys_root))
+    if chosen is None:
+        raise ContainerError(
+            f"chip(s) {', '.join(map(str, free))} are free but do not make up {count} chip(s) "
+            "on whole boards, which a multi-chip mesh needs; stop the serve that shares a "
+            "board with them, or pin chips with --device-id"
+        )
+    return chosen
 
 
 def ensure_devices_free(device_ids: Sequence[int], *,
@@ -630,10 +693,41 @@ def image_ref(m: Manifest) -> str:
     return image.pull_ref or image.tag
 
 
-def container_name(m: Manifest, profile: ServeProfile) -> str:
-    """One running container per (model, profile) — so two profiles of the same model
-    are distinguishable in ``docker ps`` and stoppable independently."""
-    return f"tt-model-{m.name}-{profile.name}"
+def check_instance_name(instance: str) -> None:
+    """Refuse an instance name docker or a hostname-style label would choke on."""
+    if not _INSTANCE_RE.match(instance):
+        raise ContainerError(
+            f"instance name {instance!r}: use 1-32 lowercase letters, digits and dashes, "
+            "starting with a letter or digit"
+        )
+
+
+def container_name(m: Manifest, profile: ServeProfile, instance: Optional[str] = None) -> str:
+    """One container per (model, profile, instance); the ``.`` keeps an instance from
+    colliding with a dash-named profile."""
+    base = f"tt-model-{m.name}-{profile.name}"
+    return f"{base}.{instance}" if instance else base
+
+
+def labelled_containers(*, model: Optional[str] = None, instance: Optional[str] = None,
+                        all_states: bool = False) -> List[Dict[str, str]]:
+    """tt-model containers (running only, unless ``all_states``) with the labels that say
+    which model, profile, instance, port and chips each one is."""
+    labels = {"model": LABEL, "profile": f"{LABEL}.profile", "instance": INSTANCE_LABEL,
+              "port": f"{DESCRIPTOR_LABEL_NS}.port", "devices": DEVICES_LABEL}
+    fmt = "\t".join(["{{.Names}}", "{{.Status}}"]
+                    + [f'{{{{.Label "{v}"}}}}' for v in labels.values()])
+    argv = ["docker", "ps", "--filter", f"label={LABEL}={model}" if model else f"label={LABEL}"]
+    if instance:
+        argv += ["--filter", f"label={INSTANCE_LABEL}={instance}"]
+    if all_states:
+        argv.append("--all")
+    rows = []
+    for line in run_or_empty(argv + ["--format", fmt]).splitlines():
+        parts = line.split("\t")
+        if len(parts) == 2 + len(labels):
+            rows.append(dict(zip(["name", "status", *labels], parts)))
+    return rows
 
 
 def hf_home() -> Path:
@@ -741,6 +835,7 @@ def compose_run(
     hub_cache_dir: Optional[Path] = None,
     include_hf_token: Optional[bool] = None,
     rootless: bool = False,
+    instance: Optional[str] = None,
 ) -> List[str]:
     """The full ``docker run`` argv for one serve profile.
 
@@ -779,12 +874,14 @@ def compose_run(
     # Bind-mount sources must exist before `docker run`, or the daemon creates them as
     # ROOT and the container (running as the host user) cannot write them.
     cmd += [
-        "--name", container_name(m, profile),
+        "--name", container_name(m, profile, instance),
         # write as the host user: see `container_user`
         "--user", container_user(rootless=rootless),
         "--label", f"{LABEL}={m.name}",
         "--label", f"{LABEL}.profile={profile.name}",
     ]
+    if instance:
+        cmd += ["--label", f"{INSTANCE_LABEL}={instance}"]
     # Descriptive labels so a UI can read what this package is instead of guessing (issue #140).
     for k, v in descriptor_labels(m, profile, port).items():
         cmd += ["--label", f"{k}={v}"]

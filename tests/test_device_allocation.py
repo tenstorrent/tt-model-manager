@@ -242,6 +242,74 @@ def test_pick_free_devices_raises_scan_unavailable_when_the_host_cant_be_read(tm
         container.pick_free_devices(1, dev_root=_dev_root(tmp_path))
 
 
+def _sys_root(tmp_path, serials=None):
+    """A fake ``/sys/class/tenstorrent``: a QB2 by default (two P300 boards, two chips each)."""
+    root = tmp_path / "sys-tenstorrent"
+    for chip, serial in (serials or {0: "BOARD-A", 1: "BOARD-A", 2: "BOARD-B", 3: "BOARD-B"}).items():
+        (root / f"tenstorrent!{chip}").mkdir(parents=True)
+        (root / f"tenstorrent!{chip}" / "tt_serial").write_text(serial + "\n")
+    return root
+
+
+def test_chip_boards_reads_each_chips_board_serial(tmp_path):
+    assert container.chip_boards(_sys_root(tmp_path)) == {
+        0: "BOARD-A", 1: "BOARD-A", 2: "BOARD-B", 3: "BOARD-B"}
+
+
+def test_chip_boards_is_empty_without_sysfs(tmp_path):
+    assert container.chip_boards(tmp_path / "nope") == {}
+
+
+def test_a_two_chip_pick_takes_a_whole_board_not_the_lowest_free_ids(tmp_path, monkeypatch, real_picker):
+    """Chip 0 busy on a QB2: [1, 2] would straddle both boards, which a 1x2 mesh cannot open."""
+    _fake_docker(monkeypatch, ps_ids=["a"], inspected=[
+        _container(devices=[{"PathOnHost": "/dev/tenstorrent/0"}]),
+    ])
+    assert container.pick_free_devices(
+        2, dev_root=_dev_root(tmp_path), sys_root=_sys_root(tmp_path)) == [2, 3]
+
+
+@pytest.mark.parametrize("count, busy, want", [
+    (2, [], [0, 1]),
+    (4, [], [0, 1, 2, 3]),
+    (1, [], [0]),
+    (1, [0], [1]),   # fill the part-used board, keep {2, 3} whole for a 2-chip serve
+    (1, [2], [3]),
+])
+def test_board_aware_choices(tmp_path, monkeypatch, real_picker, count, busy, want):
+    _fake_docker(monkeypatch, ps_ids=["a"] if busy else [], inspected=[
+        _container(devices=[{"PathOnHost": f"/dev/tenstorrent/{c}"} for c in busy]),
+    ])
+    assert container.pick_free_devices(
+        count, dev_root=_dev_root(tmp_path), sys_root=_sys_root(tmp_path)) == want
+
+
+def test_a_multi_chip_pick_refuses_free_chips_that_straddle_boards(tmp_path, monkeypatch, real_picker):
+    _fake_docker(monkeypatch, ps_ids=["a"], inspected=[
+        _container(devices=[{"PathOnHost": "/dev/tenstorrent/1"}, {"PathOnHost": "/dev/tenstorrent/2"}]),
+    ])
+    with pytest.raises(container.ContainerError, match="whole boards"):
+        container.pick_free_devices(2, dev_root=_dev_root(tmp_path), sys_root=_sys_root(tmp_path))
+
+
+def test_without_board_info_the_pick_stays_lowest_first(tmp_path, monkeypatch, real_picker):
+    _fake_docker(monkeypatch, ps_ids=["a"], inspected=[
+        _container(devices=[{"PathOnHost": "/dev/tenstorrent/0"}]),
+    ])
+    assert container.pick_free_devices(
+        2, dev_root=_dev_root(tmp_path), sys_root=tmp_path / "nope") == [1, 2]
+
+
+def test_single_chip_cards_are_picked_lowest_first(tmp_path, monkeypatch, real_picker):
+    """Four p150 cards: every board is one chip, so any free chips make a valid set."""
+    _fake_docker(monkeypatch, ps_ids=["a"], inspected=[
+        _container(devices=[{"PathOnHost": "/dev/tenstorrent/0"}]),
+    ])
+    serials = {0: "S0", 1: "S1", 2: "S2", 3: "S3"}
+    assert container.pick_free_devices(
+        2, dev_root=_dev_root(tmp_path), sys_root=_sys_root(tmp_path, serials)) == [1, 2]
+
+
 # ------------------------------------------------------------------------ ensure_devices_free
 
 
