@@ -396,8 +396,8 @@ def _device_flags(argv):
 def test_scoped_ids_become_one_device_flag_per_chip():
     argv = _run_argv(_wire(), device_ids=[1, 2])
     assert _device_flags(argv) == [
-        "/dev/tenstorrent/1:/dev/tenstorrent/1",
-        "/dev/tenstorrent/2:/dev/tenstorrent/2",
+        "/dev/tenstorrent/1:/dev/tenstorrent/0",
+        "/dev/tenstorrent/2:/dev/tenstorrent/1",
     ]
     assert "/dev/tenstorrent" not in argv  # never the whole directory alongside them
 
@@ -435,6 +435,10 @@ def test_an_author_set_mesh_graph_descriptor_is_never_overridden():
 
 
 def test_the_reset_container_is_scoped_to_the_same_ids():
+    # Host-to-host on purpose, unlike compose_run: the reset entrypoint is
+    # `tt-smi -r all`, which resets by device node directly and has no 0-based
+    # Cluster requirement, so renumbering the nodes there would only obscure
+    # which physical chip is being reset.
     argv = container.compose_reset_mesh("img", device_ids=[2, 3])
     assert _device_flags(argv) == [
         "/dev/tenstorrent/2:/dev/tenstorrent/2",
